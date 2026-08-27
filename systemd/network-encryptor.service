@@ -1,0 +1,25 @@
+[Unit]
+Description=Network Encryptor
+After=network.target postgresql.service vault.service
+Before=be.service
+[Service]
+Environment="LD_LIBRARY_PATH=/usr/bin/bin-ne/lib"
+Type=simple
+User=root
+EnvironmentFile=/opt/SEP/be/.env
+WorkingDirectory=/usr/bin/bin-ne
+ExecStart=/usr/bin/bin-ne/network-encryptor
+Restart=always
+RestartSec=5s
+TimeoutStopSec=5s
+
+[Install]
+WantedBy=multi-user.target
+# ln -s /usr/bin/bin-ne/network-encryptor /usr/local/bin/network-encryptor
+# /etc/ld.so.conf.d/network-encryptor.conf
+# ldconfig
+# ethtool -K <interface> gro off lro off
+# ethtool -K <interface> tso off gso off
+# ethtool -k eno2 | grep generic-receive-offload
+# ethtool -K eno2 gro on
+# ln -s libxdp.so.1.6.0 lib/libxdp.so
