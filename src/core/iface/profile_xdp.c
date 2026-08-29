@@ -55,7 +55,7 @@ static void profile_iface_xdp_link_off(const char *ifname)
         return;
 
     profile_xdp_stop_log("detach begin", ifname);
-    /* ip link only — bpf_xdp_detach on ice can block forever when no prog
+    /* ip link only — bpf_xdp_detach can block forever when no prog
      * is attached (post-crash scrub) or after bpf_object__close already ran. */
     snprintf(cmd, sizeof(cmd), "/sbin/ip link set dev %s xdp off >/dev/null 2>&1",
              ifname);
@@ -261,6 +261,7 @@ static void update_wan_fake_ethertype(struct bpf_object *obj, uint16_t fake_ethe
     struct bpf_map *map;
     int key = 0;
     uint16_t et = (uint16_t)NE_L2_FAKE_ETHERTYPE;
+    uint16_t udp_et = (uint16_t)NE_L2_FAKE_ETHERTYPE_UDP;
 
     (void)fake_ethertype_ipv4;
     if (!obj) {
@@ -270,7 +271,9 @@ static void update_wan_fake_ethertype(struct bpf_object *obj, uint16_t fake_ethe
     if (!map) {
         return;
     }
-    (void)bpf_map_update_elem(bpf_map__fd(map),&key, &et, BPF_ANY);
+    (void)bpf_map_update_elem(bpf_map__fd(map), &key, &et, BPF_ANY);
+    key = 1;
+    (void)bpf_map_update_elem(bpf_map__fd(map), &key, &udp_et, BPF_ANY);
 }
 
 int profile_iface_xdp_bind_local(struct ne_pair *p, const struct app_config *cfg, int pair_li)

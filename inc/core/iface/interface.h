@@ -121,6 +121,8 @@ int ne_pair_teardown_live(struct ne_pair *p);
 int ne_ring_init(struct ne_ring *r, uint32_t cap, int mpsc_pop);
 void ne_ring_destroy(struct ne_ring *r);
 int ne_ring_try_push(struct ne_ring *r, const struct ne_packet *pkt);
+int ne_ring_try_push_pair(struct ne_ring *r, const struct ne_packet *first,
+                          const struct ne_packet *second);
 int ne_ring_try_pop(struct ne_ring *r, struct ne_packet *pkt);
 uint32_t ne_ring_count(const struct ne_ring *r);
 

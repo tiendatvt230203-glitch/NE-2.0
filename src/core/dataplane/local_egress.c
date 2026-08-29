@@ -48,17 +48,11 @@ static int push_split_to_wan(struct forwarder *fwd, struct ne_packet *job,
     job->len = l1;
     job->dir = NE_DIR_WAN;
     job->wan_idx = (uint8_t)wan_dp;
-    if (ne_ring_try_push(tx, job) != 0) {
+    if (ne_ring_try_push_pair(tx, job, tail) != 0) {
         ne_frame_free(&fwd->pair, tail->addr);
         return -1;
     }
     ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
-    if (ne_ring_try_push(tx, tail) != 0) {
-        /* Head already queued; drop only the tail fragment. */
-        ne_frame_free(&fwd->pair, tail->addr);
-    } else {
-        ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
-    }
     return 0;
 }
 
@@ -94,9 +88,20 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
     uint32_t len = job->len;
     uint32_t l1 = 0, l2 = 0;
     crypto_option_id opt_id = CRYPTO_OPT_L2_PQC;
+    uint32_t bond_seq;
 
     (void)flow_ok;
     (void)cp;
+
+    if (pclass == CRYPTO_PROTO_TCP) {
+        if (!flow_ok || dp_tcp_next_tx_seq(pkt, len, &bond_seq) != 0)
+            return -1;
+        crypto_option_tcp_set_tx_seq(bond_seq);
+    } else if (pclass == CRYPTO_PROTO_UDP) {
+        if (!flow_ok || dp_udp_next_tx_seq(pkt, len, &bond_seq) != 0)
+            return -1;
+        crypto_option_udp_set_tx_seq(bond_seq);
+    }
 
     if (crypto_option_need_split(opt_id, pclass, len)) {
         if (split_tail_take(fwd, worker_idx, &tail.addr) != 0)
@@ -144,6 +149,8 @@ static int pick_profile_policy(struct forwarder *fwd, int local_idx, int flow_ok
         : NULL;
     if (!c)
         return -1;
+    if (c->action != POLICY_ACTION_BYPASS && c->action != POLICY_ACTION_ENCRYPT_L2)
+        return -1;
     *profile_idx = 0;
     *cp = c;
     return 0;
@@ -171,6 +178,8 @@ int dataplane_local_needs_mid(struct forwarder *fwd, const uint8_t *pkt, uint32_
     if (pick_profile_policy(fwd, local_idx, flow_ok, src_ip, dst_ip, src_port, dst_port,
                             proto, &profile_idx, &cp) != 0)
         return 0;
+    /* Unsupported legacy encryption policies must enter the crypto path and
+     * be rejected there, never fall through as plaintext bypass traffic. */
     return cp && cp->action != POLICY_ACTION_BYPASS;
 }
 
@@ -203,8 +212,7 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
                             &profile_idx, &cp) != 0)
         goto drop;
     wan_dp = fwd_wan_pick_for_local(fwd, profile_idx, flow_ok, src_ip, dst_ip,
-                                    src_port, dst_port, proto,
-                                    dp_flow_window_bytes(pkt, job.len, job.len));
+                                    src_port, dst_port, proto);
     if (wan_dp < 0 || !fwd_wan_has_tx_room(fwd,wan_dp))
         goto drop;
 

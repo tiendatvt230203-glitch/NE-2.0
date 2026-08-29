@@ -221,10 +221,6 @@ int config_validate(struct app_config *cfg) {
             return -1;
         }
 
-        if (wan->window_size == 0) {
-            fprintf(stderr, "WAN %s: window_kb not specified\n", wan->ifname);
-            return -1;
-        }
     }
 
     return 0;

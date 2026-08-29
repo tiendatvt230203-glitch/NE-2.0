@@ -6,11 +6,13 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <limits.h>
 
 #include "pqc_ipc.h"
 #include "pqc_handshake.h"
 #include "traffic_crypto.h"
 #include "pqc_vault.h"
+#include "core/forwarder/forwarder_crypto_runtime.h"
 
 #define IPC_SOCKET_PATH "/var/run/test_network-encryptor.sock"
 
@@ -64,6 +66,17 @@ static void *ipc_listener_thread_main(void *arg) {
                 if (write(client_fd, resp_buf, strlen(resp_buf)) < 0) {
                     perror("write");
                 }
+            } else if (sscanf(buf, "TIMEKEY %d", &policy_id) == 1) {
+                char resp_buf[256];
+
+                memset(resp_buf, 0, sizeof(resp_buf));
+                if (fwd_crypto_format_pqc_key_times(resp_buf,
+                                                    sizeof(resp_buf) - 1,
+                                                    policy_id) != 0)
+                    snprintf(resp_buf, sizeof(resp_buf),
+                             "ERROR: cannot read PQC key times\n");
+                if (write(client_fd, resp_buf, strlen(resp_buf)) < 0)
+                    perror("write");
             } else {
                 if (write(client_fd, "ERROR: invalid command\n", 23) < 0) {
                     perror("write");
@@ -85,6 +98,64 @@ void sig_pqc_start_ipc_server(void) {
 }
 
 int sig_pqc_handle_ipc_cli(int argc, char **argv) {
+    if (argc >= 2 && (strcmp(argv[1], "-tk") == 0 ||
+                      strcmp(argv[1], "--time-key") == 0)) {
+        int policy_id;
+        int client_fd;
+        char msg[64];
+        char resp[256];
+        int n;
+
+        if (argc < 3) {
+            fprintf(stderr, "Usage: %s -tk <policy_id>\n", argv[0]);
+            return 1;
+        }
+        char *end = NULL;
+        long parsed = strtol(argv[2], &end, 10);
+        if (!end || *end != '\0' || parsed <= 0 || parsed > INT_MAX) {
+            fprintf(stderr, "[PQC-CLI] Invalid policy_id.\n");
+            return 1;
+        }
+        policy_id = (int)parsed;
+
+        client_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (client_fd < 0) {
+            perror("[PQC-CLI] Failed to create socket");
+            return 1;
+        }
+
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, IPC_SOCKET_PATH, sizeof(addr.sun_path) - 1);
+
+        if (connect(client_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            fprintf(stderr, "[PQC-CLI] Daemon is not running.\n");
+            close(client_fd);
+            return 1;
+        }
+
+        snprintf(msg, sizeof(msg), "TIMEKEY %d\n", policy_id);
+        if (write(client_fd, msg, strlen(msg)) < 0) {
+            perror("[PQC-CLI] write");
+            close(client_fd);
+            return 1;
+        }
+
+        memset(resp, 0, sizeof(resp));
+        n = read(client_fd, resp, sizeof(resp) - 1);
+        close(client_fd);
+        if (n > 0) {
+            resp[n] = '\0';
+            fputs(resp, stdout);
+            if (n > 0 && resp[n - 1] != '\n')
+                fputc('\n', stdout);
+            return 0;
+        }
+        fprintf(stderr, "[PQC-CLI] No response for -tk.\n");
+        return 1;
+    }
+
     if (argc >= 3 && (strcmp(argv[1], "-r") == 0 || strcmp(argv[1], "--retry-policy") == 0)) {
         int policy_id = atoi(argv[2]);
         int client_fd = socket(AF_UNIX, SOCK_STREAM, 0);

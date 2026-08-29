@@ -20,7 +20,6 @@
 
 #define ARP_LOG_FAIL_INTERVAL_MS 30000ull
 #define ARP_DEFAULT_WIRE_ID      250u
-#define ARP_DEFAULT_AES_BITS     256
 #define ARP_ETH_HDR_LEN          14u
 
 /* 1 = mã hóa ARP L2-PQC (key/option riêng), độc lập bảng policy/data crypto.
@@ -66,11 +65,9 @@ static void arp_crypto_ctx_init(const struct app_config *cfg)
     }
     if (g_arp_crypto_ctx_ready)
         return;
-    if (packet_crypto_init(&g_arp_crypto_ctx, g_arp_default_master_key,
-                           ARP_DEFAULT_AES_BITS) != 0)
+    if (packet_crypto_init(&g_arp_crypto_ctx, g_arp_default_master_key) != 0)
         return;
     g_arp_crypto_ctx.initialized = true;
-    g_arp_crypto_ctx.crypto_mode = CRYPTO_MODE_PQC;
     g_arp_crypto_ctx.wire_id = (uint8_t)ARP_DEFAULT_WIRE_ID;
     g_arp_crypto_ctx.policy_id = 0;
     g_arp_crypto_ctx.profile_id = 0;

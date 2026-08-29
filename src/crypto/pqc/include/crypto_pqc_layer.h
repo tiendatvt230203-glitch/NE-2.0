@@ -7,6 +7,7 @@
 #include "pqc_handshake.h"
 #include "scrypt.h"
 #include <stdio.h>
+#include <string.h>
 
 typedef struct crypto_pqc_sess {
     const uint8_t *key;
@@ -105,6 +106,55 @@ static inline int crypto_pqc_decrypt_payload(const crypto_pqc_sess_t *sess,
     rc = trf_decrypt_payload_gcm(c, sess->key, nonce, CRYPTO_PQC_NONCE_BYTES,
                                  sess->aad, sess->aad_len, data, len, out_len);
     return rc == TRF_PQC_OK ? 0 : -1;
+}
+
+/* Encrypt always uses CURRENT. During a confirmed rotation the peer may move
+ * first, so decrypt accepts staged NEXT as well as the grace-period PREV. */
+static inline int crypto_pqc_decrypt_payload_resilient(
+    struct packet_crypto_ctx *ctx,
+    const byte nonce[CRYPTO_PQC_NONCE_BYTES],
+    byte *data, int len, int *out_len)
+{
+    crypto_pqc_sess_t sess;
+    const byte *keys[KEY_SLOT_COUNT];
+    const int order[KEY_SLOT_COUNT] = {
+        KEY_SLOT_CURRENT, KEY_SLOT_NEXT, KEY_SLOT_PREV
+    };
+    byte saved[2048];
+    int attempted = 0;
+
+    if (!ctx || !data || len <= 0 || len > (int)sizeof(saved))
+        return -1;
+    memcpy(saved, data, (size_t)len);
+    for (int i = 0; i < KEY_SLOT_COUNT; i++)
+        keys[i] = packet_crypto_get_key(ctx, i);
+
+    sess.aad = HARDCODED_AAD;
+    sess.aad_len = 12;
+    for (int oi = 0; oi < KEY_SLOT_COUNT; oi++) {
+        const byte *candidate = keys[order[oi]];
+        int duplicate = 0;
+
+        if (!candidate ||
+            crypto_pqc_key_is_all_zero(candidate, PQC_TRAFFIC_KEY_SZ))
+            continue;
+        for (int pj = 0; pj < oi; pj++) {
+            const byte *prior = keys[order[pj]];
+            if (prior && memcmp(prior, candidate, PQC_TRAFFIC_KEY_SZ) == 0) {
+                duplicate = 1;
+                break;
+            }
+        }
+        if (duplicate)
+            continue;
+        if (attempted)
+            memcpy(data, saved, (size_t)len);
+        sess.key = candidate;
+        attempted = 1;
+        if (crypto_pqc_decrypt_payload(&sess, nonce, data, len, out_len) == 0)
+            return 0;
+    }
+    return -1;
 }
 
 #endif

@@ -90,15 +90,11 @@ static int alloc_wire_policy_id(int db_row_id, uint8_t *used) {
 }
 
 static int parse_action_name(const char *v) {
-    if (!v) return POLICY_ACTION_BYPASS;
+    if (!v) return -1;
     if (strcasecmp(v, "bypass") == 0) return POLICY_ACTION_BYPASS;
     if (strcasecmp(v, "L2") == 0 || strcasecmp(v, "encrypt_l2") == 0 || strcasecmp(v, "encrypt l2") == 0)
         return POLICY_ACTION_ENCRYPT_L2;
-    if (strcasecmp(v, "L3") == 0 || strcasecmp(v, "encrypt_l3") == 0 || strcasecmp(v, "encrypt l3") == 0)
-        return POLICY_ACTION_ENCRYPT_L3;
-    if (strcasecmp(v, "L4") == 0 || strcasecmp(v, "encrypt_l4") == 0 || strcasecmp(v, "encrypt l4") == 0)
-        return POLICY_ACTION_ENCRYPT_L4;
-    return atoi(v);
+    return -1;
 }
 
 static int parse_cidr_any_or_negated(const char *v_in, int *any_out, int *neg_out,
@@ -195,44 +191,6 @@ static int ne_fill_nullable_list(const char *joined, int pq_null,
         return -1;
     }
     return n;
-}
-
-static int ne_parse_method(const char *v, int pq_null, int *crypto_mode_out, int *aes_bits_out) {
-    if (pq_null || !v || !v[0]) {
-        *crypto_mode_out = CRYPTO_MODE_GCM;
-        *aes_bits_out = 128;
-        return 0;
-    }
-    if (strcasecmp(v, "aes-gcm-128") == 0) {
-        *crypto_mode_out = CRYPTO_MODE_GCM;
-        *aes_bits_out = 128;
-        return 0;
-    }
-    if (strcasecmp(v, "aes-gcm-256") == 0) {
-        *crypto_mode_out = CRYPTO_MODE_GCM;
-        *aes_bits_out = 256;
-        return 0;
-    }
-    if (strcasecmp(v, "aes-ctr-128") == 0) {
-        *crypto_mode_out = CRYPTO_MODE_CTR;
-        *aes_bits_out = 128;
-        return 0;
-    }
-    if (strcasecmp(v, "aes-ctr-256") == 0) {
-        *crypto_mode_out = CRYPTO_MODE_CTR;
-        *aes_bits_out = 256;
-        return 0;
-    }
-
-    if (strcasecmp(v, "pqc-gcm") == 0) {
-        *crypto_mode_out = CRYPTO_MODE_PQC;
-        *aes_bits_out = 256;
-        return 0;
-    }
-    /* BE validates method; default for unexpected values */
-    *crypto_mode_out = CRYPTO_MODE_GCM;
-    *aes_bits_out = 128;
-    return 0;
 }
 
 static void ne_cidr_buf_with_invert(char *buf, size_t bufsz, const char *tok, int invert_db) {
@@ -500,8 +458,7 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
         "array_to_string(src_ip, ','), invert_src_ip, "
         "array_to_string(dst_ip, ','), invert_dst_ip, "
         "array_to_string(src_port, ','), "
-        "array_to_string(dst_port, ','), "
-        "method, encryption_key "
+        "array_to_string(dst_port, ',') "
         "FROM ne_policies WHERE profile_id = $1 ORDER BY priority ASC, id ASC",
         1, NULL, params, NULL, NULL, 0);
 
@@ -524,6 +481,12 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
         cp_base.db_id = db_policy_id;
         cp_base.priority = atoi(PQgetvalue(res, r, 1));
         cp_base.action = parse_action_name(PQgetvalue(res, r, 2));
+        if (cp_base.action < 0) {
+            fprintf(stderr, "[DB CRYPTO] policy id=%d has unsupported action (only L2/bypass are allowed)\n",
+                    db_policy_id);
+            PQclear(res);
+            return -1;
+        }
 
         int proto_null = PQgetisnull(res, r, 3);
         cp_base.protocol = parse_protocol_name(proto_null ? NULL : PQgetvalue(res, r, 3));
@@ -534,18 +497,11 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
         int invert_dst = (strcmp(PQgetvalue(res, r, 7), "t") == 0);
         const char *sport_joined = PQgetvalue(res, r, 8);
         const char *dport_joined = PQgetvalue(res, r, 9);
-        int method_null = PQgetisnull(res, r, 10);
-        const char *method_txt = method_null ? NULL : PQgetvalue(res, r, 10);
-        (void)ne_parse_method(method_txt, method_null, &cp_base.crypto_mode, &cp_base.aes_bits);
-
-        memset(cp_base.key, 0, sizeof(cp_base.key));
         if (cp_base.action == POLICY_ACTION_BYPASS) {
             cp_base.id = 0;
         } else {
-            /* Encrypt = L2 PQC only. DB L3/L4/CTR/GCM strings stay parsed, then coerced. */
+            /* Every encrypt policy is L2 PQC. */
             cp_base.action = POLICY_ACTION_ENCRYPT_L2;
-            cp_base.crypto_mode = CRYPTO_MODE_PQC;
-            cp_base.aes_bits = 256;
             sig_pqc_load_and_bind_policy(conn, cfg, cfg->profile_count - 1, db_policy_id, p->id);
             int wire_id = alloc_wire_policy_id(db_policy_id, wire_id_used);
             if (wire_id < 0) {
@@ -682,8 +638,6 @@ static int load_wan_rows(struct app_config *cfg, PGresult *res) {
         struct wan_config *wan = &cfg->wans[cfg->wan_count];
         memset(wan, 0, sizeof(*wan));
 
-        wan->window_size  = (uint32_t)(WAN_REORDER_WINDOW_KB * 1024U);
-
         const char *v = PQgetvalue(res, row, PQfnumber(res, "ifname"));
         if (!v || v[0] == '\0') {
             fprintf(stderr, "[DB WAN][%d] ifname not specified\n", row);
@@ -780,9 +734,6 @@ static int db_load_wan_for_profile(PGconn *conn, struct app_config *cfg, int pro
 int config_apply_crypto_from_policies(struct app_config *cfg) {
     cfg->crypto_enabled = 0;
     cfg->fake_ethertype_ipv4 = 0;
-    cfg->crypto_mode = CRYPTO_MODE_PQC;
-    cfg->aes_bits = 256;
-    memset(cfg->crypto_key, 0, sizeof(cfg->crypto_key));
 
     if (cfg->policy_count <= 0) {
         if (cfg->profile_count > 0 && cfg->profiles[0].enabled) {

@@ -14,6 +14,10 @@
 #define PQC_HS_MSG_KEEPALIVE 3
 /* L3: signed responder-to-initiator request to restart HELLO after reboot. */
 #define PQC_HS_MSG_POKE    4
+/* Rekey cutover: responder keeps CURRENT until initiator proves NEXT is ready,
+ * then sends COMMIT. Both messages are ML-DSA signed. */
+#define PQC_HS_MSG_READY   5
+#define PQC_HS_MSG_COMMIT  6
 
 #define PQC_KEM_PK_SIZE    1184 // ML-KEM-768 PK size
 #define PQC_KEM_CT_SIZE    1088 // ML-KEM-768 CT size
@@ -35,8 +39,7 @@
 #define PQC_HS_CACHE_SLOTS 4
 #define MAX_IDENTITY_REGISTRY 100
 #define MAX_POLICY_BINDINGS 128
-#define MAX_L2_DISPATCHERS 16
-#define PQC_USE_DYNAMIC_ROLE  1 // 1 = Dynamic (compare IP/MAC), 0 = Static (DB configured)
+#define PQC_USE_DYNAMIC_ROLE  1 // 1 = Dynamic (compare tunnel IP), 0 = Static (DB configured)
 
 typedef enum {
     PQC_ROLE_RESPONDER = 0,
@@ -61,8 +64,7 @@ typedef struct {
     uint8_t src_mac[6];
 } pqc_rx_pkt_info_t;
 
-/* L3 responder state for idempotent HELLO handling.  L2 keeps its existing
- * handshake flow and does not use this cache. */
+/* Tunnel responder state for idempotent HELLO handling. */
 typedef struct {
     uint8_t *response;
     uint32_t session_id;
@@ -71,11 +73,11 @@ typedef struct {
     uint8_t master_key[PQC_TRAFFIC_KEY_SZ];
     bool valid;
     bool key_promoted;
+    bool requires_commit;
 } pqc_hs_cache_entry_t;
 
 typedef struct {
     // 8-Byte Aligned Members
-    uint64_t last_rotation_time;
     uint64_t last_sent_time;
     uint64_t last_recv_time;
     uint64_t handshake_start_time;
@@ -88,6 +90,7 @@ typedef struct {
     uint64_t keepalive_monitor_start_time;
     uint64_t last_keepalive_rx_time;
     uint64_t next_auto_retry_time;
+    uint64_t prev_discard_after_ms;
 
     char *local_priv;
     char *local_pub;
@@ -131,15 +134,11 @@ typedef struct {
     bool giveup_logged;
     volatile bool send_poke;
     volatile bool keepalive_enabled;
+    volatile bool keepalive_send_now;
+    volatile bool rekey_requested;
     bool is_tunnel;
     volatile bool thread_exit_sig;
 } policy_key_binding_t;
-
-typedef struct {
-    char ifname[64];
-    pthread_t thread;
-    bool running;
-} l2_dispatcher_t;
 
 #pragma pack(push, 1)
 struct pqc_hs_msg {
@@ -193,7 +192,6 @@ void sig_pqc_add_to_registry(const char *fingerprint, const char *priv, const ch
  * @param out_policy_key 32-byte array to store the derived policy-specific key.
  * @return 0 on success, -1 if the master key is not ready.
  */
-int sig_pqc_diversify_key(int profile_id, int policy_id, uint8_t *out_policy_key);
 bool sig_pqc_has_identity(const char *fingerprint);
 void sig_pqc_bind_policy(int policy_id, int profile_id, int role_mode,
                          const char *peer_ip, const char *local_fg,
@@ -218,14 +216,20 @@ void sig_pqc_record_sent(int policy_id);
 void sig_pqc_record_recv(int policy_id);
 
 int sig_pqc_get_keys(int policy_id, uint8_t keys[3][32], uint8_t key_ids[3], bool key_slots_valid[3]);
-void sig_pqc_promote_responder_key(int policy_id);
 void sig_pqc_discard_prev_key(int policy_id);
 void sig_pqc_trigger_retry(int policy_id);
 int sig_pqc_trigger_retry_with_info(int policy_id, char *out_info, size_t out_max);
+
+/* NE owns key lifetime. When the in-use key expires, NE calls this so PQC
+ * only starts a new handshake and loads the new key into RAM. */
+int sig_pqc_request_new_session(int policy_id);
 
 void sig_pqc_prepare_reload(void);
 void sig_pqc_finalize_reload(void);
 
 void sig_pqc_load_and_bind_policy(void *conn_ptr, const void *cfg_ptr, int profile_idx, int db_policy_id, int profile_id);
+
+struct app_config;
+void pqc_handshake_start_all_profiles(struct app_config *cfg);
 
 #endif

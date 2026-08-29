@@ -245,6 +245,30 @@ int ne_ring_try_push(struct ne_ring *r, const struct ne_packet *pkt)
     return 0;
 }
 
+int ne_ring_try_push_pair(struct ne_ring *r, const struct ne_packet *first,
+                          const struct ne_packet *second)
+{
+    uint32_t head, tail;
+
+    if (!r || !first || !second)
+        return -1;
+
+    pthread_spin_lock(&r->push_lock);
+    head = __atomic_load_n(&r->head, __ATOMIC_RELAXED);
+    tail = __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE);
+    if ((uint32_t)(head - tail) > r->cap - 2u) {
+        pthread_spin_unlock(&r->push_lock);
+        return -1;
+    }
+    r->buf[head & r->mask] = *first;
+    r->buf[(head + 1u) & r->mask] = *second;
+    /* Publish both descriptors together: no producer can interleave another
+     * datagram and the consumer can never observe only the head fragment. */
+    __atomic_store_n(&r->head, head + 2u, __ATOMIC_RELEASE);
+    pthread_spin_unlock(&r->push_lock);
+    return 0;
+}
+
 // Pop gói tin đi ra khỏi ring
 int ne_ring_try_pop(struct ne_ring *r, struct ne_packet *pkt)
 {
@@ -735,7 +759,7 @@ static int xsk_create_queue(struct ne_pair *p, struct ne_iface *iface, const cha
         .tx_size = NE_RING,
         .libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
         .xdp_flags = xdp_flags,
-        /* Toggle AF_XDP mode here only: XDP_COPY (ixgbe) or XDP_ZEROCOPY (ice). */
+        /* i40e: native XDP + AF_XDP copy. Keep XDP_COPY (not zero-copy). */
         .bind_flags = XDP_COPY | XDP_USE_NEED_WAKEUP,
     };
 

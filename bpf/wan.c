@@ -24,6 +24,7 @@ struct {
 #define IPPROTO_UDP_VAL 17
 #define IPPROTO_OSPF_VAL 89
 #define ETH_P_NE_ARP_ENC 0x1048
+#define ETH_P_NE_UDP_ENC 0x104B
 #define ETH_P_CFM        0x8902
 
 SEC("xdp")
@@ -50,6 +51,10 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
         goto redirect;
     }
 
+    if (proto == __constant_htons(ETH_P_NE_UDP_ENC)) {
+        goto redirect;
+    }
+
     if (proto == __constant_htons(ETH_P_IP)) {
         struct iphdr *ip = (void *)(eth + 1);
         if ((void *)(ip + 1) > data_end)
@@ -66,6 +71,11 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
     int key0 = 0;
     __u16 *fake4 = bpf_map_lookup_elem(&wan_config_map, &key0);
     if (fake4 && *fake4 != 0 && proto == bpf_htons(*fake4))
+        goto redirect;
+
+    int key1 = 1;
+    __u16 *fake_udp = bpf_map_lookup_elem(&wan_config_map, &key1);
+    if (fake_udp && *fake_udp != 0 && proto == bpf_htons(*fake_udp))
         goto redirect;
 
     return XDP_PASS;
