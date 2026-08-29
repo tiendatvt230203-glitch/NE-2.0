@@ -236,14 +236,15 @@ static void init_iface_meta(struct fwd_iface *iface, const char *ifname)
 static uint32_t resolve_runtime_frag_mtu(const struct app_config *cfg)
 {
     int sockfd;
-    uint32_t min_mtu = CRYPTO_OPT_FRAG_MTU_DEFAULT;
+    uint32_t min_mtu = NE_MAX_MTU;
+    int found = 0;
 
     if (!cfg)
-        return min_mtu;
+        return CRYPTO_OPT_FRAG_MTU_DEFAULT;
 
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0)
-        return min_mtu;
+        return CRYPTO_OPT_FRAG_MTU_DEFAULT;
 
     for (int wi = 0; wi < cfg->wan_count; wi++) {
         struct ifreq ifr;
@@ -254,12 +255,15 @@ static uint32_t resolve_runtime_frag_mtu(const struct app_config *cfg)
         ifr.ifr_name[IFNAMSIZ - 1] = '\0';
         if (ioctl(sockfd, SIOCGIFMTU, &ifr) != 0)
             continue;
-        if (ifr.ifr_mtu > 0 && (uint32_t)ifr.ifr_mtu < min_mtu)
+        if (ifr.ifr_mtu >= 576 && (uint32_t)ifr.ifr_mtu <= NE_MAX_MTU &&
+            (uint32_t)ifr.ifr_mtu < min_mtu)
             min_mtu = (uint32_t)ifr.ifr_mtu;
+        if (ifr.ifr_mtu >= 576)
+            found = 1;
     }
 
     close(sockfd);
-    return min_mtu;
+    return found ? min_mtu : CRYPTO_OPT_FRAG_MTU_DEFAULT;
 }
 
 static void *local_rx_thread(void *arg)
@@ -276,6 +280,10 @@ static void *local_rx_thread(void *arg)
         dp_burst_refill_local(fwd, ctx->rx_slot);
 
         int rcvd = ne_recv_local_slot(&fwd->pair, ctx->rx_slot, batch, NE_BATCH_SIZE);
+        /* Multi-buffer peek can end in the middle of a packet and produce no
+         * complete job. Always release consumed descriptors; RX buffers whose
+         * ownership moved to a job are deliberately not returned to FQ here. */
+        ne_recv_release_local_slot(&fwd->pair, ctx->rx_slot);
         if (rcvd <= 0) {
             int fds[NE_DP_POLLFD_MAX];
             int nfds;
@@ -321,7 +329,6 @@ static void *local_rx_thread(void *arg)
             dp_out_ring_bind(dp_pick_tx_slot(pkt, batch[i].len));
             dataplane_process_local(fwd, batch[i]);
         }
-        ne_recv_release_local_slot(&fwd->pair, ctx->rx_slot);
     }
     flow_table_thread_cleanup();
     return NULL;
@@ -397,6 +404,7 @@ static void *wan_rx_thread(void *arg)
         dp_burst_refill_wan(fwd, ctx->rx_slot);
 
         int rcvd = ne_recv_wan_slot(&fwd->pair, ctx->rx_slot, batch, NE_BATCH_SIZE);
+        ne_recv_release_wan_slot(&fwd->pair, ctx->rx_slot);
         if (rcvd <= 0) {
             int fds[NE_DP_POLLFD_MAX];
             int nfds;
@@ -449,7 +457,6 @@ static void *wan_rx_thread(void *arg)
             dp_out_ring_bind(dp_pick_tx_slot(pkt, batch[i].len));
             dataplane_process_wan(fwd, batch[i]);
         }
-        ne_recv_release_wan_slot(&fwd->pair, ctx->rx_slot);
     }
     return NULL;
 }

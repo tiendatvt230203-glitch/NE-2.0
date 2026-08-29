@@ -87,8 +87,10 @@ static int decrypt_l2(struct forwarder *fwd, uint8_t *pkt, uint32_t *len)
 {
     struct packet_crypto_ctx *ctx;
     uint8_t wire_id = 0;
-    uint8_t scratch[NE_FRAME];
+    uint8_t scratch[NE_PACKET_CAPACITY];
     uint32_t orig_len;
+
+    (void)fwd;
 
     if (!pkt || !len)
         return 0;
@@ -101,7 +103,7 @@ static int decrypt_l2(struct forwarder *fwd, uint8_t *pkt, uint32_t *len)
         return -1;
 
     orig_len = *len;
-    if (orig_len > NE_FRAME)
+    if (orig_len > NE_PACKET_CAPACITY)
         return -1;
     memcpy(scratch, pkt, orig_len);
 
@@ -120,6 +122,8 @@ static int reassemble_l2(struct forwarder *fwd, uint8_t *pkt, uint32_t *len,
     struct packet_crypto_ctx *ctx;
     int slot, rr;
     uint32_t blen = 0;
+
+    (void)fwd;
 
     ctx = fwd_crypto_ctx_for_wire_id(policy_id);
     if (!ctx)
@@ -167,15 +171,9 @@ static int wan_try_l2_pqc_udp(struct forwarder *fwd, uint8_t *pkt, uint32_t *len
     return 1;
 }
 
-/* L2 UDP fragment on wire: profile lookup only needs L2 header + policy_id. */
-static int wan_l2_is_frag(const uint8_t *pkt, uint32_t len)
-{
-    return wan_l2_is_udp_tagged(pkt, len);
-}
-
 static int decrypt_wan(struct forwarder *fwd, struct ne_packet *job)
 {
-    uint8_t scratch[8192];
+    uint8_t scratch[NE_PACKET_CAPACITY];
     uint8_t *pkt = ne_packet_data(&fwd->pair, job->addr);
     uint32_t len = job->len;
     uint16_t pid = 0;
@@ -367,7 +365,7 @@ static void wan_clamp_tcp_mss(struct forwarder *fwd, uint8_t *pkt, uint32_t len)
                                      src_port, dst_port, proto);
     if (!cp || cp->action == POLICY_ACTION_BYPASS)
         return;
-    (void)crypto_tcp_clamp_mss(pkt, len, CRYPTO_OPT_FRAG_MTU_DEFAULT,
+    (void)crypto_tcp_clamp_mss(pkt, len, crypto_option_get_mtu(),
                                crypto_option_wire_overhead(CRYPTO_OPT_L2_PQC));
 }
 
@@ -496,7 +494,7 @@ int dataplane_wan_needs_mid(struct forwarder *fwd, const uint8_t *pkt, uint32_t 
 void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
 {
     uint8_t *pkt = ne_packet_data(&fwd->pair, job.addr);
-    uint8_t wire_buf[NE_FRAME];
+    uint8_t wire_buf[128];
     uint32_t wire_len;
     int dec;
     int encrypted;
@@ -506,16 +504,15 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
         goto drop;
 
     wire_len = job.len;
-    if (wire_len < 14u || wire_len > NE_FRAME)
+    if (wire_len < 14u || wire_len > ne_packet_capacity(&fwd->pair, job.addr))
         goto drop;
-    /* L2 frag pending is freed after decrypt; snapshot header only (policy_id). */
-    if (wan_l2_is_frag(pkt, wire_len)) {
-        uint32_t snap = wire_len < 64u ? wire_len : 64u;
+    /* Only L2/policy and IPv4/L4 headers are needed after decrypt. Keeping a
+     * bounded snapshot avoids a jumbo-sized stack copy on every packet. */
+    {
+        uint32_t snap = wire_len < sizeof(wire_buf) ? wire_len : sizeof(wire_buf);
 
         memcpy(wire_buf, pkt, snap);
         wire_len = snap;
-    } else {
-        memcpy(wire_buf, pkt, wire_len);
     }
 
     if (crypto_eth_l2_has_arp_marker(pkt, job.len) || dp_pkt_is_arp(pkt, job.len)) {

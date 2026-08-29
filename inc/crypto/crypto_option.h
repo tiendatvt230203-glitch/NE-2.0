@@ -8,7 +8,7 @@
 #include "packet_crypto.h"
 
 #define CRYPTO_OPT_FRAG_MTU_DEFAULT  1500u
-#define OPT_FRAG_TABLE_SIZE          4096
+#define OPT_FRAG_TABLE_SIZE           512
 #define OPT_FRAG_TIMEOUT_NS          (200ULL * 1000000ULL)
 
 /* --- worker bind (forwarder sets once per crypto thread) --- */

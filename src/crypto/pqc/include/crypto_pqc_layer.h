@@ -120,7 +120,7 @@ static inline int crypto_pqc_decrypt_payload_resilient(
     const int order[KEY_SLOT_COUNT] = {
         KEY_SLOT_CURRENT, KEY_SLOT_NEXT, KEY_SLOT_PREV
     };
-    byte saved[2048];
+    static _Thread_local byte saved[12288];
     int attempted = 0;
 
     if (!ctx || !data || len <= 0 || len > (int)sizeof(saved))

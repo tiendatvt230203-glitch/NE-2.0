@@ -18,6 +18,35 @@
 #include <stdio.h>
 
 #define SPLIT_TAIL_REFILL_BATCH 32u
+#define CRYPTO_PACKET_GROWTH_MAX 64u
+
+static int ensure_crypto_capacity(struct forwarder *fwd, struct ne_packet *job)
+{
+    uint64_t grown_addr;
+    uint8_t *src;
+    uint8_t *dst;
+
+    if (!fwd || !job || job->len > fwd->pair.packet_capacity ||
+        job->len + CRYPTO_PACKET_GROWTH_MAX > fwd->pair.packet_capacity)
+        return -1;
+    if (job->len + CRYPTO_PACKET_GROWTH_MAX <=
+        ne_packet_capacity(&fwd->pair, job->addr))
+        return 0;
+    if (ne_packet_alloc(&fwd->pair, job->len + CRYPTO_PACKET_GROWTH_MAX,
+                        &grown_addr) != 0)
+        return -1;
+    src = ne_packet_data(&fwd->pair, job->addr);
+    dst = ne_packet_data(&fwd->pair, grown_addr);
+    if (!src || !dst) {
+        ne_frame_free(&fwd->pair, grown_addr);
+        return -1;
+    }
+    memcpy(dst, src, job->len);
+    ne_frame_free(&fwd->pair, job->addr);
+    job->addr = grown_addr;
+    return 0;
+}
+
 static int push_to_wan(struct forwarder *fwd, struct ne_packet *job, int wan_dp)
 {
     int ri = dp_out_ring_idx();
@@ -38,7 +67,9 @@ static int push_split_to_wan(struct forwarder *fwd, struct ne_packet *job,
         ne_frame_free(&fwd->pair, tail->addr);
         return -1;
     }
-    if (l1 == 0 || l2 == 0 || l1 > fwd->pair.frame_size || l2 > fwd->pair.frame_size) {
+    if (l1 == 0 || l2 == 0 ||
+        l1 > ne_packet_capacity(&fwd->pair, job->addr) ||
+        l2 > ne_packet_capacity(&fwd->pair, tail->addr)) {
         ne_frame_free(&fwd->pair, tail->addr);
         return -1;
     }
@@ -64,8 +95,9 @@ static int split_tail_take(struct forwarder *fwd, int worker_idx, uint64_t *addr
         return -1;
 
     if (fwd->split_tail_count[worker_idx] == 0) {
-        got = ne_frame_alloc_batch(&fwd->pair, fwd->split_tail_cache[worker_idx],
-                                   SPLIT_TAIL_REFILL_BATCH);
+        got = ne_packet_alloc_batch(&fwd->pair, fwd->pair.packet_capacity,
+                                    fwd->split_tail_cache[worker_idx],
+                                    SPLIT_TAIL_REFILL_BATCH);
         if (got == 0)
             return -1;
         fwd->split_tail_count[worker_idx] = (uint16_t)got;
@@ -82,7 +114,7 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
                         crypto_proto_class pclass, int flow_ok)
 {
     int worker_idx = dp_crypto_current_worker_idx();
-    uint8_t *pkt = ne_packet_data(&fwd->pair, job->addr);
+    uint8_t *pkt;
     struct ne_packet tail = {0};
     uint8_t *tail_buf = NULL;
     uint32_t len = job->len;
@@ -92,6 +124,12 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
 
     (void)flow_ok;
     (void)cp;
+
+    if (ensure_crypto_capacity(fwd, job) != 0)
+        return -1;
+    pkt = ne_packet_data(&fwd->pair, job->addr);
+    if (!pkt)
+        return -1;
 
     if (pclass == CRYPTO_PROTO_TCP) {
         if (!flow_ok || dp_tcp_next_tx_seq(pkt, len, &bond_seq) != 0)
@@ -107,8 +145,10 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
         if (split_tail_take(fwd, worker_idx, &tail.addr) != 0)
             return -1;
         tail_buf = ne_packet_data(&fwd->pair, tail.addr);
-        if (crypto_option_split(opt_id, pclass, pctx, pkt, len, fwd->pair.frame_size, &l1,
-                                tail_buf, fwd->pair.frame_size, &l2) != 0) {
+        if (crypto_option_split(opt_id, pclass, pctx, pkt, len,
+                                ne_packet_capacity(&fwd->pair, job->addr), &l1,
+                                tail_buf, ne_packet_capacity(&fwd->pair, tail.addr),
+                                &l2) != 0) {
             ne_frame_free(&fwd->pair, tail.addr);
             return -1;
         }
@@ -225,7 +265,7 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
         goto drop;
 
     if (proto == IPPROTO_TCP) {
-        (void)crypto_tcp_clamp_mss(pkt, job.len, CRYPTO_OPT_FRAG_MTU_DEFAULT,
+        (void)crypto_tcp_clamp_mss(pkt, job.len, crypto_option_get_mtu(),
                                    crypto_option_wire_overhead(CRYPTO_OPT_L2_PQC));
     }
 

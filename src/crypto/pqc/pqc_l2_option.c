@@ -32,8 +32,8 @@ struct opt_entry {
     uint8_t  eth_len;
     uint8_t  got_first;
     uint8_t  got_second;
-    uint8_t  first[1600];
-    uint8_t  second[1600];
+    uint8_t  first[NE_MAX_MTU];
+    uint8_t  second[NE_MAX_MTU];
 };
 
 struct opt_table {
@@ -42,15 +42,21 @@ struct opt_table {
 };
 
 static struct opt_table *g_tables[MAX_PROFILES][NE_CRYPTO_WORKERS];
+static struct ne_pair *g_reasm_pair;
+static _Thread_local uint64_t g_reasm_input_addr;
+static _Thread_local uint64_t g_reasm_output_addr;
+static _Thread_local int g_reasm_input_valid;
 
 void crypto_l2_pqc_bind_pair(struct ne_pair *p)
 {
-    (void)p;
+    g_reasm_pair = p;
 }
 
 void crypto_l2_pqc_reasm_set_addr(uint64_t addr)
 {
-    (void)addr;
+    g_reasm_input_addr = addr;
+    g_reasm_output_addr = 0;
+    g_reasm_input_valid = 1;
 }
 
 int crypto_l2_pqc_reasm_held(void)
@@ -61,7 +67,7 @@ int crypto_l2_pqc_reasm_held(void)
 
 uint64_t crypto_l2_pqc_reasm_out_addr(void)
 {
-    return 0;
+    return g_reasm_output_addr;
 }
 
 static void opt_clear_entry(struct opt_entry *entry)
@@ -227,25 +233,42 @@ static int opt_emit_join(struct opt_entry *entry, uint8_t *out_buf, uint32_t *ou
 {
     int eth_len;
     int off = 0;
+    uint32_t joined_len;
+    uint8_t *joined = out_buf;
 
     if (!entry->got_first || !entry->got_second)
         return 0;
     eth_len = entry->eth_len ? (int)entry->eth_len : (int)ETH_HEADER_SIZE;
-    if (entry->first_len + entry->second_len + (uint32_t)eth_len > NE_FRAME) {
+    joined_len = entry->first_len + entry->second_len + (uint32_t)eth_len;
+    if (joined_len > NE_PACKET_CAPACITY) {
         opt_clear_entry(entry);
         return -1;
     }
-    memcpy(out_buf, entry->eth_hdr, (size_t)eth_len);
+    if (g_reasm_pair && g_reasm_input_valid &&
+        joined_len > ne_packet_capacity(g_reasm_pair, g_reasm_input_addr)) {
+        if (ne_packet_alloc(g_reasm_pair, joined_len, &g_reasm_output_addr) != 0) {
+            opt_clear_entry(entry);
+            return -1;
+        }
+        joined = ne_packet_data(g_reasm_pair, g_reasm_output_addr);
+        if (!joined) {
+            ne_frame_free(g_reasm_pair, g_reasm_output_addr);
+            g_reasm_output_addr = 0;
+            opt_clear_entry(entry);
+            return -1;
+        }
+    }
+    memcpy(joined, entry->eth_hdr, (size_t)eth_len);
     off += eth_len;
-    memcpy(out_buf + off, entry->first, entry->first_len);
+    memcpy(joined + off, entry->first, entry->first_len);
     off += (int)entry->first_len;
     if (entry->second_len > 0) {
-        memcpy(out_buf + off, entry->second, entry->second_len);
+        memcpy(joined + off, entry->second, entry->second_len);
         off += (int)entry->second_len;
     }
     *out_len = (uint32_t)off;
     if (eth_len >= 2)
-        crypto_eth_set_ipv4_et(out_buf, eth_len - 2);
+        crypto_eth_set_ipv4_et(joined, eth_len - 2);
     opt_clear_entry(entry);
     return 1;
 }
@@ -444,6 +467,8 @@ static int l2_do_encrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t 
 
     if (pkt_len < (size_t)enc_start)
         return -1;
+    if ((size_t)enc_start + payload_len + AES_GCM_TAG_SIZE > NE_PACKET_CAPACITY)
+        return -1;
     memmove(packet + enc_start, packet + l3_off, payload_len);
     if (crypto_pqc_sess_load(ctx, &pqc) != 0)
         return -1;
@@ -478,7 +503,7 @@ static int l2_do_encrypt_tcp(struct packet_crypto_ctx *ctx, uint8_t *packet,
     marker_off = et_off + 2 + L2_POLICY_LEN + L2_CORE_ID_LEN + L2_NONCE_SIZE;
     enc_start = marker_off + (int)L2_TCP_MARKER_SIZE;
     plain_len = L2_TCP_SHIM_SIZE + payload_len;
-    if ((size_t)enc_start + plain_len + AES_GCM_TAG_SIZE > NE_FRAME)
+    if ((size_t)enc_start + plain_len + AES_GCM_TAG_SIZE > NE_PACKET_CAPACITY)
         return -1;
 
     memmove(packet + enc_start + L2_TCP_SHIM_SIZE,
@@ -519,7 +544,7 @@ static int l2_do_encrypt_udp(struct packet_crypto_ctx *ctx, uint8_t *packet,
     magic_off = et_off + 2 + L2_POLICY_LEN + L2_CORE_ID_LEN + L2_NONCE_SIZE;
     enc_start = magic_off + (int)L2_UDP_MARKER_SIZE;
     plain_len = L2_UDP_SHIM_SIZE + payload_len;
-    if ((size_t)enc_start + plain_len + AES_GCM_TAG_SIZE > NE_FRAME)
+    if ((size_t)enc_start + plain_len + AES_GCM_TAG_SIZE > NE_PACKET_CAPACITY)
         return -1;
 
     memmove(packet + enc_start + L2_UDP_SHIM_SIZE,
@@ -751,6 +776,8 @@ static int l2_encrypt_fragment0_inplace(struct packet_crypto_ctx *ctx,
     int enc_off = magic_off + (int)L2_UDP_MARKER_SIZE;
     size_t plain_len = L2_UDP_SHIM_SIZE + frag0_plain_len;
     size_t need = (size_t)enc_off + plain_len + AES_GCM_TAG_SIZE;
+
+    (void)pkt_len;
 
     if (need > out_max)
         return -1;

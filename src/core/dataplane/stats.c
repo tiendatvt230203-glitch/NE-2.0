@@ -285,13 +285,21 @@ void ne_dp_stats_tick(struct forwarder *fwd)
         fprintf(stderr,
                 "[DP-STATS] ring_depth lan_to_mid=%u wan_to_mid=%u "
                 "mid_to_wan=%u mid_to_local=%u tx_no_free(wan0)=%llu "
-                "tx_full(lan=%llu wan=%llu) pool_free=%u\n",
+                "tx_full(lan=%llu wan=%llu) pool_free=%u jumbo_free=%u "
+                "jumbo(rx=%llu tx=%llu drop=%llu)\n",
                 lan_q, wan_q, mid_wan_q, mid_lan_q,
                 fwd->wan_count > 0
                     ? (unsigned long long)fwd->pair.wans[0].tx_no_free : 0ULL,
                 (unsigned long long)load64(&s_tx_full_lan[0]),
                 (unsigned long long)load64(&s_tx_full_wan[0]),
-                ne_pool_free_count(&fwd->pair));
+                ne_pool_free_count(&fwd->pair),
+                ne_jumbo_free_count(&fwd->pair),
+                (unsigned long long)__atomic_load_n(&fwd->pair.rx_jumbo_packets,
+                                                    __ATOMIC_RELAXED),
+                (unsigned long long)__atomic_load_n(&fwd->pair.tx_jumbo_packets,
+                                                    __ATOMIC_RELAXED),
+                (unsigned long long)__atomic_load_n(&fwd->pair.rx_jumbo_drops,
+                                                    __ATOMIC_RELAXED));
 
         {
             uint64_t worker_connections[NE_CRYPTO_WORKERS];

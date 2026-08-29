@@ -160,15 +160,15 @@ void crypto_option_set_mtu(uint32_t mtu)
 {
     if (mtu < 512)
         mtu = 512;
-    if (mtu > NE_FRAME)
-        mtu = NE_FRAME;
+    if (mtu > NE_MAX_MTU)
+        mtu = NE_MAX_MTU;
     atomic_store(&g_opt_frag_mtu, mtu);
 }
 
 uint32_t crypto_option_get_mtu(void)
 {
     uint32_t mtu = (uint32_t)atomic_load(&g_opt_frag_mtu);
-    if (mtu < 512 || mtu > NE_FRAME)
+    if (mtu < 512 || mtu > NE_MAX_MTU)
         return CRYPTO_OPT_FRAG_MTU_DEFAULT;
     return mtu;
 }

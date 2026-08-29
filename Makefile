@@ -3,7 +3,7 @@ CLANG  = clang
 
 CFLAGS = -D_GNU_SOURCE -I. -Iinc -Iinc/core -Iinc/crypto -Iinc/db -I./include -Isrc/crypto/pqc/include -Wall -O2 -mcmodel=medium $(shell pg_config --includedir 2>/dev/null | xargs -I{} echo -I{})
 LDFLAGS = -Wl,-rpath,'$$ORIGIN/lib' -lbpf -lelf -lz -lpthread \
-          ./lib/libxdp.so.1.6.0 ./lib/libssl.so.3 ./lib/libcrypto.so.3 ./lib/libpq.so.5.14 ./lib/libscrypt.so
+          ./lib/libxdp.so.1.6.0 ./lib/libssl.so.3 ./lib/libcrypto.so.3 -lpq ./lib/libscrypt.so
 
 BPF_CFLAGS     = -O2 -target bpf -g
 KERNEL_HEADERS = /usr/include
@@ -43,15 +43,19 @@ BPF_OBJ = $(LIB_DIR)/lan.o \
 
 .PHONY: all clean dirs test
 
-TEST_BINS = tests/test_bond_reorder.bin
+TEST_BINS = tests/test_bond_reorder.bin tests/test_jumbo_layout.bin
 
 all: dirs $(BPF_OBJ) $(TARGET)
 
 test: $(TEST_BINS)
 	./tests/test_bond_reorder.bin
+	./tests/test_jumbo_layout.bin
 
 tests/test_bond_reorder.bin: tests/test_bond_reorder.c src/core/dataplane/udp_reorder.c
 	$(CC) $(CFLAGS) -Wextra -Werror $^ -lpthread -o $@
+
+tests/test_jumbo_layout.bin: tests/test_jumbo_layout.c
+	$(CC) $(CFLAGS) -Wextra -Werror $^ -o $@
 
 $(TARGET): $(APP_OBJ) $(DB_OBJ)
 	$(CC) -o $@ $(APP_OBJ) $(DB_OBJ) $(LDFLAGS)

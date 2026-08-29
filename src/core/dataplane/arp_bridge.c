@@ -414,7 +414,7 @@ static int arp_flood_push_local(struct forwarder *fwd, struct ne_packet *job,
             .local_idx = (uint8_t)li,
         };
 
-        if (ne_frame_alloc(&fwd->pair, &clone.addr) != 0)
+        if (ne_packet_alloc(&fwd->pair, job->len, &clone.addr) != 0)
             return -1;
         memcpy(ne_packet_data(&fwd->pair, clone.addr), pkt, job->len);
         if (ne_ring_try_push(ring, &clone) != 0) {
