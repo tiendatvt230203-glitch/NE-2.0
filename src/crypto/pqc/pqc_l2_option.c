@@ -2,6 +2,7 @@
 
 #include "../../../inc/crypto/crypto_option.h"
 #include "../../../inc/crypto/eth_parse.h"
+#include "../../../inc/crypto/pqc_frag_layout.h"
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/util/cpu_map.h"
 #include "crypto_pqc_layer.h"
@@ -448,8 +449,6 @@ static int l2_wire_prefix_len(const uint8_t *packet, size_t pkt_len)
     return et_off + 2;
 }
 
-#define OPT_FRAG_META_LEN       47
-
 static int l2_do_encrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t pkt_len)
 {
     int l3_off = crypto_eth_ipv4_offset(packet, pkt_len);
@@ -812,14 +811,9 @@ static int l2_split(struct packet_crypto_ctx *ctx, uint8_t *pkt_data, uint32_t p
     uint8_t ip_proto;
     const uint8_t *ip_payload;
     uint32_t ip_payload_len;
-    int transport_hdr_len = -1;
     uint32_t app_off = 0;
     uint32_t app_len;
-    uint32_t frag_overhead;
-    uint32_t max_plain0;
-    uint32_t fixed_plain0;
-    uint32_t half1;
-    uint32_t half2;
+    struct crypto_pqc_udp_frag_layout layout;
     uint32_t epoch;
     uint32_t seq;
     uint32_t datagram_id;
@@ -841,30 +835,21 @@ static int l2_split(struct packet_crypto_ctx *ctx, uint8_t *pkt_data, uint32_t p
         return -1;
     if (ip_payload_len < 8)
         return -1;
-    transport_hdr_len = 8;
     app_off = 8;
     app_len = ip_payload_len - 8;
     if (app_len == 0)
         return -1;
-    frag_overhead = (uint32_t)l3_off + (uint32_t)OPT_FRAG_META_LEN;
-    if (frag_overhead >= frag_mtu)
+    if (crypto_pqc_udp_fragment_layout(frag_mtu, (uint32_t)l3_off,
+                                       (uint32_t)ip_hdr_len, app_len,
+                                       &layout) != 0)
         return -1;
-    max_plain0 = frag_mtu - frag_overhead;
-    fixed_plain0 = (uint32_t)ip_hdr_len + app_off;
-    if (max_plain0 <= fixed_plain0)
-        return -1;
-    half1 = max_plain0 - fixed_plain0;
-    if (half1 >= app_len)
-        half1 = app_len - 1;
-    half2 = app_len - half1;
     if (crypto_option_udp_tx_meta(&epoch, &seq, &datagram_id) != 0)
         return -1;
-    if (transport_hdr_len >= 0)
-        frag0_plain_len = (uint32_t)ip_hdr_len + (uint32_t)transport_hdr_len + half1;
-    else
-        frag0_plain_len = (uint32_t)ip_hdr_len + half1;
-    frag1_plain = (transport_hdr_len >= 0) ? ip_payload + app_off + half1 : ip_payload + half1;
-    if (l2_encrypt_fragment_single(ctx, eth_hdr, frag1_plain, half2,
+    frag0_plain_len = layout.frag0_plain_len;
+    frag1_plain = ip_payload + app_off +
+        (app_len - layout.frag1_payload_len);
+    if (l2_encrypt_fragment_single(ctx, eth_hdr, frag1_plain,
+                                   layout.frag1_payload_len,
                                    epoch, seq, datagram_id, L2_UDP_KIND_FRAG1,
                                    frag1, frag1_max, frag1_len,
                                    crypto_eth_l2_prefix_len(eth_hdr, ETH_L2_HDR_MAX)) != 0)
@@ -983,7 +968,7 @@ static int l2_udp_decrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt, uint32_t 
 }
 static int l2_udp_need_split(uint32_t pkt_len)
 {
-    return (pkt_len + OPT_FRAG_META_LEN) > crypto_option_get_mtu();
+    return crypto_pqc_udp_needs_fragment(pkt_len, crypto_option_get_mtu());
 }
 
 static int l2_udp_split(struct packet_crypto_ctx *ctx, uint8_t *pkt_data, uint32_t pkt_len,

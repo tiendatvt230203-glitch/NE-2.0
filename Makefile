@@ -43,18 +43,23 @@ BPF_OBJ = $(LIB_DIR)/lan.o \
 
 .PHONY: all clean dirs test
 
-TEST_BINS = tests/test_bond_reorder.bin tests/test_jumbo_layout.bin
+TEST_BINS = tests/test_bond_reorder.bin tests/test_jumbo_layout.bin \
+	    tests/test_mtu_policy.bin
 
 all: dirs $(BPF_OBJ) $(TARGET)
 
 test: $(TEST_BINS)
 	./tests/test_bond_reorder.bin
 	./tests/test_jumbo_layout.bin
+	./tests/test_mtu_policy.bin
 
 tests/test_bond_reorder.bin: tests/test_bond_reorder.c src/core/dataplane/udp_reorder.c
 	$(CC) $(CFLAGS) -Wextra -Werror $^ -lpthread -o $@
 
 tests/test_jumbo_layout.bin: tests/test_jumbo_layout.c
+	$(CC) $(CFLAGS) -Wextra -Werror $^ -o $@
+
+tests/test_mtu_policy.bin: tests/test_mtu_policy.c src/crypto/common/eth_parse.c
 	$(CC) $(CFLAGS) -Wextra -Werror $^ -o $@
 
 $(TARGET): $(APP_OBJ) $(DB_OBJ)
