@@ -163,6 +163,15 @@ struct ne_pair {
     uint64_t tx_jumbo_packets;
 };
 
+struct ne_xdp_statistics {
+    uint64_t rx_dropped;
+    uint64_t rx_invalid_descs;
+    uint64_t tx_invalid_descs;
+    uint64_t rx_ring_full;
+    uint64_t rx_fill_ring_empty_descs;
+    uint64_t tx_ring_empty_descs;
+};
+
 int ne_pair_local_live(const struct ne_pair *p, int pair_local_idx);
 int ne_pair_wan_live(const struct ne_pair *p, int dp_slot);
 int ne_pair_plumb_local(struct ne_pair *p, const struct app_config *cfg, int cfg_local_idx,
@@ -216,6 +225,8 @@ void ne_frame_free(struct ne_pair *p, uint64_t addr);
 /* Frames currently idle in the shared UMEM pool (leak watchdog metric). */
 uint32_t ne_pool_free_count(struct ne_pair *p);
 uint32_t ne_jumbo_free_count(struct ne_pair *p);
+void ne_xdp_read_statistics(const struct ne_pair *p, enum ne_packet_dir dir,
+                            struct ne_xdp_statistics *out);
 
 void interface_reset_redirect_maps(void);
 void interface_promisc_off_config(const struct app_config *cfg);

@@ -214,6 +214,15 @@ static uint64_t sum_tx_lan_bytes(void)
     return t;
 }
 
+static uint64_t sum_slots(const atomic_uint_fast64_t *slots, uint32_t count)
+{
+    uint64_t total = 0;
+
+    for (uint32_t i = 0; i < count; i++)
+        total += load64(&slots[i]);
+    return total;
+}
+
 void ne_dp_stats_tick(struct forwarder *fwd)
 {
     struct timespec now;
@@ -221,6 +230,7 @@ void ne_dp_stats_tick(struct forwarder *fwd)
     char lan_g[16], wan_g[16], tx_wan_g[16], tx_lan_g[16];
     uint64_t cur_lan_b, cur_wan_b, cur_tx_wan_b, cur_tx_lan_b;
     uint64_t d_lan_b, d_wan_b, d_tx_wan_b, d_tx_lan_b;
+    uint64_t rx_drop_lan, rx_drop_wan;
 
     if (!ne_dp_stats_on())
         return;
@@ -254,6 +264,8 @@ void ne_dp_stats_tick(struct forwarder *fwd)
     fmt_gbps(wan_g, sizeof(wan_g), d_wan_b, sec);
     fmt_gbps(tx_wan_g, sizeof(tx_wan_g), d_tx_wan_b, sec);
     fmt_gbps(tx_lan_g, sizeof(tx_lan_g), d_tx_lan_b, sec);
+    rx_drop_lan = sum_slots(s_rx_ring_drop_lan, NE_RX_LAN_SLOTS);
+    rx_drop_wan = sum_slots(s_rx_ring_drop_wan, NE_RX_WAN_SLOTS);
 
     fprintf(stderr,
             "[DP-STATS] %.1fs LAN_RX=%s WAN_RX=%s TX_WAN=%s TX_LAN=%s "
@@ -266,12 +278,18 @@ void ne_dp_stats_tick(struct forwarder *fwd)
             (unsigned long long)load64(&s_wan_fwd),
             (unsigned long long)load64(&s_wan_drop),
             (unsigned long long)load64(&s_wan_policy_drop),
-            (unsigned long long)load64(&s_rx_ring_drop_lan[0]),
-            (unsigned long long)load64(&s_rx_ring_drop_wan[0]),
+            (unsigned long long)rx_drop_lan,
+            (unsigned long long)rx_drop_wan,
             (unsigned long long)load64(&s_mid_ring_drop));
 
     if (fwd) {
         uint32_t lan_q = 0, wan_q = 0, mid_wan_q = 0, mid_lan_q = 0;
+        uint64_t tx_no_free_lan = 0, tx_no_free_wan = 0;
+        uint64_t tx_full_lan = sum_slots(s_tx_full_lan, NE_TX_SLOTS);
+        uint64_t tx_full_wan = sum_slots(s_tx_full_wan, NE_TX_WAN_SLOTS);
+        struct ne_xdp_statistics xdp_lan;
+        struct ne_xdp_statistics xdp_wan;
+
         for (int w = 0; w < (int)NE_CRYPTO_WORKERS; w++) {
             lan_q += ne_ring_count(&fwd->local_to_mid[w]);
             wan_q += ne_ring_count(&fwd->wan_to_mid[w]);
@@ -279,19 +297,24 @@ void ne_dp_stats_tick(struct forwarder *fwd)
         for (int wi = 0; wi < fwd->wan_count; wi++)
             mid_wan_q += fwd_mid_to_wan_depth(fwd, wi);
         for (int li = 0; li < fwd->local_count; li++) {
+            tx_no_free_lan += fwd->pair.locals[li].tx_no_free;
             for (int w = 0; w < (int)NE_CRYPTO_WORKERS; w++)
                 mid_lan_q += ne_ring_count(&fwd->mid_to_local[li][w]);
         }
+        for (int wi = 0; wi < fwd->wan_count; wi++)
+            tx_no_free_wan += fwd->pair.wans[wi].tx_no_free;
+        ne_xdp_read_statistics(&fwd->pair, NE_DIR_LOCAL, &xdp_lan);
+        ne_xdp_read_statistics(&fwd->pair, NE_DIR_WAN, &xdp_wan);
         fprintf(stderr,
                 "[DP-STATS] ring_depth lan_to_mid=%u wan_to_mid=%u "
-                "mid_to_wan=%u mid_to_local=%u tx_no_free(wan0)=%llu "
+                "mid_to_wan=%u mid_to_local=%u tx_no_free(lan=%llu wan=%llu) "
                 "tx_full(lan=%llu wan=%llu) pool_free=%u jumbo_free=%u "
                 "jumbo(rx=%llu tx=%llu drop=%llu)\n",
                 lan_q, wan_q, mid_wan_q, mid_lan_q,
-                fwd->wan_count > 0
-                    ? (unsigned long long)fwd->pair.wans[0].tx_no_free : 0ULL,
-                (unsigned long long)load64(&s_tx_full_lan[0]),
-                (unsigned long long)load64(&s_tx_full_wan[0]),
+                (unsigned long long)tx_no_free_lan,
+                (unsigned long long)tx_no_free_wan,
+                (unsigned long long)tx_full_lan,
+                (unsigned long long)tx_full_wan,
                 ne_pool_free_count(&fwd->pair),
                 ne_jumbo_free_count(&fwd->pair),
                 (unsigned long long)__atomic_load_n(&fwd->pair.rx_jumbo_packets,
@@ -300,6 +323,20 @@ void ne_dp_stats_tick(struct forwarder *fwd)
                                                     __ATOMIC_RELAXED),
                 (unsigned long long)__atomic_load_n(&fwd->pair.rx_jumbo_drops,
                                                     __ATOMIC_RELAXED));
+        fprintf(stderr,
+                "[DP-STATS] xdp lan(drop=%llu ring_full=%llu fill_empty=%llu "
+                "rx_bad=%llu tx_bad=%llu) wan(drop=%llu ring_full=%llu "
+                "fill_empty=%llu rx_bad=%llu tx_bad=%llu)\n",
+                (unsigned long long)xdp_lan.rx_dropped,
+                (unsigned long long)xdp_lan.rx_ring_full,
+                (unsigned long long)xdp_lan.rx_fill_ring_empty_descs,
+                (unsigned long long)xdp_lan.rx_invalid_descs,
+                (unsigned long long)xdp_lan.tx_invalid_descs,
+                (unsigned long long)xdp_wan.rx_dropped,
+                (unsigned long long)xdp_wan.rx_ring_full,
+                (unsigned long long)xdp_wan.rx_fill_ring_empty_descs,
+                (unsigned long long)xdp_wan.rx_invalid_descs,
+                (unsigned long long)xdp_wan.tx_invalid_descs);
 
         {
             uint64_t worker_connections[NE_CRYPTO_WORKERS];

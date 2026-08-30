@@ -1257,6 +1257,50 @@ int ne_pair_wan_live(const struct ne_pair *p, int dp_slot)
     return p->wan_live[dp_slot] != 0;
 }
 
+void ne_xdp_read_statistics(const struct ne_pair *p, enum ne_packet_dir dir,
+                            struct ne_xdp_statistics *out)
+{
+    const struct ne_iface *ifaces;
+    const uint8_t *live;
+    int iface_count;
+
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    if (!p)
+        return;
+    if (dir == NE_DIR_LOCAL) {
+        ifaces = p->locals;
+        live = p->local_live;
+        iface_count = p->local_count;
+    } else {
+        ifaces = p->wans;
+        live = p->wan_live;
+        iface_count = p->wan_count;
+    }
+
+    for (int i = 0; i < iface_count; i++) {
+        if (!live[i])
+            continue;
+        for (int q = 0; q < ifaces[i].queue_count; q++) {
+            const struct ne_xsk_queue *slot = &ifaces[i].queues[q];
+            struct xdp_statistics xs = {0};
+            socklen_t len = sizeof(xs);
+
+            if (!slot->xsk ||
+                getsockopt(xsk_socket__fd(slot->xsk), SOL_XDP, XDP_STATISTICS,
+                           &xs, &len) != 0)
+                continue;
+            out->rx_dropped += xs.rx_dropped;
+            out->rx_invalid_descs += xs.rx_invalid_descs;
+            out->tx_invalid_descs += xs.tx_invalid_descs;
+            out->rx_ring_full += xs.rx_ring_full;
+            out->rx_fill_ring_empty_descs += xs.rx_fill_ring_empty_descs;
+            out->tx_ring_empty_descs += xs.tx_ring_empty_descs;
+        }
+    }
+}
+
 int ne_pair_plumb_local(struct ne_pair *p, const struct app_config *cfg, int cfg_local_idx,
                         int pair_li)
 {
@@ -1523,62 +1567,105 @@ static int xsk_queue_for_rx_slot(int q, int rx_slot, int nq, int rx_slots)
     return (q % slots) == rx_slot;
 }
 
-int ne_recv_local_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out, uint32_t max)
+static __thread uint32_t tls_rx_queue_cursor[2];
+
+static int recv_pair_slot(struct ne_pair *p, int rx_slot,
+                          struct ne_packet *out, uint32_t max,
+                          uint8_t dir)
 {
+    struct ne_iface *ifaces;
+    uint8_t *live;
+    uint32_t *cursor;
+    int iface_count;
+    int rx_slots;
+    int eligible = 0;
+    int start;
     uint32_t total = 0;
     struct ne_packet *out_ptr = out;
 
-    if (!p || rx_slot < 0 || rx_slot >= (int)NE_RX_LAN_SLOTS)
+    if (!p || !out || max == 0)
         return 0;
+    if (dir == NE_DIR_LOCAL) {
+        if (rx_slot < 0 || rx_slot >= (int)NE_RX_LAN_SLOTS)
+            return 0;
+        ifaces = p->locals;
+        live = p->local_live;
+        iface_count = p->local_count;
+        rx_slots = (int)NE_RX_LAN_SLOTS;
+    } else {
+        if (rx_slot < 0 || rx_slot >= (int)NE_RX_WAN_SLOTS)
+            return 0;
+        ifaces = p->wans;
+        live = p->wan_live;
+        iface_count = p->wan_count;
+        rx_slots = (int)NE_RX_WAN_SLOTS;
+    }
+    cursor = &tls_rx_queue_cursor[dir == NE_DIR_WAN ? 1 : 0];
 
-    for (int i = 0; i < p->local_count && total < max; i++) {
-        if (!p->local_live[i])
+    for (int i = 0; i < iface_count; i++) {
+        if (!live[i])
             continue;
-        struct ne_iface *iface = &p->locals[i];
+        struct ne_iface *iface = &ifaces[i];
         int q_count = iface->queue_count;
 
-        for (int q = 0; q < q_count && total < max; q++) {
-            if (!xsk_queue_for_rx_slot(q, rx_slot, q_count, (int)NE_RX_LAN_SLOTS))
+        for (int q = 0; q < q_count; q++)
+            if (xsk_queue_for_rx_slot(q, rx_slot, q_count, rx_slots))
+                eligible++;
+    }
+    if (eligible == 0)
+        return 0;
+    start = (int)(*cursor % (uint32_t)eligible);
+
+    /* Two passes implement a rotating start point without allocating a queue
+     * vector on this hot path. A busy queue can consume the whole burst, but
+     * the following call starts at the next RSS queue instead of starving it. */
+    for (int pass = 0; pass < (start > 0 ? 2 : 1) && total < max; pass++) {
+        int ordinal = 0;
+
+        for (int i = 0; i < iface_count && total < max; i++) {
+            struct ne_iface *iface;
+            int q_count;
+
+            if (!live[i])
                 continue;
-            iface->queues[q].rx_pending = 0;
+            iface = &ifaces[i];
+            q_count = iface->queue_count;
+            for (int q = 0; q < q_count && total < max; q++) {
+                int selected;
+                int n;
 
-            int n = recv_queue(p, &iface->queues[q], out_ptr, max - total,
-                               NE_DIR_LOCAL, 0, (uint8_t)i);
-
-            total += (uint32_t)n;
-            out_ptr += n;
+                if (!xsk_queue_for_rx_slot(q, rx_slot, q_count, rx_slots))
+                    continue;
+                selected = pass == 0 ? ordinal >= start : ordinal < start;
+                if (!selected) {
+                    ordinal++;
+                    continue;
+                }
+                iface->queues[q].rx_pending = 0;
+                n = recv_queue(p, &iface->queues[q], out_ptr, max - total,
+                               dir,
+                               dir == NE_DIR_WAN ? (uint8_t)i : 0,
+                               dir == NE_DIR_LOCAL ? (uint8_t)i : 0);
+                total += (uint32_t)n;
+                out_ptr += n;
+                *cursor = (uint32_t)((ordinal + 1) % eligible);
+                ordinal++;
+            }
         }
     }
     return (int)total;
 }
 
-int ne_recv_wan_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out, uint32_t max)
+int ne_recv_local_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out,
+                       uint32_t max)
 {
-    uint32_t total = 0;
-    struct ne_packet *out_ptr = out;
+    return recv_pair_slot(p, rx_slot, out, max, NE_DIR_LOCAL);
+}
 
-    if (!p || rx_slot < 0 || rx_slot >= (int)NE_RX_WAN_SLOTS)
-        return 0;
-
-    for (int i = 0; i < p->wan_count && total < max; i++) {
-        if (!p->wan_live[i])
-            continue;
-        struct ne_iface *iface = &p->wans[i];
-        int q_count = iface->queue_count;
-
-        for (int q = 0; q < q_count && total < max; q++) {
-            if (!xsk_queue_for_rx_slot(q, rx_slot, q_count, (int)NE_RX_WAN_SLOTS))
-                continue;
-            iface->queues[q].rx_pending = 0;
-
-            int n = recv_queue(p, &iface->queues[q], out_ptr, max - total,
-                               NE_DIR_WAN, (uint8_t)i, 0);
-
-            total += (uint32_t)n;
-            out_ptr += n;
-        }
-    }
-    return (int)total;
+int ne_recv_wan_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out,
+                     uint32_t max)
+{
+    return recv_pair_slot(p, rx_slot, out, max, NE_DIR_WAN);
 }
 
 void ne_recv_release_local_slot(struct ne_pair *p, int rx_slot)

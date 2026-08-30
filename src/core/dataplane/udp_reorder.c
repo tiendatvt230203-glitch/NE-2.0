@@ -12,12 +12,15 @@
 #define UDP_REORDER_SETS              64u
 #define UDP_REORDER_WAYS              4u
 #define UDP_REORDER_FLOW_CAP          (UDP_REORDER_SETS * UDP_REORDER_WAYS)
-#define UDP_REORDER_WINDOW            2048u
+#define UDP_REORDER_WINDOW            4096u
 #define UDP_REORDER_START_BACKTRACK   32u
-#define UDP_REORDER_HELD_CAP          8192u
+#define UDP_REORDER_HELD_CAP         32768u
 #define UDP_REORDER_GC_SLICE          16u
 #define UDP_REORDER_FLOW_IDLE_NS      (60ULL * 1000000000ULL)
-#define UDP_REORDER_DEFAULT_HOLD_NS   (5ULL * 1000000ULL)
+/* The deployed L2 paths are around 0.5 ms. A 2 ms default covers normal
+ * multi-WAN skew while keeping a 10G/1500 elephant flow inside the window.
+ * Deployments with larger path skew can still override NE_BOND_REORDER_US. */
+#define UDP_REORDER_DEFAULT_HOLD_NS   (2ULL * 1000000ULL)
 
 struct udp_reorder_slot {
     struct dp_udp_reorder_item item;
