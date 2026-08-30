@@ -164,15 +164,19 @@ static int profile_iface_ifindex(const char *ifname, const char *role)
 
 static int xdp_attach_prog(int ifindex, int prog_fd, const char *ifname, const char *role)
 {
-    int rc = bpf_xdp_attach(ifindex, prog_fd, XDP_FLAGS_DRV_MODE, NULL);
+    int rc = bpf_xdp_attach(ifindex, prog_fd, NE_XDP_REQUIRED_MODE, NULL);
 
     if (rc) {
-        fprintf(stderr, "[PROFILE-XDP] attach failed %s %s drv: %s\n",
+        fprintf(stderr,
+                "[PROFILE-XDP] attach failed %s %s: native DRV mode required; "
+                "SKB/generic fallback disabled: %s\n",
                 role, ifname, strerror(rc < 0 ? -rc : rc));
         fflush(stderr);
         return -1;
     }
-    fprintf(stderr, "[PROFILE-XDP] attach OK %s %s (drv)\n", role, ifname);
+    fprintf(stderr,
+            "[PROFILE-XDP] attach OK %s %s (drv, AF_XDP copy-only)\n",
+            role, ifname);
     fflush(stderr);
     return 0;
 }

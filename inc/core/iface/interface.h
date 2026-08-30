@@ -63,6 +63,13 @@ static inline int ne_jumbo_append_bytes(uint8_t *dst, uint32_t capacity,
 #define XDP_PKT_CONTD (1U << 0)
 #endif
 
+/* This dataplane has one supported operating mode. Keep these flags
+ * centralized so no call site can silently select generic/SKB XDP or
+ * AF_XDP zero-copy. */
+#define NE_XDP_REQUIRED_MODE       XDP_FLAGS_DRV_MODE
+#define NE_XSK_REQUIRED_BIND_FLAGS \
+    (XDP_COPY | XDP_USE_NEED_WAKEUP | XDP_USE_SG)
+
 #include "core/util/cpu_map.h"
 
 struct bpf_object;

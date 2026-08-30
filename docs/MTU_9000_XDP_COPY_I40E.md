@@ -5,6 +5,11 @@ chunk 4096 byte; packet jumbo được truyền bằng chuỗi descriptor AF_XDP
 `XDP_PKT_CONTD`. Hai BPF program được khai báo bằng section `xdp.frags` và XSK
 được bind với `XDP_USE_SG`.
 
+Đây là chế độ bắt buộc, không phải ưu tiên: nếu NIC/driver/kernel không hỗ trợ
+native XDP driver mode, AF_XDP copy hoặc scatter-gather thì chương trình báo lỗi
+và dừng. Không có đường fallback sang `XDP_FLAGS_SKB_MODE`, generic XDP hoặc
+AF_XDP zero-copy.
+
 ## Yêu cầu hệ thống
 
 - Kernel và driver i40e phải công bố khả năng XDP RX scatter-gather

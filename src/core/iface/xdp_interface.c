@@ -625,7 +625,7 @@ static void interface_log_xsk_context(const char *ifname, int queue_id, int ret)
     nq = interface_get_queue_count(ifname);
     fprintf(stderr,
             "[DP] XSK create failed %s q=%d: %s (%d) — mtu=%d queues=%d "
-            "frame=%u copy=1 sg=1 master=%s%s\n",
+            "frame=%u mode=drv copy=1 sg=1 fallback=disabled master=%s%s\n",
             ifname, queue_id, strerror(err), ret, mtu, nq, NE_FRAME,
             master[0] ? master : "-",
             interface_is_bridge_slave(ifname) ? " (bridge-slave, Br kept)" : "");
@@ -921,8 +921,8 @@ static void clear_iface_queues_after_delete(struct ne_pair *p, struct ne_iface *
     iface->xdp_flags = 0;
 }
 
-static int xsk_create_queue(struct ne_pair *p, struct ne_iface *iface, const char *ifname,
-                            int q, uint32_t xdp_flags)
+static int xsk_create_queue(struct ne_pair *p, struct ne_iface *iface,
+                            const char *ifname, int q)
 {
     struct ne_xsk_queue *slot = &iface->queues[q];
     int preserve = is_umem_fq_owner_queue(p, iface, q);
@@ -930,9 +930,9 @@ static int xsk_create_queue(struct ne_pair *p, struct ne_iface *iface, const cha
         .rx_size = NE_RING,
         .tx_size = NE_RING,
         .libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
-        .xdp_flags = xdp_flags,
-        /* i40e: native XDP + AF_XDP copy. Keep XDP_COPY (not zero-copy). */
-        .bind_flags = XDP_COPY | XDP_USE_NEED_WAKEUP | XDP_USE_SG,
+        .xdp_flags = NE_XDP_REQUIRED_MODE,
+        /* i40e: native XDP + AF_XDP copy. No zero-copy/SKB fallback. */
+        .bind_flags = NE_XSK_REQUIRED_BIND_FLAGS,
     };
 
     zero_queue_rings(slot, preserve);
@@ -959,7 +959,6 @@ static void open_iface_queues_rollback(struct ne_pair *p, struct ne_iface *iface
 static int open_iface_queues(struct ne_pair *p, struct ne_iface *iface,
                              const char *ifname, int queue_count)
 {
-    const uint32_t mode = XDP_FLAGS_DRV_MODE;
     int q;
     int ret = 0;
 
@@ -975,7 +974,7 @@ static int open_iface_queues(struct ne_pair *p, struct ne_iface *iface,
     iface->xdp_flags = 0;
 
     for (q = 0; q < queue_count; q++) {
-        ret = xsk_create_queue(p, iface, ifname, q, mode);
+        ret = xsk_create_queue(p, iface, ifname, q);
         if (ret) {
             open_iface_queues_rollback(p, iface, q);
             interface_log_xsk_context(ifname, q, ret);
@@ -986,7 +985,7 @@ static int open_iface_queues(struct ne_pair *p, struct ne_iface *iface,
             return -1;
         }
     }
-    iface->xdp_flags = mode;
+    iface->xdp_flags = NE_XDP_REQUIRED_MODE;
     return 0;
 }
 
@@ -1041,7 +1040,7 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
 
     p->frame_size = NE_FRAME;
     p->packet_capacity = NE_PACKET_CAPACITY;
-    p->xdp_flags = XDP_FLAGS_DRV_MODE;
+    p->xdp_flags = NE_XDP_REQUIRED_MODE;
 
     p->local_queue_total = 0;
     p->wan_queue_total = 0;
