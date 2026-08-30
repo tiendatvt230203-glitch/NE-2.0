@@ -241,6 +241,14 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     if (!fwd || !pkt)
         goto drop;
 
+    if (flow_ok) {
+        int l3_off = crypto_eth_ipv4_offset(pkt, job.len);
+
+        ne_dp_stats_observe_traffic(NE_DP_TRAFFIC_LAN_TO_WAN, proto,
+                                    l3_off >= 0 ? job.len - (uint32_t)l3_off
+                                                : job.len);
+    }
+
     if (dp_pkt_is_arp(pkt, job.len)) {
         /* ARP: bridge path only — học MAC trong arp_bridge_from_local (client local). */
         if (arp_bridge_from_local(fwd, &job, pkt, li, NULL) == 0)

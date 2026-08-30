@@ -5,6 +5,11 @@
 
 struct forwarder;
 
+enum ne_dp_traffic_dir {
+    NE_DP_TRAFFIC_LAN_TO_WAN = 0,
+    NE_DP_TRAFFIC_WAN_TO_LAN = 1,
+};
+
 void ne_dp_stats_init(void);
 int ne_dp_stats_on(void);
 
@@ -28,6 +33,9 @@ void ne_dp_stats_tx_full_wan(int slot, uint32_t n);
 void ne_dp_stats_crypto_lan(int worker, uint32_t n);
 void ne_dp_stats_crypto_wan(int worker, uint32_t n);
 void ne_dp_stats_crypto_ring_drop(int worker, uint32_t n);
+
+void ne_dp_stats_observe_traffic(enum ne_dp_traffic_dir dir, uint8_t protocol,
+                                 uint32_t ipv4_len);
 
 void ne_dp_stats_tick(struct forwarder *fwd);
 

@@ -499,6 +499,10 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
     int dec;
     int encrypted;
     int profile_pi;
+    uint32_t flow_src_ip = 0, flow_dst_ip = 0;
+    uint16_t flow_src_port = 0, flow_dst_port = 0;
+    uint8_t flow_proto = 0;
+    int flow_ok;
 
     if (!fwd || !pkt)
         goto drop;
@@ -562,6 +566,17 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
             goto drop;
     }
 
+    flow_ok = dp_parse_flow(pkt, job.len, &flow_src_ip, &flow_dst_ip,
+                            &flow_src_port, &flow_dst_port, &flow_proto) == 0;
+    if (flow_ok) {
+        int l3_off = crypto_eth_ipv4_offset(pkt, job.len);
+
+        ne_dp_stats_observe_traffic(NE_DP_TRAFFIC_WAN_TO_LAN,
+                                    flow_proto,
+                                    l3_off >= 0 ? job.len - (uint32_t)l3_off
+                                                : job.len);
+    }
+
     if (encrypted) {
         uint32_t epoch = 0;
         uint32_t seq = 0;
@@ -576,19 +591,13 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
             struct dp_udp_reorder_key key;
             struct dp_udp_reorder_item item;
             struct dp_udp_reorder_ops ops = bond_reorder_ops(fwd);
-            uint32_t src_ip = 0, dst_ip = 0;
-            uint16_t src_port = 0, dst_port = 0;
-            uint8_t proto = 0;
-
-            if (dp_parse_flow(pkt, job.len, &src_ip, &dst_ip,
-                              &src_port, &dst_port, &proto) != 0 ||
-                proto != reorder_proto)
+            if (!flow_ok || flow_proto != reorder_proto)
                 goto drop;
-            key.src_ip = src_ip;
-            key.dst_ip = dst_ip;
-            key.src_port = src_port;
-            key.dst_port = dst_port;
-            key.protocol = proto;
+            key.src_ip = flow_src_ip;
+            key.dst_ip = flow_dst_ip;
+            key.src_port = flow_src_port;
+            key.dst_port = flow_dst_port;
+            key.protocol = flow_proto;
             memset(&item, 0, sizeof(item));
             item.packet = job;
             item.profile_pi = (int16_t)profile_pi;
