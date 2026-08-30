@@ -1,4 +1,5 @@
 #include "../../../inc/core/iface/interface.h"
+#include "../../../inc/core/iface/mtu_policy.h"
 #include "../../../inc/core/iface/profile_iface_xdp.h"
 #include "../../../inc/core/dataplane/dataplane_stats.h"
 #include <bpf/libbpf.h>
@@ -520,6 +521,80 @@ static int interface_validate_packet_mtu(const char *ifname)
     return 0;
 }
 
+int interface_validate_mtu_topology(const struct app_config *cfg)
+{
+    const char *max_lan_ifname = NULL;
+    const char *min_wan_ifname = NULL;
+    int max_lan_mtu = 0;
+    int min_wan_mtu = (int)NE_MAX_MTU + 1;
+    int dataplane_wans = 0;
+
+    if (!cfg)
+        return -1;
+
+    for (int li = 0; li < cfg->local_count; li++) {
+        const char *ifname = cfg->locals[li].ifname;
+        int mtu = interface_get_mtu(ifname);
+
+        if (mtu < 0) {
+            fprintf(stderr, "[VALIDATE] LAN %s: cannot read interface MTU\n",
+                    ifname);
+            return -1;
+        }
+        if (mtu < 576 || mtu > (int)NE_MAX_MTU) {
+            fprintf(stderr,
+                    "[VALIDATE] LAN %s: cannot use MTU %d (supported 576..%u)\n",
+                    ifname, mtu, NE_MAX_MTU);
+            return -1;
+        }
+        if (mtu > max_lan_mtu) {
+            max_lan_mtu = mtu;
+            max_lan_ifname = ifname;
+        }
+    }
+
+    for (int wi = 0; wi < cfg->wan_count; wi++) {
+        const char *ifname;
+        int mtu;
+
+        if (!cfg->wans[wi].dataplane)
+            continue;
+        dataplane_wans++;
+        ifname = cfg->wans[wi].ifname;
+        mtu = interface_get_mtu(ifname);
+        if (mtu < 0) {
+            fprintf(stderr, "[VALIDATE] WAN %s: cannot read interface MTU\n",
+                    ifname);
+            return -1;
+        }
+        if (mtu < 576 || mtu > (int)NE_MAX_MTU) {
+            fprintf(stderr,
+                    "[VALIDATE] WAN %s: cannot use MTU %d (supported 576..%u)\n",
+                    ifname, mtu, NE_MAX_MTU);
+            return -1;
+        }
+        if (mtu < min_wan_mtu) {
+            min_wan_mtu = mtu;
+            min_wan_ifname = ifname;
+        }
+    }
+
+    /* LAN-only startup remains valid until a dataplane WAN is added. */
+    if (dataplane_wans == 0)
+        return 0;
+    if (!max_lan_ifname || !min_wan_ifname)
+        return -1;
+    if (!ne_mtu_topology_supported((uint32_t)max_lan_mtu,
+                                   (uint32_t)min_wan_mtu)) {
+        fprintf(stderr,
+                "[VALIDATE] unsupported MTU topology: LAN %s MTU %d > "
+                "WAN %s MTU %d; LAN MTU must be <= every dataplane WAN MTU\n",
+                max_lan_ifname, max_lan_mtu, min_wan_ifname, min_wan_mtu);
+        return -1;
+    }
+    return 0;
+}
+
 static void interface_log_xsk_context(const char *ifname, int queue_id, int ret)
 {
     char master[IF_NAMESIZE];
@@ -949,6 +1024,8 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
 #define NE_TRY(expr) do { if (expr) goto fail; } while (0)
     if (!p || !cfg || cfg->local_count <= 0)
         return -1;
+    if (interface_validate_mtu_topology(cfg) != 0)
+        return -1;
 
     memset(p, 0, sizeof(*p));
     p->umem_fq_li = -1;
@@ -1193,6 +1270,8 @@ int ne_pair_plumb_local(struct ne_pair *p, const struct app_config *cfg, int cfg
 
     const char *ifname = cfg->locals[cfg_local_idx].ifname;
 
+    if (interface_validate_mtu_topology(cfg) != 0)
+        return -1;
     if (interface_preflight(ifname) != 0 || interface_validate_packet_mtu(ifname) != 0)
         return -1;
 
@@ -1243,6 +1322,8 @@ int ne_pair_plumb_wan_dp(struct ne_pair *p, const struct app_config *cfg, int cf
 
     const char *ifname = cfg->wans[cfg_wan_idx].ifname;
 
+    if (interface_validate_mtu_topology(cfg) != 0)
+        return -1;
     if (interface_preflight(ifname) != 0 || interface_validate_packet_mtu(ifname) != 0)
         return -1;
 

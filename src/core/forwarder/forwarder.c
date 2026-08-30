@@ -540,6 +540,8 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
                 "[FWD] no dataplane WAN — LAN-only until a dataplane WAN is added\n");
         fflush(stderr);
     }
+    if (interface_validate_mtu_topology(cfg) != 0)
+        return -1;
 
     memset(fwd, 0, sizeof(*fwd));
     dataplane_bond_reorder_configure();

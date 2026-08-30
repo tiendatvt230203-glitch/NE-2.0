@@ -214,6 +214,7 @@ void interface_reset_redirect_maps(void);
 void interface_promisc_off_config(const struct app_config *cfg);
 int interface_set_queue_count(const char *ifname, int desired_count);
 int interface_get_queue_count(const char *ifname);
+int interface_validate_mtu_topology(const struct app_config *cfg);
 
 int ne_rx_lan_slots_for(int local_queue_total);
 int ne_rx_wan_slots_for(int wan_queue_total);

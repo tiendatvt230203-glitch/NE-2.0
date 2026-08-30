@@ -1,5 +1,6 @@
 #include "crypto/eth_parse.h"
 #include "crypto/pqc_frag_layout.h"
+#include "core/iface/mtu_policy.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -35,6 +36,16 @@ static void test_udp_fragment_boundary(void)
     assert(crypto_pqc_udp_needs_fragment(8954, TEST_PATH_MTU));
     assert(crypto_pqc_udp_needs_fragment(9014, TEST_PATH_MTU));
     assert(!crypto_pqc_udp_needs_fragment(1500, TEST_PATH_MTU));
+}
+
+static void test_supported_mtu_topologies(void)
+{
+    assert(ne_mtu_topology_supported(1500, 1500));
+    assert(ne_mtu_topology_supported(9000, 9000));
+    assert(ne_mtu_topology_supported(1500, 9000));
+    assert(ne_mtu_topology_supported(3000, 9000));
+    assert(!ne_mtu_topology_supported(9000, 1500));
+    assert(!ne_mtu_topology_supported(9000, 3000));
 }
 
 static uint16_t read_mss(const uint8_t *pkt)
@@ -93,6 +104,7 @@ int main(void)
 {
     test_udp_two_fragment_layout();
     test_udp_fragment_boundary();
+    test_supported_mtu_topologies();
     test_tcp_mss_is_only_lowered_when_needed();
     puts("MTU policy tests: OK");
     return 0;
