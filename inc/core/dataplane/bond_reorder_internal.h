@@ -1,7 +1,7 @@
 #ifndef BOND_REORDER_INTERNAL_H
 #define BOND_REORDER_INTERNAL_H
 
-#include "../../../inc/core/dataplane/bond_reorder.h"
+#include "core/dataplane/bond_reorder.h"
 
 enum dp_bond_reorder_protocol {
     DP_BOND_REORDER_TCP = 0,
