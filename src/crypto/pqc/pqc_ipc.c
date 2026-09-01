@@ -177,7 +177,11 @@ int sig_pqc_handle_ipc_cli(int argc, char **argv) {
 
         char msg[128];
         snprintf(msg, sizeof(msg), "RETRY %d\n", policy_id);
-        write(client_fd, msg, strlen(msg));
+        if (write(client_fd, msg, strlen(msg)) < 0) {
+            perror("[PQC-CLI] write");
+            close(client_fd);
+            return -1;
+        }
 
         char resp[256];
         int n = read(client_fd, resp, sizeof(resp) - 1);

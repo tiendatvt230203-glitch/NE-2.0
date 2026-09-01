@@ -226,10 +226,13 @@ static void *cfm_status_ipc_thread(void *arg)
         if (read(client_fd, req, sizeof(req) - 1) > 0)
             sscanf(req, "GS %15s", name);
         st = cfm_wan_status_by_name(name);
-        if (st < 0)
-            (void)write(client_fd, "", 0);
-        else
-            (void)write(client_fd, st ? "UP\n" : "DOWN\n", st ? 3 : 5);
+        if (st >= 0) {
+            const char *reply = st ? "UP\n" : "DOWN\n";
+            size_t reply_len = st ? 3U : 5U;
+
+            if (write(client_fd, reply, reply_len) < 0)
+                perror("[CFM] status IPC write");
+        }
         close(client_fd);
     }
     return NULL;

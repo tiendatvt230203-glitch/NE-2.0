@@ -50,6 +50,7 @@ static int profile_iface_ifname_safe(const char *ifname)
 static void profile_iface_xdp_link_off(const char *ifname)
 {
     char cmd[160];
+    int rc;
 
     if (!profile_iface_ifname_safe(ifname))
         return;
@@ -59,7 +60,10 @@ static void profile_iface_xdp_link_off(const char *ifname)
      * is attached (post-crash scrub) or after bpf_object__close already ran. */
     snprintf(cmd, sizeof(cmd), "/sbin/ip link set dev %s xdp off >/dev/null 2>&1",
              ifname);
-    (void)system(cmd);
+    rc = system(cmd);
+    if (rc != 0)
+        fprintf(stderr, "[PROFILE-XDP] failed to detach XDP from %s (system=%d)\n",
+                ifname, rc);
     profile_xdp_stop_log("detach done", ifname);
 }
 

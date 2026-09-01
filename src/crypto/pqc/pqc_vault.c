@@ -55,14 +55,19 @@ static void parse_vault_url(const char *url) {
 
     char *colon = strchr(hostport, ':');
     char *slash = strchr(hostport, '/');
+    size_t host_len;
     if (slash) *slash = '\0';
+
+    host_len = strnlen(hostport, sizeof(g_vault_host) - 1);
 
     if (colon && (!slash || colon < slash)) {
         *colon = '\0';
-        strncpy(g_vault_host, hostport, sizeof(g_vault_host) - 1);
+        memcpy(g_vault_host, hostport, host_len);
+        g_vault_host[host_len] = '\0';
         g_vault_port = atoi(colon + 1);
     } else {
-        strncpy(g_vault_host, hostport, sizeof(g_vault_host) - 1);
+        memcpy(g_vault_host, hostport, host_len);
+        g_vault_host[host_len] = '\0';
         g_vault_port = 8200;
     }
 
