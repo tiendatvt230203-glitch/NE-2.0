@@ -667,10 +667,12 @@ Phần này liệt kê mọi file nguồn sở hữu bởi dự án. Với file 
 | `eth_parse.c` | `crypto_tcp_clamp_mss` | MSS edit + incremental checksum |
 | `packet_crypto.c` | init/get/refresh/wipe key slots | Policy crypto context lifecycle |
 | `opt_no_frag_ops.c` | generic ops for non-UDP protocols | Encrypt/decrypt không reassembly |
-| `pqc_l2_option.c` | TCP/general/ARP encrypt/decrypt | Xây wire header, nonce, GCM và restore EtherType |
-| `pqc_l2_option.c` | UDP full/split encrypt | Marker/shim, datagram ID, hai nonce riêng |
-| `pqc_l2_option.c` | UDP fragment parse/reasm/GC | Verify, giữ hai phần, join, timeout |
-| `pqc_l2_option.c` | ops factories | Export TCP/UDP/ICMP/OSPF/ARP implementations |
+| `pqc_l2_common.c` | offset/header và generic IPv4 codec | Primitive wire/nonce/GCM dùng chung |
+| `pqc_l2_tcp.c` | TCP ops | Marker, epoch/sequence và legacy decrypt fallback |
+| `pqc_l2_udp.c` | UDP ops | Full/split, fragment parse, reassembly table và GC |
+| `pqc_l2_icmp.c` | ICMP ops | Pipeline ICMP độc lập trên generic IPv4 codec |
+| `pqc_l2_ospf.c` | OSPF ops | Pipeline OSPF độc lập trên generic IPv4 codec |
+| `pqc_l2_arp.c` | ARP ops | Fake EtherType và ARP payload codec riêng |
 | `traffic_crypto.c` | global init/cleanup/random/nonce | Wrapper libscrypt và nonce TLS |
 | `traffic_crypto.c` | GCM/CBC/HMAC/digest/HKDF wrappers | Symmetric primitives |
 | `traffic_crypto.c` | KEM/DSA generate/encap/decap/sign/verify | PQC primitives |
@@ -763,7 +765,7 @@ Phần từ đây trở đi là phần quan trọng nhất đối với người
 2. `forwarder.h` và `forwarder.c` để hiểu thread nào sở hữu stage nào.
 3. `local_egress.c` và `wan_ingress.c` để hiểu hai call graph packet.
 4. `crypto_route.c`, `wan_scheduler.c`, `bond_reorder.c`, `tcp_reorder.c` và `udp_reorder.c` để hiểu state per-flow.
-5. `crypto_option_router.c`, `pqc_l2_option.c`, `crypto_runtime.c` để hiểu wire format và key.
+5. `crypto_option_router.c`, nhóm `pqc_l2_*.c`, `crypto_runtime.c` để hiểu wire format và key.
 6. `pqc_handshake.c` để hiểu control-plane key rotation; không đọc file này trước dataplane.
 7. `arp_bridge.c`, `mac_learn.c`, `cfm_diag.c`, `wan_admin.c` để hiểu traffic phụ trợ và failover.
 8. `config.c`, `db_config.c`, `main.c` để hiểu cách state được tạo và thay đổi khi vận hành.
@@ -1181,11 +1183,11 @@ Nó tìm sequence nhỏ nhất đang ahead, cộng số packet thiếu vào `gap
 
 Hold phải lớn hơn differential path delay cộng scheduler/TX jitter, không chỉ RTT trung bình. Tăng quá cao giữ nhiều UMEM và tăng application latency; giảm quá thấp giải phóng sớm rồi late packet đến sau. Khi chỉnh phải quan sát đồng thời `held`, `released`, `late`, `gap`, pool free và TCP retransmit.
 
-## 33. Phân tích sâu `pqc_l2_option.c`
+## 33. Phân tích sâu nhóm `pqc_l2_*.c`
 
 ### 33.1 Vai trò
 
-File này là wire codec, không phải handshake. Nó nhận `packet_crypto_ctx` đã có key và thực hiện:
+Nhóm file này là wire codec, không phải handshake. Nó nhận `packet_crypto_ctx` đã có key và thực hiện:
 
 - thêm/xóa fake EtherType, policy ID, worker ID, nonce, marker, shim và tag;
 - encrypt/decrypt in-place;
@@ -1196,15 +1198,15 @@ Thay wire layout ở đây bắt buộc tăng marker version và triển khai co
 
 ### 33.2 Offset helpers
 
-`l2_policy_off`, `l2_core_id_off`, `l2_nonce_off`, `l2_enc_start_off`, `l2_frag_magic_off` phải hỗ trợ Ethernet/VLAN prefix nhất quán với `eth_parse.c`. Không hardcode offset 14 nếu muốn giữ VLAN.
+Các helper `pqc_l2_*_off` trong `pqc_l2_common.c` phải hỗ trợ Ethernet/VLAN prefix nhất quán với `eth_parse.c`. Không hardcode offset 14 nếu muốn giữ VLAN.
 
 ### 33.3 Encrypt TCP/general/ARP
 
-`l2_do_encrypt_tcp()` lấy epoch/sequence từ TLS metadata, chèn TCP marker v1 và 8-byte shim trước GCM encrypt. `l2_do_encrypt()` là general path không reorder shim. ARP có layout riêng vì plaintext ARP không có IPv4 header.
+`pqc_l2_tcp.c` lấy epoch/sequence từ TLS metadata, chèn TCP marker v1 và 8-byte shim trước GCM encrypt. ICMP/OSPF gọi generic IPv4 codec nhưng có entry point và source riêng. ARP có layout riêng vì plaintext ARP không có IPv4 header.
 
 ### 33.4 Encrypt UDP
 
-`l2_do_encrypt_udp()` dùng kind FULL. `l2_split()`:
+`pqc_l2_udp.c` dùng kind FULL cho frame không split. Nhánh split:
 
 1. Parse Ethernet/VLAN, IPv4 IHL, UDP header/payload.
 2. Tính layout theo runtime MTU.
@@ -1220,9 +1222,9 @@ Các decrypt helper cuối cùng dùng `CURRENT`, rồi `NEXT`, rồi `PREV`. V�
 
 ### 33.6 Reassembly table
 
-`opt_pick_slot()` probe 8 entries từ hash `(datagram_id, epoch)`. Nó ưu tiên exact match, sau đó empty/expired, cuối cùng oldest trong probe. Evict oldest hiện không có counter riêng.
+`pick_slot()` probe 8 entries từ hash `(datagram_id, epoch)`. Nó ưu tiên exact match, sau đó empty/expired, cuối cùng oldest trong probe. Evict oldest hiện không có counter riêng.
 
-`opt_store_first/second()` copy plaintext. `opt_emit_join()` chỉ complete khi đủ hai phần, allocate jumbo nếu output không vừa input buffer, restore EtherType IPv4 rồi clear hot metadata.
+`store_first/second()` copy plaintext. `emit_join()` chỉ complete khi đủ hai phần, allocate jumbo nếu output không vừa input buffer, restore EtherType IPv4 rồi clear hot metadata.
 
 **Điểm cần chú ý:** exact key check trong slot selection dùng epoch+datagram ID, còn `opt_prepare_entry()` có thêm bond sequence. Khi collision/reuse datagram ID xảy ra, sequence bảo vệ entry khỏi ghép sai nhưng có thể làm clear fragment cũ. Counter collision cần được thêm để vận hành nhìn thấy.
 
@@ -1233,7 +1235,7 @@ Các decrypt helper cuối cùng dùng `CURRENT`, rồi `NEXT`, rồi `PREV`. V�
 - `pqc_handshake.c` sở hữu network state machine và key material theo policy.
 - `crypto_runtime.c` chuyển key material đó thành packet contexts tối ưu cho dataplane worker.
 - `packet_crypto.c` quản lý slot bytes và refresh.
-- `pqc_l2_option.c` chỉ consume context, không tự bắt tay.
+- Nhóm `pqc_l2_*.c` chỉ consume context, không tự bắt tay.
 
 Không gọi handshake mutex/API nặng trên fast path.
 
@@ -1892,9 +1894,9 @@ Epoch/sequence/datagram ID được truyền gián tiếp qua TLS trong `crypto_
 ```text
 dp_*_next_tx_seq()
  -> crypto_option_*_set_tx_seq()
- -> pqc_l2_option encrypt đọc TLS và ghi wire shim
+ -> pqc_l2_tcp/udp encrypt đọc TLS và ghi wire shim
 
-pqc_l2_option decrypt xác thực wire shim
+pqc_l2_tcp/udp decrypt xác thực wire shim
  -> crypto_option_*_set_rx_meta()
  -> wan_ingress take_rx_meta()
  -> reorder item
@@ -2082,7 +2084,7 @@ Ví dụ này nối toàn bộ mô hình dữ liệu với hàm:
 5. `fwd_wan_pick_for_local()` dùng profile WAN arrays và TLS `flow_swrr_state` chọn cfg WAN, rồi map sang `wan_dp`.
 6. `dp_udp_next_tx_seq()` tăng `dp_route_entry.udp_tx_seq[direction]`.
 7. `fwd_crypto_policy_ctx()` trả pointer tới worker `packet_crypto_ctx`.
-8. `crypto_option_udp_set_tx_seq()` đặt TLS metadata; `pqc_l2_option` đọc metadata.
+8. `crypto_option_udp_set_tx_seq()` đặt TLS metadata; `pqc_l2_udp.c` đọc metadata.
 9. Layout helper tạo `crypto_pqc_udp_frag_layout`; split-tail cache cấp `ne_packet` thứ hai.
 10. Hai lần GCM dùng cùng CURRENT key trong context nhưng nonce riêng; shim có cùng epoch/seq/datagram ID.
 11. `ne_ring_try_push_pair()` đưa hai descriptors vào `mid_to_wan[wan_dp][tx_slot]` cùng transaction.
