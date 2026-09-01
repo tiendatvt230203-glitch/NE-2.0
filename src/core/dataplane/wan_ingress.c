@@ -11,6 +11,7 @@
 #include "../../../inc/core/flow/mac_learn.h"
 #include "../../../inc/core/dataplane/arp_bridge.h"
 #include "../../../inc/core/dataplane/dataplane_stats.h"
+#include "../../../inc/core/dataplane/tcp_reorder.h"
 #include "../../../inc/core/dataplane/udp_reorder.h"
 
 #include <netinet/in.h>
@@ -416,7 +417,7 @@ static int forward_wan_to_local(struct forwarder *fwd, struct ne_packet *job,
     return -1;
 }
 
-static int bond_reorder_emit(void *ctx, struct dp_udp_reorder_item *item)
+static int bond_reorder_emit(void *ctx, struct dp_bond_reorder_item *item)
 {
     struct forwarder *fwd = ctx;
     uint8_t *pkt;
@@ -439,7 +440,7 @@ static int bond_reorder_emit(void *ctx, struct dp_udp_reorder_item *item)
     return 0;
 }
 
-static void bond_reorder_drop(void *ctx, struct dp_udp_reorder_item *item)
+static void bond_reorder_drop(void *ctx, struct dp_bond_reorder_item *item)
 {
     struct forwarder *fwd = ctx;
 
@@ -449,9 +450,9 @@ static void bond_reorder_drop(void *ctx, struct dp_udp_reorder_item *item)
     ne_frame_free(&fwd->pair, item->packet.addr);
 }
 
-static struct dp_udp_reorder_ops bond_reorder_ops(struct forwarder *fwd)
+static struct dp_bond_reorder_ops bond_reorder_ops(struct forwarder *fwd)
 {
-    struct dp_udp_reorder_ops ops = {
+    struct dp_bond_reorder_ops ops = {
         .ctx = fwd,
         .emit = bond_reorder_emit,
         .drop = bond_reorder_drop,
@@ -462,20 +463,24 @@ static struct dp_udp_reorder_ops bond_reorder_ops(struct forwarder *fwd)
 
 void dataplane_bond_reorder_configure(void)
 {
+    dp_tcp_reorder_configure_from_env();
     dp_udp_reorder_configure_from_env();
 }
 
 void dataplane_bond_reorder_gc(struct forwarder *fwd, int worker_idx)
 {
-    struct dp_udp_reorder_ops ops = bond_reorder_ops(fwd);
+    struct dp_bond_reorder_ops ops = bond_reorder_ops(fwd);
+    uint64_t now_ns = dp_bond_reorder_now_ns();
 
-    dp_udp_reorder_gc(worker_idx, dp_udp_reorder_now_ns(), &ops);
+    dp_tcp_reorder_gc(worker_idx, now_ns, &ops);
+    dp_udp_reorder_gc(worker_idx, now_ns, &ops);
 }
 
 void dataplane_bond_reorder_reset(struct forwarder *fwd, int worker_idx)
 {
-    struct dp_udp_reorder_ops ops = bond_reorder_ops(fwd);
+    struct dp_bond_reorder_ops ops = bond_reorder_ops(fwd);
 
+    dp_tcp_reorder_reset_worker(worker_idx, &ops);
     dp_udp_reorder_reset_worker(worker_idx, &ops);
 }
 
@@ -580,6 +585,7 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
     if (encrypted) {
         uint32_t epoch = 0;
         uint32_t seq = 0;
+        uint64_t now_ns;
         uint8_t reorder_proto = 0;
 
         if (crypto_option_udp_take_rx_meta(&epoch, &seq) == 0)
@@ -588,9 +594,9 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
             reorder_proto = IPPROTO_TCP;
 
         if (reorder_proto != 0) {
-            struct dp_udp_reorder_key key;
-            struct dp_udp_reorder_item item;
-            struct dp_udp_reorder_ops ops = bond_reorder_ops(fwd);
+            struct dp_bond_reorder_key key;
+            struct dp_bond_reorder_item item;
+            struct dp_bond_reorder_ops ops = bond_reorder_ops(fwd);
             if (!flow_ok || flow_proto != reorder_proto)
                 goto drop;
             key.src_ip = flow_src_ip;
@@ -603,9 +609,13 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
             item.profile_pi = (int16_t)profile_pi;
             item.ingress_wan_dp = job.wan_idx < fwd->wan_count
                 ? (int8_t)job.wan_idx : -1;
-            dp_udp_reorder_submit(dp_crypto_current_worker_idx(), &key,
-                                  epoch, seq, &item,
-                                  dp_udp_reorder_now_ns(), &ops);
+            now_ns = dp_bond_reorder_now_ns();
+            if (reorder_proto == IPPROTO_UDP)
+                dp_udp_reorder_submit(dp_crypto_current_worker_idx(), &key,
+                                      epoch, seq, &item, now_ns, &ops);
+            else
+                dp_tcp_reorder_submit(dp_crypto_current_worker_idx(), &key,
+                                      epoch, seq, &item, now_ns, &ops);
             return;
         }
         dp_out_ring_bind(dp_flow_pick_tx_slot(pkt, job.len,

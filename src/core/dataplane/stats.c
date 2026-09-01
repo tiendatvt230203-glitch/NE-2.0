@@ -1,4 +1,5 @@
 #include "../../../inc/core/dataplane/dataplane_stats.h"
+#include "../../../inc/core/dataplane/tcp_reorder.h"
 #include "../../../inc/core/dataplane/udp_reorder.h"
 #include "../../../inc/core/forwarder/forwarder.h"
 #include "../../../inc/core/iface/interface.h"
@@ -37,7 +38,8 @@ struct dp_snapshot {
     uint64_t tx_no_free_lan, tx_no_free_wan;
     uint64_t jumbo_rx, jumbo_tx, jumbo_drop;
     struct ne_xdp_statistics xdp_lan, xdp_wan;
-    struct dp_udp_reorder_stats reorder;
+    struct dp_bond_reorder_stats tcp_reorder;
+    struct dp_bond_reorder_stats udp_reorder;
 };
 
 struct report_window {
@@ -290,7 +292,8 @@ static void capture_snapshot(struct forwarder *fwd, struct dp_snapshot *out)
     out->tx_full_lan = sum_slots(s_tx_full_lan, NE_TX_SLOTS);
     out->tx_full_wan = sum_slots(s_tx_full_wan, NE_TX_WAN_SLOTS);
     out->crypto_ring_drop = sum_slots(s_crypto_ring_drop, NE_CRYPTO_WORKERS);
-    dp_udp_reorder_get_stats(&out->reorder);
+    dp_tcp_reorder_get_stats(&out->tcp_reorder);
+    dp_udp_reorder_get_stats(&out->udp_reorder);
     if (!fwd) return;
     for (int li = 0; li < fwd->local_count; li++)
         out->tx_no_free_lan += fwd->pair.locals[li].tx_no_free;
@@ -353,9 +356,17 @@ static void emit_report(struct forwarder *fwd, struct report_window *w,
         delta64(cur->tx_full_wan,p->tx_full_wan)+delta64(cur->crypto_ring_drop,p->crypto_ring_drop)+
         delta64(cur->tx_no_free_lan,p->tx_no_free_lan)+delta64(cur->tx_no_free_wan,p->tx_no_free_wan)+
         delta64(cur->jumbo_drop,p->jumbo_drop);
-    reorder_bad = delta64(cur->reorder.late_or_duplicate,p->reorder.late_or_duplicate)+
-        delta64(cur->reorder.gap_skipped,p->reorder.gap_skipped)+
-        delta64(cur->reorder.overflow,p->reorder.overflow)+delta64(cur->reorder.evicted,p->reorder.evicted);
+    reorder_bad =
+        delta64(cur->tcp_reorder.late,p->tcp_reorder.late)+
+        delta64(cur->tcp_reorder.duplicate_dropped,p->tcp_reorder.duplicate_dropped)+
+        delta64(cur->tcp_reorder.gap_skipped,p->tcp_reorder.gap_skipped)+
+        delta64(cur->tcp_reorder.overflow,p->tcp_reorder.overflow)+
+        delta64(cur->tcp_reorder.evicted,p->tcp_reorder.evicted)+
+        delta64(cur->udp_reorder.late,p->udp_reorder.late)+
+        delta64(cur->udp_reorder.duplicate_dropped,p->udp_reorder.duplicate_dropped)+
+        delta64(cur->udp_reorder.gap_skipped,p->udp_reorder.gap_skipped)+
+        delta64(cur->udp_reorder.overflow,p->udp_reorder.overflow)+
+        delta64(cur->udp_reorder.evicted,p->udp_reorder.evicted);
     xdp_bad = xdp_failures(&cur->xdp_lan,&p->xdp_lan)+xdp_failures(&cur->xdp_wan,&p->xdp_wan);
     if (fwd) {
         for (int i=0;i<(int)NE_CRYPTO_WORKERS;i++) { q_lan+=ne_ring_count(&fwd->local_to_mid[i]); q_wan+=ne_ring_count(&fwd->wan_to_mid[i]); }
@@ -373,11 +384,11 @@ static void emit_report(struct forwarder *fwd, struct report_window *w,
         (unsigned long long)delta64(cur->rx_ring_drop_lan,p->rx_ring_drop_lan),(unsigned long long)delta64(cur->rx_ring_drop_wan,p->rx_ring_drop_wan),(unsigned long long)delta64(cur->mid_ring_drop,p->mid_ring_drop),
         (unsigned long long)delta64(cur->tx_full_lan,p->tx_full_lan),(unsigned long long)delta64(cur->tx_full_wan,p->tx_full_wan),(unsigned long long)delta64(cur->crypto_ring_drop,p->crypto_ring_drop),
         (unsigned long long)delta64(cur->tx_no_free_lan,p->tx_no_free_lan),(unsigned long long)delta64(cur->tx_no_free_wan,p->tx_no_free_wan),(unsigned long long)delta64(cur->jumbo_drop,p->jumbo_drop));
-    fprintf(s_log," reorder TCP(held=%llu released=%llu late_dup=%llu gap_skip=%llu overflow=%llu evicted=%llu) UDP(held=%llu released=%llu late_dup=%llu gap_skip=%llu overflow=%llu evicted=%llu) held_high_water=%llu\n",
-        (unsigned long long)delta64(cur->reorder.tcp_held,p->reorder.tcp_held),(unsigned long long)delta64(cur->reorder.tcp_released,p->reorder.tcp_released),(unsigned long long)delta64(cur->reorder.tcp_late_or_duplicate,p->reorder.tcp_late_or_duplicate),
-        (unsigned long long)delta64(cur->reorder.tcp_gap_skipped,p->reorder.tcp_gap_skipped),(unsigned long long)delta64(cur->reorder.tcp_overflow,p->reorder.tcp_overflow),(unsigned long long)delta64(cur->reorder.tcp_evicted,p->reorder.tcp_evicted),
-        (unsigned long long)delta64(cur->reorder.udp_held,p->reorder.udp_held),(unsigned long long)delta64(cur->reorder.udp_released,p->reorder.udp_released),(unsigned long long)delta64(cur->reorder.udp_late_or_duplicate,p->reorder.udp_late_or_duplicate),
-        (unsigned long long)delta64(cur->reorder.udp_gap_skipped,p->reorder.udp_gap_skipped),(unsigned long long)delta64(cur->reorder.udp_overflow,p->reorder.udp_overflow),(unsigned long long)delta64(cur->reorder.udp_evicted,p->reorder.udp_evicted),(unsigned long long)cur->reorder.high_water);
+    fprintf(s_log," reorder TCP(held=%llu released=%llu late_forwarded=%llu duplicate_dropped=%llu gap_skip=%llu overflow=%llu evicted=%llu high_water=%llu) UDP(held=%llu released=%llu late_dropped=%llu duplicate_dropped=%llu gap_skip=%llu overflow=%llu evicted=%llu high_water=%llu)\n",
+        (unsigned long long)delta64(cur->tcp_reorder.held,p->tcp_reorder.held),(unsigned long long)delta64(cur->tcp_reorder.released,p->tcp_reorder.released),(unsigned long long)delta64(cur->tcp_reorder.late,p->tcp_reorder.late),(unsigned long long)delta64(cur->tcp_reorder.duplicate_dropped,p->tcp_reorder.duplicate_dropped),
+        (unsigned long long)delta64(cur->tcp_reorder.gap_skipped,p->tcp_reorder.gap_skipped),(unsigned long long)delta64(cur->tcp_reorder.overflow,p->tcp_reorder.overflow),(unsigned long long)delta64(cur->tcp_reorder.evicted,p->tcp_reorder.evicted),(unsigned long long)cur->tcp_reorder.high_water,
+        (unsigned long long)delta64(cur->udp_reorder.held,p->udp_reorder.held),(unsigned long long)delta64(cur->udp_reorder.released,p->udp_reorder.released),(unsigned long long)delta64(cur->udp_reorder.late,p->udp_reorder.late),(unsigned long long)delta64(cur->udp_reorder.duplicate_dropped,p->udp_reorder.duplicate_dropped),
+        (unsigned long long)delta64(cur->udp_reorder.gap_skipped,p->udp_reorder.gap_skipped),(unsigned long long)delta64(cur->udp_reorder.overflow,p->udp_reorder.overflow),(unsigned long long)delta64(cur->udp_reorder.evicted,p->udp_reorder.evicted),(unsigned long long)cur->udp_reorder.high_water);
     fprintf(s_log," xdp LAN(drop=%llu ring_full=%llu fill_empty=%llu rx_bad=%llu tx_bad=%llu) WAN(drop=%llu ring_full=%llu fill_empty=%llu rx_bad=%llu tx_bad=%llu)\n",
         (unsigned long long)delta64(cur->xdp_lan.rx_dropped,p->xdp_lan.rx_dropped),(unsigned long long)delta64(cur->xdp_lan.rx_ring_full,p->xdp_lan.rx_ring_full),(unsigned long long)delta64(cur->xdp_lan.rx_fill_ring_empty_descs,p->xdp_lan.rx_fill_ring_empty_descs),
         (unsigned long long)delta64(cur->xdp_lan.rx_invalid_descs,p->xdp_lan.rx_invalid_descs),(unsigned long long)delta64(cur->xdp_lan.tx_invalid_descs,p->xdp_lan.tx_invalid_descs),
