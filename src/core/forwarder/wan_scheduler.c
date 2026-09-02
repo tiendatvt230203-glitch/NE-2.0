@@ -587,8 +587,10 @@ static int pick_least_loaded_wan(struct forwarder *fwd, int profile_idx, int sel
 int fwd_wan_pick_for_local(struct forwarder *fwd, int profile_idx, int flow_ok,
                            uint32_t src_ip, uint32_t dst_ip,
                            uint16_t src_port, uint16_t dst_port,
-                           uint8_t proto)
+                           uint8_t proto, uint32_t path_mtu)
 {
+    int actual_dp;
+
     if (!fwd || fwd->wan_count <= 0)
         return -1;
     if (profile_idx < 0 || profile_idx >= fwd->cfg->profile_count)
@@ -603,8 +605,9 @@ int fwd_wan_pick_for_local(struct forwarder *fwd, int profile_idx, int flow_ok,
         return pick_least_loaded_wan(fwd, profile_idx, 0);
 
     int wan_cfg = flow_ok
-        ? flow_table_pick_wan_per_flow_packet(src_ip, dst_ip, src_port, dst_port, proto,
-                                              allowed_wans, allowed_weights, pool_n)
+        ? flow_table_pick_wan_per_flow_window(src_ip, dst_ip, src_port, dst_port, proto,
+                                              allowed_wans, allowed_weights, pool_n,
+                                              path_mtu)
         : flow_table_pick_wan_per_packet(allowed_wans, allowed_weights, pool_n);
     if (wan_cfg < 0)
         return pick_least_loaded_wan(fwd, profile_idx, 0);
@@ -615,8 +618,16 @@ int fwd_wan_pick_for_local(struct forwarder *fwd, int profile_idx, int flow_ok,
     if (dp < 0 || dp >= fwd->wan_count || !fwd_wan_dp_ok_for_new_traffic(dp))
         return pick_least_loaded_wan(fwd, profile_idx, 0);
 
-    /* Do not drop only because the scheduled WAN ring is full while another
-     * eligible WAN still has room.  The smooth state advances as if selected,
-     * so the configured long-term ratio converges after the transient. */
-    return pick_least_loaded_wan(fwd, profile_idx, dp);
+    /* A pressure fallback is an early window boundary, not a one-packet spill.
+     * Rebind the flow so following packets stay on the fallback WAN. */
+    actual_dp = pick_least_loaded_wan(fwd, profile_idx, dp);
+    if (flow_ok && actual_dp >= 0 && actual_dp < fwd->wan_count && actual_dp != dp) {
+        int actual_cfg = fwd->wan_cfg_idx[actual_dp];
+
+        if (actual_cfg >= 0)
+            flow_table_rebind_per_flow_wan(src_ip, dst_ip, src_port, dst_port,
+                                           proto, actual_cfg, allowed_weights,
+                                           pool_n, path_mtu);
+    }
+    return actual_dp;
 }

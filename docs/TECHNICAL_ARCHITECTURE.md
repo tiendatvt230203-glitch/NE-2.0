@@ -2120,7 +2120,12 @@ Gợi ý placement:
 - State đọc chéo subsystem: cung cấp snapshot DTO, không expose internal mutable pointer.
 - Secret/key: owner rõ ràng, wipe khi hết lifetime, không đưa vào generic log/snapshot.
 
-## 52. Chia băng thông per-packet sau khi bỏ `window_kb`
+## 52. Lịch sử chia per-packet sau khi bỏ `window_kb`
+
+> Phần 52 mô tả thiết kế SWRR per-packet của commit `0962f45` để phục vụ
+> đối chiếu lịch sử. Thiết kế hiện hành đã chuyển sang per-connect byte window;
+> xem phần 53. Các câu dùng từ “hiện tại” trong phần 52 chỉ thuộc thời điểm của
+> thiết kế cũ này.
 
 ### 52.1 `window_kb` cũ làm gì
 
@@ -2355,3 +2360,71 @@ Với workload mục tiêu là TCP bulk hoặc UDP datagram đồng kích thư�
 - tỷ lệ đo bằng Gbit/s sẽ gần weight vì packet size gần nhau.
 
 Nếu traffic có kích thước packet rất khác nhau và yêu cầu tỷ lệ Gbit/s chính xác, current SWRR chưa đủ; khi đó cần byte-aware per-packet scheduling, không cần khôi phục `window_kb`.
+
+## 53. Chia tải per-connect byte window hiện hành
+
+### 53.1 Mục tiêu và state
+
+Flow parse được 5-tuple dùng state TLS riêng trên worker sở hữu flow. Một flow
+giữ nguyên `current_wan` cho tới khi tổng byte thực sự enqueue ra WAN đạt quota.
+Base window mục tiêu là `120000 B`, không phải `120 KiB`; quota chạy thực tế
+luôn được biểu diễn bằng số nguyên MTU runtime.
+
+Scheduler chỉ chọn lại ở packet/datagram gốc kế tiếp. Vì vậy một packet làm
+vượt quota vẫn đi trọn vẹn trên WAN hiện tại; không cắt packet ở biên window.
+
+### 53.2 Quota theo weight
+
+Scheduler đổi `120000 B` thành MTU units, giữ tổng số units của cả chu kỳ rồi
+phân phối units nguyên theo weight bằng largest-remainder:
+
+```text
+base_units  = floor(120000 / runtime_MTU)
+cycle_units = base_units × số_WAN
+quota_i     = số_units_nguyên_i × runtime_MTU
+```
+
+Mỗi WAN live được ít nhất một unit. Tổng `số_units_nguyên_i` luôn bằng
+`cycle_units`, nên làm tròn không làm mất tổng quota của chu kỳ.
+
+Với runtime MTU 1500, hai WAN có các quota:
+
+| Weight | WAN0 | WAN1 | Tổng chu kỳ |
+|---|---:|---:|---:|
+| 50/50 | 120000 B | 120000 B | 240000 B |
+| 70/30 | 168000 B | 72000 B | 240000 B |
+| 40/60 | 96000 B | 144000 B | 240000 B |
+
+Hết quota thì flow chuyển tuần tự sang WAN kế tiếp. WAN đầu tiên lấy từ weighted
+hash của 5-tuple để cả connection ngắn cũng phân bố theo weight và không đồng
+loạt bắt đầu trên cùng một WAN. Pool WAN đổi do failover/reload thì state flow
+được reset theo pool mới.
+
+### 53.3 Byte accounting và UDP split
+
+Byte chỉ được account sau khi enqueue thành công:
+
+- bypass: chiều dài frame plaintext;
+- encrypted full: chiều dài frame sau mã hóa;
+- UDP split: `frag0_len + frag1_len` sau khi pair enqueue thành công.
+
+WAN được chọn một lần trước encrypt/split. `ne_ring_try_push_pair()` đẩy cả hai
+fragment của cùng datagram vào cùng ring/WAN. Nếu frag0 làm quota đạt ngưỡng thì
+frag1 vẫn bắt buộc đi cùng WAN; tổng datagram có thể làm vượt quota và original
+datagram kế tiếp mới đổi WAN. Sai lệch tức thời vì vậy bị chặn bởi kích thước tối
+đa của một original datagram, không tích thành việc tách hai fragment qua hai
+đường.
+
+Phần byte vượt quota được lưu thành `byte_debt` riêng của WAN đó. Khi flow quay
+lại WAN này ở chu kỳ sau, quota được giảm tương ứng; do đó jumbo/split không làm
+sai số byte tích lũy lâu dài.
+
+### 53.4 Backpressure
+
+Nếu WAN của flow thiếu TX room nhưng WAN khác còn room, fallback được coi là
+kết thúc window sớm. State flow được rebind sang WAN fallback và những packet
+tiếp theo tiếp tục ở đó; không spill từng packet qua lại giữa các WAN. WAN down,
+weight 0, drain và join-ramp vẫn được lọc bởi profile pool trước khi chọn.
+
+Packet không parse được 5-tuple không thể có state per-connect nên tiếp tục dùng
+default SWRR per-packet.

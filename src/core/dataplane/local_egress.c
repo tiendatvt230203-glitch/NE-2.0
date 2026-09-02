@@ -11,6 +11,7 @@
 #include "../../../inc/core/dataplane/arp_bridge.h"
 #include "../../../inc/core/dataplane/dataplane_stats.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
+#include "../../../inc/core/flow/flow_table.h"
 
 #include <netinet/in.h>
 #include <string.h>
@@ -111,7 +112,8 @@ static int split_tail_take(struct forwarder *fwd, int worker_idx, uint64_t *addr
 static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
                         const struct crypto_policy *cp, int wan_dp,
                         struct packet_crypto_ctx *pctx,
-                        crypto_proto_class pclass, int flow_ok)
+                        crypto_proto_class pclass, int flow_ok,
+                        uint32_t *wire_bytes)
 {
     int worker_idx = dp_crypto_current_worker_idx();
     uint8_t *pkt;
@@ -124,6 +126,9 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
 
     (void)flow_ok;
     (void)cp;
+
+    if (wire_bytes)
+        *wire_bytes = 0;
 
     if (ensure_crypto_capacity(fwd, job) != 0)
         return -1;
@@ -154,12 +159,16 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
         }
         if (push_split_to_wan(fwd, job, l1, &tail, l2, wan_dp) != 0)
             return -1;
+        if (wire_bytes)
+            *wire_bytes = l1 + l2;
         return 1;
     }
 
     if (crypto_option_encrypt(opt_id, pclass, pctx, pkt, &len) != 0)
         return -1;
     job->len = len;
+    if (wire_bytes)
+        *wire_bytes = len;
     return 0;
 }
 
@@ -236,6 +245,7 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     int wan_dp;
     int pi;
     struct packet_crypto_ctx *pctx;
+    uint32_t wire_bytes = 0;
     int enc;
 
     if (!fwd || !pkt)
@@ -260,13 +270,16 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
                             &profile_idx, &cp) != 0)
         goto drop;
     wan_dp = fwd_wan_pick_for_local(fwd, profile_idx, flow_ok, src_ip, dst_ip,
-                                    src_port, dst_port, proto);
+                                    src_port, dst_port, proto,
+                                    crypto_option_get_mtu());
     if (wan_dp < 0 || !fwd_wan_has_tx_room(fwd,wan_dp))
         goto drop;
 
     if (cp->action == POLICY_ACTION_BYPASS) {
         ne_dp_stats_local_bypass(1);
-        (void)push_to_wan(fwd, &job, wan_dp);
+        if (push_to_wan(fwd, &job, wan_dp) == 0 && flow_ok)
+            flow_table_account_per_flow_bytes(src_ip, dst_ip, src_port, dst_port,
+                                              proto, job.len);
         return;
     }
     if (!fwd->cfg->crypto_enabled)
@@ -284,12 +297,18 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     if (!pctx)
         goto drop;
     enc = encrypt_to_wan(fwd, &job, cp, wan_dp, pctx,
-                        crypto_proto_classify(proto), flow_ok);
+                        crypto_proto_classify(proto), flow_ok, &wire_bytes);
     if (enc < 0)
         goto drop;
-    if (enc > 0)
+    if (enc > 0) {
+        if (flow_ok)
+            flow_table_account_per_flow_bytes(src_ip, dst_ip, src_port, dst_port,
+                                              proto, wire_bytes);
         return;
-    (void)push_to_wan(fwd, &job, wan_dp);
+    }
+    if (push_to_wan(fwd, &job, wan_dp) == 0 && flow_ok)
+        flow_table_account_per_flow_bytes(src_ip, dst_ip, src_port, dst_port,
+                                          proto, wire_bytes);
     return;
 
 drop:
