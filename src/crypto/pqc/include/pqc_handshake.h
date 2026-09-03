@@ -7,6 +7,8 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+struct app_config;
+
 #define PQC_HS_PORT        7090
 #define PQC_HS_MAGIC       0x50514348 // "PQCH"
 #define PQC_HS_MSG_HELLO   1
@@ -21,7 +23,7 @@
 #define PQC_TRAFFIC_KEY_SZ 32
 #define PQC_HS_MSG_MAX_SZ  10000
 
-/* Policy traffic keys rotate every 30 days for both L2 and L3. */
+/* VPN/L3 policy traffic keys rotate every 30 days. */
 #define PQC_KEY_LIFETIME_DAYS        30ULL
 #define PQC_KEY_LIFETIME_MS          \
     (PQC_KEY_LIFETIME_DAYS * 24ULL * 60ULL * 60ULL * 1000ULL)
@@ -40,7 +42,6 @@
 #define PQC_HS_CACHE_SLOTS 4
 #define MAX_IDENTITY_REGISTRY 100
 #define MAX_POLICY_BINDINGS 128
-#define MAX_L2_DISPATCHERS 16
 #define PQC_USE_DYNAMIC_ROLE  1 // 1 = Dynamic (compare IP/MAC), 0 = Static (DB configured)
 
 typedef enum {
@@ -66,8 +67,7 @@ typedef struct {
     uint8_t src_mac[6];
 } pqc_rx_pkt_info_t;
 
-/* L3 responder state for idempotent HELLO handling.  L2 keeps its existing
- * handshake flow and does not use this cache. */
+/* L3 responder state for idempotent HELLO handling. */
 typedef struct {
     uint8_t *response;
     uint32_t session_id;
@@ -93,6 +93,7 @@ typedef struct {
     uint64_t keepalive_monitor_start_time;
     uint64_t last_keepalive_rx_time;
     uint64_t next_auto_retry_time;
+    uint64_t next_key_created_time;
 
     char *local_priv;
     char *local_pub;
@@ -133,18 +134,13 @@ typedef struct {
     volatile bool thread_started;
     volatile bool handshake_give_up;
     volatile bool rotation_give_up;
+    volatile bool rotation_requested;
     bool giveup_logged;
     volatile bool send_poke;
     volatile bool keepalive_enabled;
     bool is_tunnel;
     volatile bool thread_exit_sig;
 } policy_key_binding_t;
-
-typedef struct {
-    char ifname[64];
-    pthread_t thread;
-    bool running;
-} l2_dispatcher_t;
 
 #pragma pack(push, 1)
 struct pqc_hs_msg {
@@ -167,6 +163,7 @@ struct pqc_hs_msg {
  * @param identity_pub The peer's identity public key (used for HMAC verification).
  */
 int sig_pqc_handshake_start(int profile_id, const char *wan_ifname, const char *peer_ip);
+void pqc_handshake_start_all_profiles(struct app_config *cfg);
 
 /**
  * Checks whether the Handshake has completed and the key is available.

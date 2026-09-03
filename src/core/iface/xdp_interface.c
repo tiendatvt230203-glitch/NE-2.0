@@ -21,6 +21,75 @@
 static __thread const char *tls_dp_tx_dir;
 static __thread int tls_dp_tx_slot = -1;
 
+static void xdp_stats_add(struct ne_xdp_socket_stats *dst,
+                          const struct xdp_statistics *src)
+{
+    dst->rx_dropped += src->rx_dropped;
+    dst->rx_invalid_descs += src->rx_invalid_descs;
+    dst->tx_invalid_descs += src->tx_invalid_descs;
+    dst->rx_ring_full += src->rx_ring_full;
+    dst->rx_fill_ring_empty_descs += src->rx_fill_ring_empty_descs;
+    dst->tx_ring_empty_descs += src->tx_ring_empty_descs;
+}
+
+static void collect_xdp_stats(const struct ne_iface *ifaces, int iface_count,
+                              struct ne_xdp_socket_stats *out)
+{
+    int seen_fds[MAX_INTERFACES * MAX_QUEUES];
+    int seen_count = 0;
+
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    for (int i = 0; ifaces && i < iface_count; i++) {
+        const struct ne_iface *iface = &ifaces[i];
+
+        for (int q = 0; q < iface->queue_count; q++) {
+            struct xdp_statistics stats = {0};
+            socklen_t stats_len = sizeof(stats);
+            int fd;
+            int duplicate = 0;
+
+            if (!iface->queues[q].xsk)
+                continue;
+            fd = xsk_socket__fd(iface->queues[q].xsk);
+            if (fd < 0)
+                continue;
+            for (int n = 0; n < seen_count; n++) {
+                if (seen_fds[n] == fd) {
+                    duplicate = 1;
+                    break;
+                }
+            }
+            if (duplicate)
+                continue;
+            if (seen_count < (int)(MAX_INTERFACES * MAX_QUEUES))
+                seen_fds[seen_count++] = fd;
+            out->sockets_queried++;
+            if (getsockopt(fd, SOL_XDP, XDP_STATISTICS,
+                           &stats, &stats_len) == 0)
+                xdp_stats_add(out, &stats);
+            else
+                out->query_errors++;
+        }
+    }
+}
+
+void ne_pair_xdp_socket_stats(const struct ne_pair *p,
+                              struct ne_xdp_socket_stats *lan,
+                              struct ne_xdp_socket_stats *wan)
+{
+    if (!p) {
+        if (lan)
+            memset(lan, 0, sizeof(*lan));
+        if (wan)
+            memset(wan, 0, sizeof(*wan));
+        return;
+    }
+    collect_xdp_stats(p->locals, p->local_count, lan);
+    collect_xdp_stats(p->wans, p->wan_count, wan);
+}
+
 void ne_dp_tx_ctx(const char *dir, int tx_slot)
 {
     tls_dp_tx_dir = dir;

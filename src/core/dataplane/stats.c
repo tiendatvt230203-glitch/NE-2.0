@@ -5,6 +5,8 @@
 #include "../../../inc/core/iface/interface.h"
 
 #include <stdatomic.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +27,7 @@ static atomic_uint_fast64_t s_wan_fwd;
 static atomic_uint_fast64_t s_wan_drop;
 static atomic_uint_fast64_t s_wan_policy_drop;
 static atomic_uint_fast64_t s_mid_ring_drop;
+static atomic_uint_fast64_t s_seq_untracked;
 
 static atomic_uint_fast64_t s_tx_lan_pkts[NE_TX_SLOTS];
 static atomic_uint_fast64_t s_tx_lan_bytes[NE_TX_SLOTS];
@@ -44,6 +47,10 @@ static uint64_t s_prev_tx_lan_bytes[NE_TX_SLOTS];
 static uint64_t s_prev_tx_wan_bytes[NE_TX_SLOTS];
 static struct timespec s_last_ts;
 static uint32_t s_tick_count;
+static struct dp_udp_reorder_flow_stats
+    s_reorder_flow_snapshot[DP_REORDER_FLOW_STATS_MAX];
+static struct ne_xdp_socket_stats s_prev_xdp_lan;
+static struct ne_xdp_socket_stats s_prev_xdp_wan;
 
 #define NE_DP_CRYPTO_Q_WATERMARK (NE_RING / 4u)
 
@@ -51,9 +58,12 @@ void ne_dp_stats_init(void)
 {
     if (g_on < 0) {
         const char *env = getenv("NE_DP_STATS");
-        g_on = (env && env[0] == '1') ? 1 : 0;
+        g_on = (!env || env[0] != '0') ? 1 : 0;
         if (g_on)
-            fprintf(stderr, "[DP-STATS] enabled (set NE_DP_STATS=0 to disable)\n");
+            fprintf(stderr,
+                    "[DP-STATS] enabled (set NE_DP_STATS=0 to disable); "
+                    "FLOW loss is inferred from authenticated NE sequence gaps, "
+                    "not copied from iperf3\n");
     }
     clock_gettime(CLOCK_MONOTONIC, &s_last_ts);
     memset(s_prev, 0, sizeof(s_prev));
@@ -61,6 +71,8 @@ void ne_dp_stats_init(void)
     memset(s_prev_crypto_wan, 0, sizeof(s_prev_crypto_wan));
     memset(s_prev_tx_lan_bytes, 0, sizeof(s_prev_tx_lan_bytes));
     memset(s_prev_tx_wan_bytes, 0, sizeof(s_prev_tx_wan_bytes));
+    memset(&s_prev_xdp_lan, 0, sizeof(s_prev_xdp_lan));
+    memset(&s_prev_xdp_wan, 0, sizeof(s_prev_xdp_wan));
     s_tick_count = 0;
 }
 
@@ -112,6 +124,7 @@ void ne_dp_stats_wan_fwd(uint32_t n)       { STAT_INC(s_wan_fwd, n); }
 void ne_dp_stats_wan_drop(uint32_t n)      { STAT_INC(s_wan_drop, n); }
 void ne_dp_stats_wan_policy_drop(uint32_t n) { STAT_INC(s_wan_policy_drop, n); }
 void ne_dp_stats_mid_ring_drop(uint32_t n) { STAT_INC(s_mid_ring_drop, n); }
+void ne_dp_stats_seq_untracked(uint32_t n) { STAT_INC(s_seq_untracked, n); }
 
 void ne_dp_stats_tx_lan(int slot, uint32_t pkts, uint64_t bytes)
 {
@@ -169,6 +182,11 @@ static uint64_t load64(const atomic_uint_fast64_t *a)
     return atomic_load(a);
 }
 
+static uint64_t counter_delta(uint64_t current, uint64_t previous)
+{
+    return current >= previous ? current - previous : current;
+}
+
 static double elapsed_sec(const struct timespec *a, const struct timespec *b)
 {
     double da = (double)a->tv_sec + (double)a->tv_nsec / 1e9;
@@ -214,10 +232,22 @@ static uint64_t sum_tx_lan_bytes(void)
     return t;
 }
 
+static uint64_t sum_atomic(const atomic_uint_fast64_t *values, uint32_t count)
+{
+    uint64_t total = 0;
+
+    for (uint32_t i = 0; i < count; i++)
+        total += load64(&values[i]);
+    return total;
+}
+
 void ne_dp_stats_tick(struct forwarder *fwd)
 {
     struct timespec now;
+    struct timespec wall_now;
+    struct tm wall_tm;
     double sec;
+    char wall_ts[32] = "unknown-time";
     char lan_g[16], wan_g[16], tx_wan_g[16], tx_lan_g[16];
     uint64_t cur_lan_b, cur_wan_b, cur_tx_wan_b, cur_tx_lan_b;
     uint64_t d_lan_b, d_wan_b, d_tx_wan_b, d_tx_lan_b;
@@ -233,6 +263,9 @@ void ne_dp_stats_tick(struct forwarder *fwd)
     sec = elapsed_sec(&s_last_ts, &now);
     if (sec < 4.5)
         return;
+    if (clock_gettime(CLOCK_REALTIME, &wall_now) == 0 &&
+        localtime_r(&wall_now.tv_sec, &wall_tm) != NULL)
+        strftime(wall_ts, sizeof(wall_ts), "%Y-%m-%dT%H:%M:%S%z", &wall_tm);
 
     cur_lan_b = sum_rx_lan_bytes();
     cur_wan_b = sum_rx_wan_bytes();
@@ -256,19 +289,22 @@ void ne_dp_stats_tick(struct forwarder *fwd)
     fmt_gbps(tx_lan_g, sizeof(tx_lan_g), d_tx_lan_b, sec);
 
     fprintf(stderr,
-            "[DP-STATS] %.1fs LAN_RX=%s WAN_RX=%s TX_WAN=%s TX_LAN=%s "
+            "[DP-STATS] ts=%s interval=%.1fs LAN_RX=%s WAN_RX=%s "
+            "TX_WAN=%s TX_LAN=%s "
             "bypass=%llu local_drop=%llu wan_fwd=%llu wan_drop=%llu "
             "wan_policy_drop=%llu "
-            "rx_ring_drop(lan=%llu wan=%llu) mid_ring_drop=%llu\n",
-            sec, lan_g, wan_g, tx_wan_g, tx_lan_g,
+            "rx_ring_drop(lan=%llu wan=%llu) mid_ring_drop=%llu "
+            "seq_untracked=%llu\n",
+            wall_ts, sec, lan_g, wan_g, tx_wan_g, tx_lan_g,
             (unsigned long long)load64(&s_local_bypass),
             (unsigned long long)load64(&s_local_drop),
             (unsigned long long)load64(&s_wan_fwd),
             (unsigned long long)load64(&s_wan_drop),
             (unsigned long long)load64(&s_wan_policy_drop),
-            (unsigned long long)load64(&s_rx_ring_drop_lan[0]),
-            (unsigned long long)load64(&s_rx_ring_drop_wan[0]),
-            (unsigned long long)load64(&s_mid_ring_drop));
+            (unsigned long long)sum_atomic(s_rx_ring_drop_lan, NE_RX_LAN_SLOTS),
+            (unsigned long long)sum_atomic(s_rx_ring_drop_wan, NE_RX_WAN_SLOTS),
+            (unsigned long long)load64(&s_mid_ring_drop),
+            (unsigned long long)load64(&s_seq_untracked));
 
     if (fwd) {
         uint32_t lan_q = 0, wan_q = 0, mid_wan_q = 0, mid_lan_q = 0;
@@ -282,19 +318,75 @@ void ne_dp_stats_tick(struct forwarder *fwd)
             for (int w = 0; w < (int)NE_CRYPTO_WORKERS; w++)
                 mid_lan_q += ne_ring_count(&fwd->mid_to_local[li][w]);
         }
-        fprintf(stderr,
+        {
+            uint64_t tx_no_free_lan = 0;
+            uint64_t tx_no_free_wan = 0;
+
+            for (int li = 0; li < fwd->local_count; li++)
+                tx_no_free_lan += fwd->pair.locals[li].tx_no_free;
+            for (int wi = 0; wi < fwd->wan_count; wi++)
+                tx_no_free_wan += fwd->pair.wans[wi].tx_no_free;
+            fprintf(stderr,
                 "[DP-STATS] ring_depth lan_to_mid=%u wan_to_mid=%u "
-                "mid_to_wan=%u mid_to_local=%u tx_no_free(wan0)=%llu "
+                "mid_to_wan=%u mid_to_local=%u tx_no_free(lan=%llu wan=%llu) "
                 "tx_full(lan=%llu wan=%llu) pool_free=%u\n",
                 lan_q, wan_q, mid_wan_q, mid_lan_q,
-                fwd->wan_count > 0
-                    ? (unsigned long long)fwd->pair.wans[0].tx_no_free : 0ULL,
-                (unsigned long long)load64(&s_tx_full_lan[0]),
-                (unsigned long long)load64(&s_tx_full_wan[0]),
+                (unsigned long long)tx_no_free_lan,
+                (unsigned long long)tx_no_free_wan,
+                (unsigned long long)sum_atomic(s_tx_full_lan, NE_TX_SLOTS),
+                (unsigned long long)sum_atomic(s_tx_full_wan, NE_TX_WAN_SLOTS),
                 ne_pool_free_count(&fwd->pair));
+        }
+
+        {
+            struct ne_xdp_socket_stats lan = {0};
+            struct ne_xdp_socket_stats wan = {0};
+
+            ne_pair_xdp_socket_stats(&fwd->pair, &lan, &wan);
+            fprintf(stderr,
+                    "[XDP-STATS] kernel_drop_delta "
+                    "lan(sockets=%u errors=%u rx_drop=%llu ring_full=%llu "
+                    "fill_empty=%llu invalid_rx=%llu) "
+                    "wan(sockets=%u errors=%u rx_drop=%llu ring_full=%llu "
+                    "fill_empty=%llu invalid_rx=%llu) "
+                    "tx_invalid(lan=%llu wan=%llu) tx_empty(lan=%llu wan=%llu)\n",
+                    lan.sockets_queried, lan.query_errors,
+                    (unsigned long long)counter_delta(
+                        lan.rx_dropped, s_prev_xdp_lan.rx_dropped),
+                    (unsigned long long)counter_delta(
+                        lan.rx_ring_full, s_prev_xdp_lan.rx_ring_full),
+                    (unsigned long long)counter_delta(
+                        lan.rx_fill_ring_empty_descs,
+                        s_prev_xdp_lan.rx_fill_ring_empty_descs),
+                    (unsigned long long)counter_delta(
+                        lan.rx_invalid_descs, s_prev_xdp_lan.rx_invalid_descs),
+                    wan.sockets_queried, wan.query_errors,
+                    (unsigned long long)counter_delta(
+                        wan.rx_dropped, s_prev_xdp_wan.rx_dropped),
+                    (unsigned long long)counter_delta(
+                        wan.rx_ring_full, s_prev_xdp_wan.rx_ring_full),
+                    (unsigned long long)counter_delta(
+                        wan.rx_fill_ring_empty_descs,
+                        s_prev_xdp_wan.rx_fill_ring_empty_descs),
+                    (unsigned long long)counter_delta(
+                        wan.rx_invalid_descs, s_prev_xdp_wan.rx_invalid_descs),
+                    (unsigned long long)counter_delta(
+                        lan.tx_invalid_descs, s_prev_xdp_lan.tx_invalid_descs),
+                    (unsigned long long)counter_delta(
+                        wan.tx_invalid_descs, s_prev_xdp_wan.tx_invalid_descs),
+                    (unsigned long long)counter_delta(
+                        lan.tx_ring_empty_descs,
+                        s_prev_xdp_lan.tx_ring_empty_descs),
+                    (unsigned long long)counter_delta(
+                        wan.tx_ring_empty_descs,
+                        s_prev_xdp_wan.tx_ring_empty_descs));
+            s_prev_xdp_lan = lan;
+            s_prev_xdp_wan = wan;
+        }
 
         {
             struct dp_udp_reorder_stats reorder;
+            size_t flow_count;
 
             dp_udp_reorder_get_stats(&reorder);
             fprintf(stderr,
@@ -324,6 +416,59 @@ void ne_dp_stats_tick(struct forwarder *fwd)
                     (unsigned long long)reorder.udp_gap_skipped,
                     (unsigned long long)reorder.udp_overflow,
                     (unsigned long long)reorder.udp_evicted);
+
+            flow_count = dp_udp_reorder_get_flow_stats(
+                s_reorder_flow_snapshot, DP_REORDER_FLOW_STATS_MAX);
+            for (size_t i = 0; i < flow_count; i++) {
+                const struct dp_udp_reorder_flow_stats *flow =
+                    &s_reorder_flow_snapshot[i];
+                char src[INET_ADDRSTRLEN] = "?";
+                char dst[INET_ADDRSTRLEN] = "?";
+                uint64_t net_missing;
+                uint64_t estimated_drops;
+                uint64_t expected;
+                double loss_pct;
+                double reorder_in_pct;
+                double reorder_out_pct;
+                const char *proto;
+
+                if (flow->rx_packets == 0)
+                    continue;
+                (void)inet_ntop(AF_INET, &flow->key.src_ip, src, sizeof(src));
+                (void)inet_ntop(AF_INET, &flow->key.dst_ip, dst, sizeof(dst));
+                net_missing = flow->net_missing;
+                estimated_drops = net_missing + flow->buffer_drops + flow->emit_drops;
+                expected = flow->rx_packets + net_missing;
+                loss_pct = expected
+                    ? (double)estimated_drops * 100.0 / (double)expected : 0.0;
+                reorder_in_pct = (double)flow->reordered_arrivals * 100.0 /
+                    (double)flow->rx_packets;
+                reorder_out_pct = (double)flow->late_or_duplicate * 100.0 /
+                    (double)flow->rx_packets;
+                proto = flow->key.protocol == IPPROTO_TCP ? "TCP" : "UDP";
+                fprintf(stderr,
+                        "[FLOW-STATS] scope=peer_seq_to_local_queue "
+                        "%s %s:%u -> %s:%u worker=%u epoch=%u "
+                        "rx=%llu gap_raw=%llu late_or_dup=%llu recovered=%llu "
+                        "net_missing=%llu "
+                        "buffer_drop=%llu duplicate_drop=%llu emit_drop=%llu "
+                        "loss_est=%.4f%% "
+                        "reorder_in=%llu(%.4f%%) reorder_out_est=%.4f%%\n",
+                        proto, src, (unsigned int)flow->key.src_port,
+                        dst, (unsigned int)flow->key.dst_port,
+                        (unsigned int)flow->worker_idx, flow->epoch,
+                        (unsigned long long)flow->rx_packets,
+                        (unsigned long long)flow->gap_skipped,
+                        (unsigned long long)flow->late_or_duplicate,
+                        (unsigned long long)flow->late_recovered,
+                        (unsigned long long)net_missing,
+                        (unsigned long long)flow->buffer_drops,
+                        (unsigned long long)flow->duplicate_drops,
+                        (unsigned long long)flow->emit_drops,
+                        loss_pct,
+                        (unsigned long long)flow->reordered_arrivals,
+                        reorder_in_pct, reorder_out_pct);
+            }
         }
 
         {

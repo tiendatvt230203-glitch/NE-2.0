@@ -436,7 +436,7 @@ static int bond_reorder_emit(void *ctx, struct dp_udp_reorder_item *item)
     if (rc < 0)
         return -1;
     if (rc > 0)
-        return 0;
+        return 1;
     ne_dp_stats_wan_fwd(1);
     return 0;
 }
@@ -601,6 +601,16 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
                                   epoch, seq, &item,
                                   dp_udp_reorder_now_ns(), &ops);
             return;
+        }
+        {
+            uint32_t src_ip = 0, dst_ip = 0;
+            uint16_t src_port = 0, dst_port = 0;
+            uint8_t proto = 0;
+
+            if (dp_parse_flow(pkt, job.len, &src_ip, &dst_ip,
+                              &src_port, &dst_port, &proto) == 0 &&
+                (proto == IPPROTO_TCP || proto == IPPROTO_UDP))
+                ne_dp_stats_seq_untracked(1);
         }
         dp_out_ring_bind(dp_flow_pick_tx_slot(pkt, job.len,
                                               dp_crypto_current_worker_idx()));

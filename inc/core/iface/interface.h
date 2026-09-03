@@ -107,6 +107,17 @@ struct ne_pair {
     uint32_t xdp_flags;
 };
 
+struct ne_xdp_socket_stats {
+    uint32_t sockets_queried;
+    uint32_t query_errors;
+    uint64_t rx_dropped;
+    uint64_t rx_invalid_descs;
+    uint64_t tx_invalid_descs;
+    uint64_t rx_ring_full;
+    uint64_t rx_fill_ring_empty_descs;
+    uint64_t tx_ring_empty_descs;
+};
+
 int ne_pair_local_live(const struct ne_pair *p, int pair_local_idx);
 int ne_pair_wan_live(const struct ne_pair *p, int dp_slot);
 int ne_pair_plumb_local(struct ne_pair *p, const struct app_config *cfg, int cfg_local_idx,
@@ -153,6 +164,9 @@ uint32_t ne_frame_alloc_batch(struct ne_pair *p, uint64_t *addrs_out, uint32_t m
 void ne_frame_free(struct ne_pair *p, uint64_t addr);
 /* Frames currently idle in the shared UMEM pool (leak watchdog metric). */
 uint32_t ne_pool_free_count(struct ne_pair *p);
+void ne_pair_xdp_socket_stats(const struct ne_pair *p,
+                              struct ne_xdp_socket_stats *lan,
+                              struct ne_xdp_socket_stats *wan);
 
 void interface_reset_redirect_maps(void);
 void interface_promisc_off_config(const struct app_config *cfg);

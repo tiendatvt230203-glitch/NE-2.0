@@ -2,6 +2,7 @@
 #include "../../../inc/core/util/cpu_map.h"
 
 #include <netinet/in.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,12 +15,18 @@
 #define UDP_REORDER_START_BACKTRACK   32u
 #define UDP_REORDER_HELD_CAP          8192u
 #define UDP_REORDER_GC_SLICE          16u
+#define UDP_REORDER_MISSING_TRACK     256u
 #define UDP_REORDER_FLOW_IDLE_NS      (60ULL * 1000000000ULL)
 /* Default for low-latency bonded paths; NE_BOND_REORDER_US can override it. */
 #define UDP_REORDER_DEFAULT_HOLD_NS   (2ULL * 1000000ULL)
 
 struct udp_reorder_slot {
     struct dp_udp_reorder_item item;
+    uint32_t seq;
+    uint8_t valid;
+};
+
+struct udp_missing_slot {
     uint32_t seq;
     uint8_t valid;
 };
@@ -31,6 +38,15 @@ struct udp_reorder_flow {
     uint64_t gap_since_ns;
     uint64_t last_seen_ns;
     uint64_t stamp;
+    atomic_uint_fast64_t stat_rx_packets;
+    atomic_uint_fast64_t stat_reordered_arrivals;
+    atomic_uint_fast64_t stat_late_or_duplicate;
+    atomic_uint_fast64_t stat_late_recovered;
+    atomic_uint_fast64_t stat_gap_skipped;
+    atomic_uint_fast64_t stat_net_missing;
+    atomic_uint_fast64_t stat_buffer_drops;
+    atomic_uint_fast64_t stat_duplicate_drops;
+    atomic_uint_fast64_t stat_emit_drops;
     uint16_t held;
     uint8_t valid;
 };
@@ -39,9 +55,12 @@ static struct udp_reorder_flow
     g_flows[NE_CRYPTO_WORKERS][UDP_REORDER_FLOW_CAP];
 static struct udp_reorder_slot
     g_slots[NE_CRYPTO_WORKERS][UDP_REORDER_FLOW_CAP][UDP_REORDER_WINDOW];
+static struct udp_missing_slot
+    g_missing[NE_CRYPTO_WORKERS][UDP_REORDER_FLOW_CAP][UDP_REORDER_MISSING_TRACK];
 static uint32_t g_held_by_worker[NE_CRYPTO_WORKERS];
 static uint32_t g_gc_cursor[NE_CRYPTO_WORKERS];
 static uint64_t g_stamp_by_worker[NE_CRYPTO_WORKERS];
+static pthread_mutex_t g_flow_meta_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_hold_ns = UDP_REORDER_DEFAULT_HOLD_NS;
 static int g_enabled = 1;
 
@@ -97,15 +116,20 @@ static void item_drop(const struct dp_udp_reorder_ops *ops,
         ops->drop(ops->ctx, item);
 }
 
-static void item_emit(const struct dp_udp_reorder_ops *ops,
-                      struct dp_udp_reorder_item *item, int was_held,
-                      uint8_t protocol)
+static int item_emit(const struct dp_udp_reorder_ops *ops,
+                     struct dp_udp_reorder_item *item, int was_held,
+                     uint8_t protocol)
 {
-    if (!ops || !ops->emit || ops->emit(ops->ctx, item) != 0)
+    int rc = (!ops || !ops->emit) ? -1 : ops->emit(ops->ctx, item);
+
+    /* Negative means ownership was not consumed; positive means consumed but
+     * dropped by the downstream queue. */
+    if (rc < 0)
         item_drop(ops, item);
     if (was_held)
         atomic_fetch_add_explicit(&g_stat_released[stat_proto(protocol)], 1u,
                                   memory_order_relaxed);
+    return rc;
 }
 
 static void update_high_water(uint32_t held)
@@ -118,6 +142,45 @@ static void update_high_water(uint32_t held)
                                                   memory_order_relaxed,
                                                   memory_order_relaxed)) {
     }
+}
+
+static void flow_record_gap(int worker_idx, uint32_t flow_idx,
+                            uint32_t first_seq, uint32_t count)
+{
+    struct udp_reorder_flow *flow = &g_flows[worker_idx][flow_idx];
+    uint32_t tracked = count < UDP_REORDER_MISSING_TRACK
+        ? count : UDP_REORDER_MISSING_TRACK;
+    uint32_t seq = first_seq + count - tracked;
+
+    atomic_fetch_add_explicit(&flow->stat_gap_skipped, count,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&flow->stat_net_missing, count,
+                              memory_order_relaxed);
+    for (uint32_t i = 0; i < tracked; i++, seq++) {
+        struct udp_missing_slot *slot =
+            &g_missing[worker_idx][flow_idx][seq % UDP_REORDER_MISSING_TRACK];
+
+        slot->seq = seq;
+        slot->valid = 1;
+    }
+}
+
+static int flow_recover_gap(int worker_idx, uint32_t flow_idx, uint32_t seq)
+{
+    struct udp_reorder_flow *flow = &g_flows[worker_idx][flow_idx];
+    struct udp_missing_slot *slot =
+        &g_missing[worker_idx][flow_idx][seq % UDP_REORDER_MISSING_TRACK];
+
+    if (!slot->valid || slot->seq != seq)
+        return 0;
+    slot->valid = 0;
+    if (atomic_load_explicit(&flow->stat_net_missing,
+                             memory_order_relaxed) > 0)
+        atomic_fetch_sub_explicit(&flow->stat_net_missing, 1u,
+                                  memory_order_relaxed);
+    atomic_fetch_add_explicit(&flow->stat_late_recovered, 1u,
+                              memory_order_relaxed);
+    return 1;
 }
 
 static void flow_drop_slots(int worker_idx, uint32_t flow_idx,
@@ -150,6 +213,9 @@ static void flow_reset(int worker_idx, uint32_t flow_idx,
 
     if (flow->valid)
         flow_drop_slots(worker_idx, flow_idx, ops);
+    pthread_mutex_lock(&g_flow_meta_lock);
+    memset(g_missing[worker_idx][flow_idx], 0,
+           sizeof(g_missing[worker_idx][flow_idx]));
     memset(flow, 0, sizeof(*flow));
     flow->key = *key;
     flow->epoch = epoch;
@@ -158,6 +224,7 @@ static void flow_reset(int worker_idx, uint32_t flow_idx,
     flow->last_seen_ns = now_ns;
     flow->stamp = ++g_stamp_by_worker[worker_idx];
     flow->valid = 1;
+    pthread_mutex_unlock(&g_flow_meta_lock);
 }
 
 static uint32_t flow_lookup(int worker_idx,
@@ -212,7 +279,9 @@ static void flow_flush_contiguous(int worker_idx, uint32_t flow_idx,
         if (g_held_by_worker[worker_idx] > 0)
             g_held_by_worker[worker_idx]--;
         flow->next_seq++;
-        item_emit(ops, &slot->item, 1, flow->key.protocol);
+        if (item_emit(ops, &slot->item, 1, flow->key.protocol) != 0)
+            atomic_fetch_add_explicit(&flow->stat_emit_drops, 1u,
+                                      memory_order_relaxed);
         memset(&slot->item, 0, sizeof(slot->item));
     }
     flow->gap_since_ns = flow->held ? flow->gap_since_ns : 0;
@@ -255,10 +324,13 @@ static void flow_skip_gap(int worker_idx, uint32_t flow_idx,
         return;
     }
     if (delta > 0) {
+        uint32_t first_missing = flow->next_seq;
+
         flow->next_seq = seq;
         atomic_fetch_add_explicit(&g_stat_gap[stat_proto(flow->key.protocol)],
                                   (uint32_t)delta,
                                   memory_order_relaxed);
+        flow_record_gap(worker_idx, flow_idx, first_missing, (uint32_t)delta);
     }
     flow_flush_contiguous(worker_idx, flow_idx, ops);
     if (flow->held)
@@ -277,10 +349,12 @@ static void flow_make_window_room(int worker_idx, uint32_t flow_idx,
     if (seq_delta(seq, flow->next_seq) >= (int)UDP_REORDER_WINDOW) {
         uint32_t target = seq - (UDP_REORDER_WINDOW - 1u);
         uint32_t skipped = (uint32_t)seq_delta(target, flow->next_seq);
+        uint32_t first_missing = flow->next_seq;
 
         flow->next_seq = target;
         atomic_fetch_add_explicit(&g_stat_gap[stat_proto(flow->key.protocol)],
                                   skipped, memory_order_relaxed);
+        flow_record_gap(worker_idx, flow_idx, first_missing, skipped);
     }
 }
 
@@ -338,6 +412,8 @@ void dp_udp_reorder_submit(int worker_idx,
     }
     flow_idx = flow_lookup(worker_idx, key, epoch, seq, now_ns, ops);
     flow = &g_flows[worker_idx][flow_idx];
+    atomic_fetch_add_explicit(&flow->stat_rx_packets, 1u,
+                              memory_order_relaxed);
 
     if (flow->held && flow->gap_since_ns &&
         now_ns - flow->gap_since_ns >= g_hold_ns)
@@ -350,12 +426,19 @@ void dp_udp_reorder_submit(int worker_idx,
          * protocol endpoint decide whether it is useful or a duplicate. */
         atomic_fetch_add_explicit(&g_stat_late[stat_proto(key->protocol)], 1u,
                                   memory_order_relaxed);
-        item_emit(ops, item, 0, key->protocol);
+        atomic_fetch_add_explicit(&flow->stat_late_or_duplicate, 1u,
+                                  memory_order_relaxed);
+        (void)flow_recover_gap(worker_idx, flow_idx, seq);
+        if (item_emit(ops, item, 0, key->protocol) != 0)
+            atomic_fetch_add_explicit(&flow->stat_emit_drops, 1u,
+                                      memory_order_relaxed);
         return;
     }
     if (delta == 0) {
         flow->next_seq++;
-        item_emit(ops, item, 0, key->protocol);
+        if (item_emit(ops, item, 0, key->protocol) != 0)
+            atomic_fetch_add_explicit(&flow->stat_emit_drops, 1u,
+                                      memory_order_relaxed);
         flow_flush_contiguous(worker_idx, flow_idx, ops);
         return;
     }
@@ -365,12 +448,19 @@ void dp_udp_reorder_submit(int worker_idx,
     if (delta < 0) {
         atomic_fetch_add_explicit(&g_stat_late[stat_proto(key->protocol)], 1u,
                                   memory_order_relaxed);
-        item_emit(ops, item, 0, key->protocol);
+        atomic_fetch_add_explicit(&flow->stat_late_or_duplicate, 1u,
+                                  memory_order_relaxed);
+        (void)flow_recover_gap(worker_idx, flow_idx, seq);
+        if (item_emit(ops, item, 0, key->protocol) != 0)
+            atomic_fetch_add_explicit(&flow->stat_emit_drops, 1u,
+                                      memory_order_relaxed);
         return;
     }
     if (delta == 0) {
         flow->next_seq++;
-        item_emit(ops, item, 0, key->protocol);
+        if (item_emit(ops, item, 0, key->protocol) != 0)
+            atomic_fetch_add_explicit(&flow->stat_emit_drops, 1u,
+                                      memory_order_relaxed);
         flow_flush_contiguous(worker_idx, flow_idx, ops);
         return;
     }
@@ -379,6 +469,8 @@ void dp_udp_reorder_submit(int worker_idx,
         if (g_held_by_worker[worker_idx] >= UDP_REORDER_HELD_CAP) {
             atomic_fetch_add_explicit(&g_stat_overflow[stat_proto(key->protocol)],
                                       1u, memory_order_relaxed);
+            atomic_fetch_add_explicit(&flow->stat_buffer_drops, 1u,
+                                      memory_order_relaxed);
             item_drop(ops, item);
             return;
         }
@@ -389,11 +481,17 @@ void dp_udp_reorder_submit(int worker_idx,
         if (slot->seq == seq) {
             atomic_fetch_add_explicit(&g_stat_late[stat_proto(key->protocol)], 1u,
                                       memory_order_relaxed);
+            atomic_fetch_add_explicit(&flow->stat_late_or_duplicate, 1u,
+                                      memory_order_relaxed);
+            atomic_fetch_add_explicit(&flow->stat_duplicate_drops, 1u,
+                                      memory_order_relaxed);
             item_drop(ops, item);
             return;
         }
         item_drop(ops, &slot->item);
         atomic_fetch_add_explicit(&g_stat_overflow[stat_proto(key->protocol)], 1u,
+                                  memory_order_relaxed);
+        atomic_fetch_add_explicit(&flow->stat_buffer_drops, 1u,
                                   memory_order_relaxed);
     } else {
         flow->held++;
@@ -405,6 +503,8 @@ void dp_udp_reorder_submit(int worker_idx,
     if (!flow->gap_since_ns)
         flow->gap_since_ns = now_ns;
     atomic_fetch_add_explicit(&g_stat_held[stat_proto(key->protocol)], 1u,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&flow->stat_reordered_arrivals, 1u,
                               memory_order_relaxed);
     update_high_water(g_held_by_worker[worker_idx]);
 }
@@ -426,8 +526,13 @@ void dp_udp_reorder_gc(int worker_idx, uint64_t now_ns,
         if (flow->held && flow->gap_since_ns &&
             now_ns - flow->gap_since_ns >= g_hold_ns)
             flow_skip_gap(worker_idx, idx, ops);
-        if (!flow->held && now_ns - flow->last_seen_ns > UDP_REORDER_FLOW_IDLE_NS)
+        if (!flow->held && now_ns - flow->last_seen_ns > UDP_REORDER_FLOW_IDLE_NS) {
+            pthread_mutex_lock(&g_flow_meta_lock);
+            memset(g_missing[worker_idx][idx], 0,
+                   sizeof(g_missing[worker_idx][idx]));
             memset(flow, 0, sizeof(*flow));
+            pthread_mutex_unlock(&g_flow_meta_lock);
+        }
     }
     g_gc_cursor[worker_idx] = (cursor + UDP_REORDER_GC_SLICE) %
         UDP_REORDER_FLOW_CAP;
@@ -441,8 +546,12 @@ void dp_udp_reorder_reset_worker(int worker_idx,
     for (uint32_t idx = 0; idx < UDP_REORDER_FLOW_CAP; idx++) {
         if (g_flows[worker_idx][idx].valid)
             flow_drop_slots(worker_idx, idx, ops);
+        pthread_mutex_lock(&g_flow_meta_lock);
+        memset(g_missing[worker_idx][idx], 0,
+               sizeof(g_missing[worker_idx][idx]));
         memset(&g_flows[worker_idx][idx], 0,
                sizeof(g_flows[worker_idx][idx]));
+        pthread_mutex_unlock(&g_flow_meta_lock);
     }
     g_held_by_worker[worker_idx] = 0;
     g_gc_cursor[worker_idx] = 0;
@@ -491,4 +600,49 @@ void dp_udp_reorder_get_stats(struct dp_udp_reorder_stats *out)
     out->udp_gap_skipped = udp_gap;
     out->udp_overflow = udp_overflow;
     out->udp_evicted = udp_evicted;
+}
+
+size_t dp_udp_reorder_get_flow_stats(struct dp_udp_reorder_flow_stats *out,
+                                     size_t capacity)
+{
+    size_t count = 0;
+
+    if (!out || capacity == 0)
+        return 0;
+
+    pthread_mutex_lock(&g_flow_meta_lock);
+    for (int worker = 0; worker < (int)NE_CRYPTO_WORKERS; worker++) {
+        for (uint32_t idx = 0; idx < UDP_REORDER_FLOW_CAP; idx++) {
+            struct udp_reorder_flow *flow = &g_flows[worker][idx];
+            struct dp_udp_reorder_flow_stats *dst;
+
+            if (!flow->valid || count >= capacity)
+                continue;
+            dst = &out[count++];
+            memset(dst, 0, sizeof(*dst));
+            dst->key = flow->key;
+            dst->epoch = flow->epoch;
+            dst->rx_packets = atomic_load_explicit(&flow->stat_rx_packets,
+                                                   memory_order_relaxed);
+            dst->reordered_arrivals = atomic_load_explicit(
+                &flow->stat_reordered_arrivals, memory_order_relaxed);
+            dst->late_or_duplicate = atomic_load_explicit(
+                &flow->stat_late_or_duplicate, memory_order_relaxed);
+            dst->late_recovered = atomic_load_explicit(
+                &flow->stat_late_recovered, memory_order_relaxed);
+            dst->gap_skipped = atomic_load_explicit(&flow->stat_gap_skipped,
+                                                    memory_order_relaxed);
+            dst->net_missing = atomic_load_explicit(&flow->stat_net_missing,
+                                                    memory_order_relaxed);
+            dst->buffer_drops = atomic_load_explicit(&flow->stat_buffer_drops,
+                                                     memory_order_relaxed);
+            dst->duplicate_drops = atomic_load_explicit(
+                &flow->stat_duplicate_drops, memory_order_relaxed);
+            dst->emit_drops = atomic_load_explicit(&flow->stat_emit_drops,
+                                                   memory_order_relaxed);
+            dst->worker_idx = (uint8_t)worker;
+        }
+    }
+    pthread_mutex_unlock(&g_flow_meta_lock);
+    return count;
 }

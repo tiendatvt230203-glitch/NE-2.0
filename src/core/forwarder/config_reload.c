@@ -5,7 +5,7 @@
 #include "../../../inc/core/iface/profile_iface_xdp.h"
 #include "../../../inc/core/failover/wan_failover.h"
 #include "../../../inc/core/flow/mac_learn.h"
-#include "pqc_l2_handshake.h"
+#include "pqc_handshake.h"
 
 #include <pthread.h>
 #include <stdatomic.h>

@@ -19,6 +19,7 @@ void ne_dp_stats_wan_fwd(uint32_t n);
 void ne_dp_stats_wan_drop(uint32_t n);
 void ne_dp_stats_wan_policy_drop(uint32_t n);
 void ne_dp_stats_mid_ring_drop(uint32_t n);
+void ne_dp_stats_seq_untracked(uint32_t n);
 
 void ne_dp_stats_tx_lan(int slot, uint32_t pkts, uint64_t bytes);
 void ne_dp_stats_tx_wan(int slot, uint32_t pkts, uint64_t bytes);

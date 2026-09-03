@@ -56,6 +56,7 @@ static int push_split_to_wan(struct forwarder *fwd, struct ne_packet *job,
     if (ne_ring_try_push(tx, tail) != 0) {
         /* Head already queued; drop only the tail fragment. */
         ne_frame_free(&fwd->pair, tail->addr);
+        ne_dp_stats_local_drop(1);
     } else {
         ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
     }
@@ -221,7 +222,8 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
 
     if (cp->action == POLICY_ACTION_BYPASS) {
         ne_dp_stats_local_bypass(1);
-        (void)push_to_wan(fwd, &job, wan_dp);
+        if (push_to_wan(fwd, &job, wan_dp) != 0)
+            ne_dp_stats_local_drop(1);
         return;
     }
     if (!fwd->cfg->crypto_enabled)
@@ -244,7 +246,8 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
         goto drop;
     if (enc > 0)
         return;
-    (void)push_to_wan(fwd, &job, wan_dp);
+    if (push_to_wan(fwd, &job, wan_dp) != 0)
+        ne_dp_stats_local_drop(1);
     return;
 
 drop:

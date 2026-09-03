@@ -19,6 +19,7 @@
 #include "core/forwarder/forwarder_reload.h"
 #include "core/iface/interface.h"
 #include "core/util/main_diag.h"
+#include "core/util/packet_log.h"
 #include "core/iface/profile_iface_xdp.h"
 #include "core/failover/wan_admin.h"
 #include "core/failover/cfm_diag.h"
@@ -851,6 +852,14 @@ int main(int argc, char **argv) {
     }
 
     setbuf(stderr, NULL);
+    if (argc == 1 && ne_packet_log_redirect() != 0) {
+        int log_errno = errno;
+        fprintf(stderr,
+                "[FATAL] cannot open daemon log %s: %s\n",
+                ne_packet_log_path(), strerror(log_errno));
+        return 1;
+    }
+
     if (trf_pqc_init_global() != TRF_PQC_OK) {
         fprintf(stderr, "[FATAL] trf_pqc_init_global failed\n");
         return 1;

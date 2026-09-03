@@ -2,6 +2,7 @@
 #define UDP_REORDER_H
 
 #include "core/iface/interface.h"
+#include <stddef.h>
 #include <stdint.h>
 
 struct dp_udp_reorder_key {
@@ -46,6 +47,24 @@ struct dp_udp_reorder_stats {
     uint64_t udp_evicted;
 };
 
+#define DP_REORDER_FLOW_STATS_MAX \
+    (NE_CRYPTO_WORKERS * 64u * 4u)
+
+struct dp_udp_reorder_flow_stats {
+    struct dp_udp_reorder_key key;
+    uint32_t epoch;
+    uint64_t rx_packets;
+    uint64_t reordered_arrivals;
+    uint64_t late_or_duplicate;
+    uint64_t late_recovered;
+    uint64_t gap_skipped;
+    uint64_t net_missing;
+    uint64_t buffer_drops;
+    uint64_t duplicate_drops;
+    uint64_t emit_drops;
+    uint8_t worker_idx;
+};
+
 void dp_udp_reorder_configure_from_env(void);
 uint64_t dp_udp_reorder_now_ns(void);
 
@@ -62,8 +81,8 @@ void dp_udp_reorder_gc(int worker_idx, uint64_t now_ns,
 void dp_udp_reorder_reset_worker(int worker_idx,
                                  const struct dp_udp_reorder_ops *ops);
 void dp_udp_reorder_get_stats(struct dp_udp_reorder_stats *out);
+size_t dp_udp_reorder_get_flow_stats(struct dp_udp_reorder_flow_stats *out,
+                                     size_t capacity);
 
 #endif
 #define _POSIX_C_SOURCE 200809L
-
-

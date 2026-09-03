@@ -13,7 +13,7 @@
 #include "../../../inc/core/flow/mac_learn.h"
 #include "../../../inc/core/dataplane/dataplane_stats.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
-#include "../../../inc/crypto/pqc_l2_handshake.h"
+#include "../../../inc/crypto/pqc_handshake.h"
 
 #include <net/if.h>
 #include <pthread.h>
