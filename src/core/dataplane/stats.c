@@ -390,9 +390,12 @@ void ne_dp_stats_tick(struct forwarder *fwd)
 
             dp_udp_reorder_get_stats(&reorder);
             fprintf(stderr,
-                    "[DP-STATS] bond_reorder held=%llu released=%llu "
+                    "[DP-STATS] bond_reorder enabled=%u hold_us=%llu "
+                    "held=%llu released=%llu "
                     "late_dup=%llu gap_skip=%llu overflow=%llu evicted=%llu "
                     "held_high_water=%llu\n",
+                    (unsigned int)reorder.enabled,
+                    (unsigned long long)reorder.hold_us,
                     (unsigned long long)reorder.held,
                     (unsigned long long)reorder.released,
                     (unsigned long long)reorder.late_or_duplicate,

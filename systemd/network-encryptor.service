@@ -9,6 +9,10 @@ Environment="NE_DP_STATS=1"
 Type=simple
 User=root
 EnvironmentFile=/opt/SEP/be/.env
+# Multipath per-window requires receiver-side sequence repair. Keep it enabled
+# even when an older deployment .env still contains NE_UDP_REORDER=0.
+Environment="NE_BOND_REORDER=1"
+Environment="NE_BOND_REORDER_US=2000"
 WorkingDirectory=/usr/bin/bin-ne
 ExecStart=/usr/bin/bin-ne/network-encryptor
 Restart=always

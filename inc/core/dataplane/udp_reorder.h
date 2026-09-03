@@ -26,6 +26,7 @@ struct dp_udp_reorder_ops {
 };
 
 struct dp_udp_reorder_stats {
+    uint64_t hold_us;
     uint64_t held;
     uint64_t released;
     uint64_t late_or_duplicate;
@@ -45,6 +46,7 @@ struct dp_udp_reorder_stats {
     uint64_t udp_gap_skipped;
     uint64_t udp_overflow;
     uint64_t udp_evicted;
+    uint8_t enabled;
 };
 
 #define DP_REORDER_FLOW_STATS_MAX \

@@ -1,0 +1,496 @@
++------+--------------+----------+-------------------+--------+
+| role | interface    | bridge   | mac               | state  |
++------+--------------+----------+-------------------+--------+
+| lan  | enp1s0f0     | Br0      | 3c:ec:ef:c2:21:d0 | -      |
+| wan  | enp2s0f0     | Br0      | -                 | UP     |
++------+--------------+----------+-------------------+--------+
+[CFM-INIT] CFM started on 1 WAN(s)
+[DP-CONF] active TX slots=4 (configured=4, limited by XSK queues)
+[DP-CONF] RX_LAN (1): 0
+[DP-CONF] TX (4): 1 2 9 10
+[DP-CONF] CRYPTO (6): 3 4 5 6 7 8
+[DP-CONF] RX_WAN (1): 11
++-- DATAPLANE ready --+
+| mode: single-profile (1 UMEM/process; multi-profile UMEM later) |
+
+  [system] processing: dataplane-ready
++------+--------------+----------+-------------------+--------+
+| role | interface    | bridge   | mac               | state  |
++------+--------------+----------+-------------------+--------+
+| lan  | enp1s0f0     | Br0      | 3c:ec:ef:c2:21:d0 | -      |
+| wan  | enp2s0f0     | Br0      | -                 | UP     |
++------+--------------+----------+-------------------+--------+
+
+
+  [system] processing: wait-peer
++------+--------------+----------+-------------------+--------+
+| role | interface    | bridge   | mac               | state  |
++------+--------------+----------+-------------------+--------+
+| lan  | enp1s0f0     | Br0      | 3c:ec:ef:c2:21:d0 | -      |
+| wan  | enp2s0f0     | Br0      | -                 | UP     |
++------+--------------+----------+-------------------+--------+
+[PQC-HS-L3] Responder Policy 2 sent authenticated handshake request to Initiator.
+
+  [system] processing: WAN DOWN if=enp2s0f0 (failover kick/-di)
++------+--------------+----------+-------------------+--------+
+| role | interface    | bridge   | mac               | state  |
++------+--------------+----------+-------------------+--------+
+| lan  | enp1s0f0     | Br0      | 3c:ec:ef:c2:21:d0 | -      |
+| wan  | enp2s0f0     | Br0      | -                 | DOWN   |
++------+--------------+----------+-------------------+--------+
+[PQC-HS-L3] Responder Policy 2 sent authenticated handshake request to Initiator.
+[PQC-HS-L3] Responder sent new RESP for Policy 2, session 3132174106; NEXT remains staged until peer confirmation.
+[PQC-HS-L3] Peer confirmed NEXT key for Policy 2; promoted key ID 1 to CURRENT.
+
+  [ne-key] processing: match
++----------+----------+----------+----------+
+| profile  | policy   | ne       | pqc_hs   |
++----------+----------+----------+----------+
+| 81       | 2        | D8BFC0D0 | D8BFC0D0 |
++----------+----------+----------+----------+
+
+  [system] processing: learn-peer if=enp2s0f0 mac=f8:f2:1e:e0:28:10
++------+--------------+----------+-------------------+--------+
+| role | interface    | bridge   | mac               | state  |
++------+--------------+----------+-------------------+--------+
+| lan  | enp1s0f0     | Br0      | 3c:ec:ef:c2:21:d0 | -      |
+| wan  | enp2s0f0     | Br0      | f8:f2:1e:e0:28:10 | UP     |
++------+--------------+----------+-------------------+--------+
+
+===== NE daemon session start 2026-09-03 07:05:15 +0000 pid=16501 log=/var/log/NE/packet.log =====
+[ENV] /opt/SEP/be/.env holds VAULT config only; POSTGRES_* come from Vault kv/secret
+[VAULT] config from /opt/SEP/be/.env (addr=http://127.0.0.1:8200/ unseal_keys=3 token=set debug=0)
+[VAULT] unseal via HTTP addr=http://127.0.0.1:8200/ (timeout=10s)
+[VAULT] unseal ok (already unsealed)
+[VAULT] config from /opt/SEP/be/.env (addr=http://127.0.0.1:8200/ unseal_keys=3 token=set debug=0)
+[VAULT] HTTP kv get kv/secret (timeout=10s)
+[VAULT] POSTGRES_* loaded from kv/secret
+[ENV] POSTGRES_* ready (from Vault kv/secret; NE_VAULT_DEBUG=0)
+[IPC] Listening on Unix Socket: /var/run/test_network-encryptor.sock
+[DP-CONF] no spare housekeeping CPU; control threads left unpinned
+[DAEMON] listening xdp_start + xdp_wan_admin — use ./network-encryptor -id <id> | -di <wan> | -ai <wan> | -gs <name>
+
+[STOP] shutting down (Ctrl+C / SIGTERM)
+[DP-STATS] ts=2026-09-03T07:05:36+0000 interval=55.7s LAN_RX=0.18G WAN_RX=0.00G TX_WAN=0.19G TX_LAN=0.00G bypass=0 local_drop=1 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=0 wan_to_mid=0 mid_to_wan=64 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655057
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=1201034 wan=1477968)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=0.06G) tx1(L=0.00G W=0.06G) tx2(L=0.00G W=0.04G) tx3(L=0.00G W=0.04G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:2989 w1:2989 w2:2989 w3:2989 w4:1495 w5:1494] q_lan=[0,0,1,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:05:41+0000 interval=4.9s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=7 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=0 wan_to_mid=0 mid_to_wan=46 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655126
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=494 wan=882969)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107003 w1:107003 w2:107003 w3:107003 w4:53503 w5:53502] q_lan=[0,0,5,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:05:46+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=15 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=1 wan_to_mid=0 mid_to_wan=48 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655140
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=396 wan=859217)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107002 w1:107003 w2:107004 w3:107002 w4:53502 w5:53500] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:05:51+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=22 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=33 wan_to_mid=0 mid_to_wan=10 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655141
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=552 wan=857295)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107005 w1:107004 w2:107004 w3:107006 w4:53501 w5:53502] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:05:55+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=33 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=5 wan_to_mid=0 mid_to_wan=26 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655022
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=492 wan=849848)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107003 w1:107003 w2:107004 w3:107002 w4:53503 w5:53503] q_lan=[0,0,6,11,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:06:00+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=42 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=0 wan_to_mid=0 mid_to_wan=22 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655158
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=1092 wan=850025)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107004 w1:107005 w2:107003 w3:107006 w4:53500 w5:53503] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:06:05+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=49 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=29 wan_to_mid=0 mid_to_wan=40 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655137
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=1176 wan=848709)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107001 w1:107002 w2:107004 w3:107001 w4:53503 w5:53500] q_lan=[13,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:06:10+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=58 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=36 wan_to_mid=0 mid_to_wan=8 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655104
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=420 wan=844956)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107006 w1:107004 w2:107004 w3:107005 w4:53502 w5:53503] q_lan=[5,0,1,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:06:15+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=65 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=5 wan_to_mid=0 mid_to_wan=28 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655038
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=984 wan=850628)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107003 w1:107004 w2:107003 w3:107004 w4:53502 w5:53501] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:06:19+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=71 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=25 wan_to_mid=0 mid_to_wan=50 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655116
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=325 wan=848421)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107005 w1:107004 w2:107003 w3:107004 w4:53502 w5:53504] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:06:24+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=80 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=18 wan_to_mid=0 mid_to_wan=30 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655111
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=276 wan=845532)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107002 w1:107004 w2:107003 w3:107002 w4:53502 w5:53500] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:06:29+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=87 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=16 wan_to_mid=0 mid_to_wan=0 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655084
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=1092 wan=860997)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107003 w1:107003 w2:107004 w3:107005 w4:53502 w5:53503] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:06:34+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=92 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=21 wan_to_mid=0 mid_to_wan=32 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655083
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=264 wan=853205)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107003 w1:107002 w2:107005 w3:107002 w4:53502 w5:53502] q_lan=[3,0,1,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:06:39+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=101 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=16 wan_to_mid=0 mid_to_wan=12 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655127
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=732 wan=861757)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107006 w1:107005 w2:107004 w3:107004 w4:53501 w5:53501] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:06:43+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=108 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=12 wan_to_mid=0 mid_to_wan=12 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655165
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=324 wan=856762)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107003 w1:107003 w2:107003 w3:107004 w4:53502 w5:53503] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:06:48+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=117 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=0 wan_to_mid=0 mid_to_wan=60 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=654994
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=504 wan=859179)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107004 w1:107004 w2:107004 w3:107005 w4:53502 w5:53502] q_lan=[12,0,0,8,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:06:53+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=128 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=0 wan_to_mid=0 mid_to_wan=0 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655109
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=457 wan=851444)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107004 w1:107003 w2:107004 w3:107003 w4:53503 w5:53502] q_lan=[2,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:06:58+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=134 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=0 wan_to_mid=0 mid_to_wan=18 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655100
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=420 wan=852672)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107003 w1:107002 w2:107003 w3:107002 w4:53500 w5:53501] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:07:03+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=143 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=0 wan_to_mid=0 mid_to_wan=34 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655155
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=372 wan=847544)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107006 w1:107006 w2:107004 w3:107007 w4:53503 w5:53503] q_lan=[0,0,6,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:07:07+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=148 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=10 wan_to_mid=0 mid_to_wan=44 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655106
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=684 wan=853158)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107002 w1:107003 w2:107005 w3:107000 w4:53501 w5:53501] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:07:12+0000 interval=4.8s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=157 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=18 wan_to_mid=0 mid_to_wan=6 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=655135
+[XDP-STATS] kernel_drop_delta lan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=12 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=780 wan=856197)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107004 w1:107004 w2:107003 w3:107005 w4:53503 w5:53501] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+Ket qua cuoi cung phan duoc ben phia client test case nay dang chay 1 wan va 1 lan khong chay gop kenh
+[  1] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 36283
+[  2] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 56305
+[  3] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 45507
+[  4] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 46889
+[  5] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 49816
+[  6] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 49063
+[  7] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 33467
+[  8] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 48256
+[  9] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 36224
+[ 10] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 45842
+[ ID] Interval       Transfer     Bandwidth        Jitter   Lost/Total Datagrams
+[ 10] 0.0000-99.9949 sec  7.29 GBytes   626 Mbits/sec   0.013 ms 28157/5349884 (0.53%)
+[  2] 0.0000-99.9991 sec  7.29 GBytes   626 Mbits/sec   0.016 ms 26387/5349881 (0.49%)
+[  2] 0.0000-99.9991 sec  6 datagrams received out-of-order
+[  4] 0.0000-99.9979 sec  7.29 GBytes   626 Mbits/sec   0.021 ms 23088/5349882 (0.43%)
+[  4] 0.0000-99.9979 sec  8 datagrams received out-of-order
+[  6] 0.0000-99.9971 sec  7.29 GBytes   626 Mbits/sec   0.018 ms 26413/5349882 (0.49%)
+[  6] 0.0000-99.9971 sec  11 datagrams received out-of-order
+[  8] 0.0000-99.9960 sec  7.29 GBytes   626 Mbits/sec   0.015 ms 28285/5349878 (0.53%)
+[  1] 0.0000-99.9997 sec  7.29 GBytes   626 Mbits/sec   0.034 ms 25704/5349879 (0.48%)
+[  1] 0.0000-99.9997 sec  31 datagrams received out-of-order
+[  3] 0.0000-99.9985 sec  7.29 GBytes   626 Mbits/sec   0.029 ms 25270/5349881 (0.47%)
+[  3] 0.0000-99.9985 sec  6 datagrams received out-of-order
+[  7] 0.0000-99.9966 sec  7.29 GBytes   626 Mbits/sec   0.022 ms 26220/5349881 (0.49%)
+[  5] 0.0000-99.9975 sec  7.29 GBytes   626 Mbits/sec   0.018 ms 24424/5349879 (0.46%)
+[  9] 0.0000-99.9955 sec  7.29 GBytes   627 Mbits/sec   0.029 ms 22485/5349878 (0.42%)
+[  9] 0.0000-99.9955 sec  3 datagrams received out-of-order
+[ ID] Interval       Transfer     Bandwidth
+[SUM] 0.0000-99.9997 sec  72.9 GBytes  6.26 Gbits/sec   256433/53498805 (0.48%)
+[SUM] 0.0000-99.9997 sec  65 datagrams received out-of-order
+
+
+Log sau khi chay gop kenh 2 lan 2 wan
+[system] processing: learn-peer if=enp2s0f1 mac=f8:f2:1e:e0:28:11
++------+--------------+----------+-------------------+--------+
+| role | interface    | bridge   | mac               | state  |
++------+--------------+----------+-------------------+--------+
+| lan  | enp1s0f0     | Br0      | 3c:ec:ef:c2:21:d0 | -      |
+| lan  | enp1s0f1     | Br1      | 20:7c:14:f8:0c:f8 | -      |
+| wan  | enp2s0f0     | Br0      | f8:f2:1e:e0:28:10 | UP     |
+| wan  | enp2s0f1     | Br1      | f8:f2:1e:e0:28:11 | UP     |
++------+--------------+----------+-------------------+--------+
+[DP-STATS] ts=2026-09-03T07:15:59+0000 interval=28.0s LAN_RX=0.54G WAN_RX=0.00G TX_WAN=0.57G TX_LAN=0.00G bypass=0 local_drop=1 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=37 wan_to_mid=0 mid_to_wan=54 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261807
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=1072754 wan=1585916)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=0.17G) tx1(L=0.00G W=0.17G) tx2(L=0.00G W=0.11G) tx3(L=0.00G W=0.11G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:8857 w1:8857 w2:8857 w3:8857 w4:4429 w5:4429] q_lan=[0,5,4,16,1,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:16:03+0000 interval=4.7s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=3 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=10 wan_to_mid=0 mid_to_wan=34 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261801
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=962 wan=1041268)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107003 w1:107003 w2:107004 w3:107004 w4:53502 w5:53501] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:16:08+0000 interval=4.6s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=6 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=18 wan_to_mid=0 mid_to_wan=26 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261956
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=840 wan=1037162)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107002 w1:107003 w2:107002 w3:107002 w4:53501 w5:53501] q_lan=[11,0,0,20,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:16:13+0000 interval=4.6s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=10 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=19 wan_to_mid=0 mid_to_wan=4 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261893
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=1224 wan=1039480)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107004 w1:107004 w2:107003 w3:107005 w4:53502 w5:53501] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:16:17+0000 interval=4.7s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=15 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=0 wan_to_mid=0 mid_to_wan=0 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261961
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=2184 wan=1047919)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107006 w1:107004 w2:107004 w3:107005 w4:53502 w5:53504] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:16:22+0000 interval=4.6s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=18 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=1 wan_to_mid=0 mid_to_wan=32 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261915
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=696 wan=1038187)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107001 w1:107003 w2:107005 w3:107002 w4:53503 w5:53502] q_lan=[0,0,0,4,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:16:27+0000 interval=4.6s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=20 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=18 wan_to_mid=0 mid_to_wan=14 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261845
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=1344 wan=1021287)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107006 w1:107005 w2:107002 w3:107005 w4:53501 w5:53502] q_lan=[0,4,18,1,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:16:31+0000 interval=4.6s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=24 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=12 wan_to_mid=0 mid_to_wan=8 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261890
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=840 wan=1030879)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107002 w1:107004 w2:107005 w3:107004 w4:53503 w5:53501] q_lan=[1,3,4,5,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:16:36+0000 interval=4.5s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=27 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=0 wan_to_mid=0 mid_to_wan=14 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261996
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=1344 wan=1007253)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107006 w1:107002 w2:107005 w3:107004 w4:53501 w5:53502] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:16:40+0000 interval=4.5s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=33 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=0 wan_to_mid=0 mid_to_wan=2 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261862
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=217 wan=996895)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107003 w1:107005 w2:107001 w3:107003 w4:53502 w5:53501] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:16:45+0000 interval=4.5s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=42 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=7 wan_to_mid=0 mid_to_wan=64 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261917
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=624 wan=1007160)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107003 w1:107003 w2:107004 w3:107003 w4:53502 w5:53502] q_lan=[0,0,9,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:16:49+0000 interval=4.5s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=53 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=13 wan_to_mid=0 mid_to_wan=14 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261946
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=480 wan=1016393)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107005 w1:107004 w2:107003 w3:107004 w4:53503 w5:53502] q_lan=[5,0,1,7,1,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:16:54+0000 interval=4.5s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=59 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=19 wan_to_mid=0 mid_to_wan=26 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261878
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=720 wan=1012660)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107004 w1:107002 w2:107005 w3:107004 w4:53501 w5:53502] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:16:58+0000 interval=4.5s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=70 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=0 wan_to_mid=0 mid_to_wan=0 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261956
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=816 wan=1010784)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107002 w1:107004 w2:107004 w3:107002 w4:53503 w5:53501] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:17:03+0000 interval=4.5s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=74 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=28 wan_to_mid=0 mid_to_wan=20 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261936
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=768 wan=1005464)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107004 w1:107004 w2:107005 w3:107004 w4:53501 w5:53502] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:17:07+0000 interval=4.5s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=78 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=4 wan_to_mid=0 mid_to_wan=2 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261988
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=1584 wan=1013310)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107004 w1:107005 w2:107003 w3:107004 w4:53503 w5:53503] q_lan=[12,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:17:12+0000 interval=4.5s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=83 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=0 wan_to_mid=0 mid_to_wan=44 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261925
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=648 wan=1006568)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107005 w1:107002 w2:107005 w3:107005 w4:53502 w5:53501] q_lan=[0,4,5,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:17:17+0000 interval=4.5s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=90 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=22 wan_to_mid=0 mid_to_wan=14 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261923
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=1152 wan=1012991)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107004 w1:107003 w2:107002 w3:107003 w4:53503 w5:53503] q_lan=[6,7,2,4,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:17:21+0000 interval=4.5s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=97 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=14 wan_to_mid=0 mid_to_wan=16 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261910
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=1249 wan=1013247)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107002 w1:107002 w2:107006 w3:107003 w4:53501 w5:53501] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:17:26+0000 interval=4.5s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=102 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=9 wan_to_mid=0 mid_to_wan=32 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261818
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=1320 wan=1008626)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107003 w1:107005 w2:107001 w3:107005 w4:53502 w5:53502] q_lan=[5,8,9,1,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:17:30+0000 interval=4.5s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=107 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=0 wan_to_mid=0 mid_to_wan=10 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261901
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=912 wan=1002115)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107004 w1:107003 w2:107005 w3:107003 w4:53502 w5:53501] q_lan=[0,5,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+[DP-STATS] ts=2026-09-03T07:17:35+0000 interval=4.5s LAN_RX=6.47G WAN_RX=0.00G TX_WAN=6.93G TX_LAN=0.00G bypass=0 local_drop=113 wan_fwd=6 wan_drop=0 wan_policy_drop=0 rx_ring_drop(lan=0 wan=0) mid_ring_drop=0 seq_untracked=0
+[DP-STATS] ring_depth lan_to_mid=0 wan_to_mid=0 mid_to_wan=20 mid_to_local=0 tx_no_free(lan=0 wan=0) tx_full(lan=0 wan=0) pool_free=261924
+[XDP-STATS] kernel_drop_delta lan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) wan(sockets=24 errors=0 rx_drop=0 ring_full=0 fill_empty=0 invalid_rx=0) tx_invalid(lan=0 wan=0) tx_empty(lan=1608 wan=1011054)
+[DP-STATS] bond_reorder held=0 released=0 late_dup=0 gap_skip=0 overflow=0 evicted=0 held_high_water=0
+[DP-STATS] bond_reorder_proto tcp(h=0 r=0 late=0 gap=0 ovf=0 evict=0) udp(h=0 r=0 late=0 gap=0 ovf=0 evict=0)
+[DP-STATS] tx_slot_gbps tx0(L=0.00G W=2.08G) tx1(L=0.00G W=2.08G) tx2(L=0.00G W=1.39G) tx3(L=0.00G W=1.39G)
+[DP-STATS] route_connections crypto=[2,2,2,2,1,1] tx=[3,3,2,2]
+[DP-STATS] crypto pps=[w0:107004 w1:107004 w2:107004 w3:107004 w4:53501 w5:53502] q_lan=[0,0,0,0,0,0] q_wan=[0,0,0,0,0,0] drop=[0,0,0,0,0,0]
+
+log cuoi cung ben phia client nhan duoc ket qua
+[  1] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 40700
+[  2] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 43044
+[  3] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 45861
+[  4] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 34653
+[  5] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 52376
+[  6] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 59355
+[  7] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 34750
+[  8] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 51287
+[  9] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 33571
+[ 10] local 192.168.203.2 port 5201 connected with 192.168.203.1 port 44864
+[ ID] Interval       Transfer     Bandwidth        Jitter   Lost/Total Datagrams
+[ 10] 0.0000-99.9950 sec  7.27 GBytes   625 Mbits/sec   0.026 ms 37834/5349884 (0.71%)
+[ 10] 0.0000-99.9950 sec  143638 datagrams received out-of-order
+[  2] 0.0000-99.9991 sec  7.28 GBytes   625 Mbits/sec   0.020 ms 35910/5349886 (0.67%)
+[  2] 0.0000-99.9991 sec  139698 datagrams received out-of-order
+[  4] 0.0000-99.9980 sec  7.27 GBytes   625 Mbits/sec   0.030 ms 37891/5349883 (0.71%)
+[  4] 0.0000-99.9980 sec  153588 datagrams received out-of-order
+[  6] 0.0000-99.9968 sec  7.27 GBytes   625 Mbits/sec   0.024 ms 37311/5349879 (0.7%)
+[  6] 0.0000-99.9968 sec  140289 datagrams received out-of-order
+[  8] 0.0000-99.9959 sec  7.28 GBytes   625 Mbits/sec   0.030 ms 34604/5349880 (0.65%)
+[  8] 0.0000-99.9959 sec  155559 datagrams received out-of-order
+[  1] 0.0000-99.9997 sec  7.27 GBytes   625 Mbits/sec   0.025 ms 38008/5349879 (0.71%)
+[  1] 0.0000-99.9997 sec  139832 datagrams received out-of-order
+[  3] 0.0000-99.9986 sec  7.27 GBytes   625 Mbits/sec   0.016 ms 38382/5349887 (0.72%)
+[  3] 0.0000-99.9986 sec  134530 datagrams received out-of-order
+[  7] 0.0000-99.9964 sec  7.27 GBytes   625 Mbits/sec   0.015 ms 36961/5349885 (0.69%)
+[  7] 0.0000-99.9964 sec  152507 datagrams received out-of-order
+[  5] 0.0000-99.9974 sec  7.28 GBytes   625 Mbits/sec   0.014 ms 33613/5349885 (0.63%)
+[  5] 0.0000-99.9974 sec  141941 datagrams received out-of-order
+[  9] 0.0000-99.9955 sec  7.27 GBytes   625 Mbits/sec   0.020 ms 38552/5349884 (0.72%)
+[  9] 0.0000-99.9955 sec  146219 datagrams received out-of-order
+[ ID] Interval       Transfer     Bandwidth
+[SUM] 0.0000-99.9998 sec  72.7 GBytes  6.25 Gbits/sec   369066/53498832 (0.69%)
+[SUM] 0.0000-99.9998 sec  1447801 datagrams received out-of-order

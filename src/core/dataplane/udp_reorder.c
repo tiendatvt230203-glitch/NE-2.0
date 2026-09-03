@@ -3,6 +3,7 @@
 
 #include <netinet/in.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -362,15 +363,24 @@ void dp_udp_reorder_configure_from_env(void)
 {
     const char *enabled = getenv("NE_BOND_REORDER");
     const char *hold_us = getenv("NE_BOND_REORDER_US");
+    const char *enabled_name = "NE_BOND_REORDER";
+    const char *hold_name = "NE_BOND_REORDER_US";
 
     /* Keep the old deployment knobs compatible. */
-    if (!enabled)
+    if (!enabled) {
         enabled = getenv("NE_UDP_REORDER");
-    if (!hold_us)
+        enabled_name = enabled ? "NE_UDP_REORDER" : "default";
+    }
+    if (!hold_us) {
         hold_us = getenv("NE_UDP_REORDER_US");
+        hold_name = hold_us ? "NE_UDP_REORDER_US" : "default";
+    }
 
-    if (enabled && enabled[0] == '0')
-        g_enabled = 0;
+    /* forwarder_init() can run again after a profile reload. Recompute both
+     * values from their defaults so a previous disabled/overridden profile
+     * cannot leave reorder permanently disabled in this process. */
+    g_enabled = !(enabled && enabled[0] == '0');
+    g_hold_ns = UDP_REORDER_DEFAULT_HOLD_NS;
     if (hold_us && hold_us[0]) {
         char *end = NULL;
         unsigned long value = strtoul(hold_us, &end, 10);
@@ -383,6 +393,12 @@ void dp_udp_reorder_configure_from_env(void)
             g_hold_ns = (uint64_t)value * 1000ULL;
         }
     }
+
+    fprintf(stderr,
+            "[BOND-REORDER] enabled=%d hold_us=%llu enabled_source=%s "
+            "hold_source=%s\n",
+            g_enabled, (unsigned long long)(g_hold_ns / 1000ULL),
+            enabled_name, hold_name);
 }
 
 uint64_t dp_udp_reorder_now_ns(void)
@@ -568,6 +584,8 @@ void dp_udp_reorder_get_stats(struct dp_udp_reorder_stats *out)
 
     if (!out)
         return;
+    out->enabled = (uint8_t)g_enabled;
+    out->hold_us = g_hold_ns / 1000ULL;
     tcp_held = atomic_load_explicit(&g_stat_held[REORDER_STAT_TCP], memory_order_relaxed);
     udp_held = atomic_load_explicit(&g_stat_held[REORDER_STAT_UDP], memory_order_relaxed);
     tcp_released = atomic_load_explicit(&g_stat_released[REORDER_STAT_TCP], memory_order_relaxed);
