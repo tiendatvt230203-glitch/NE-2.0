@@ -15,7 +15,8 @@
 #define UDP_REORDER_HELD_CAP          8192u
 #define UDP_REORDER_GC_SLICE          16u
 #define UDP_REORDER_FLOW_IDLE_NS      (60ULL * 1000000000ULL)
-#define UDP_REORDER_DEFAULT_HOLD_NS   (5ULL * 1000000ULL)
+/* Default for low-latency bonded paths; NE_BOND_REORDER_US can override it. */
+#define UDP_REORDER_DEFAULT_HOLD_NS   (2ULL * 1000000ULL)
 
 struct udp_reorder_slot {
     struct dp_udp_reorder_item item;
@@ -491,4 +492,3 @@ void dp_udp_reorder_get_stats(struct dp_udp_reorder_stats *out)
     out->udp_overflow = udp_overflow;
     out->udp_evicted = udp_evicted;
 }
-
