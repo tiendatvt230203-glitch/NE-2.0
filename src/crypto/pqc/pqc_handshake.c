@@ -17,12 +17,11 @@
 #include <dirent.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
+#include <sys/random.h>
 #include <net/if.h>
 #include "pqc_vault.h"
 
 #define PQC_RX_PKT_MAX     10000
-#define KEY_ROTATION_INTERVAL_MS (30ULL * 24ULL * 60ULL * 60ULL * 1000ULL) 
-#define L3_KEY_ROTATION_INTERVAL_MS 3000000
 #define PQC_HS_GIVEUP_TIMEOUT_MS 15000
 #define PQC_HS_REQUEST_RETRY_MS 1000
 #define PQC_HS_REQUEST_DATA_SZ ((uint16_t)sizeof(uint64_t))
@@ -1658,7 +1657,7 @@ static void* pqc_policy_handshake_worker_run(void *arg) {
                         b->last_sent_time = 0;
                         b->last_recv_time = 0;
                         pthread_mutex_unlock(&g_key_mutex);
-                    } else if (now - b->last_rotation_time > KEY_ROTATION_INTERVAL_MS) {
+                    } else if (now - b->last_rotation_time > PQC_KEY_LIFETIME_MS) {
                         if (!b->rotation_give_up) {
                             if (b->rotation_start_time == 0) {
                                 b->rotation_start_time = now;
@@ -1680,7 +1679,7 @@ static void* pqc_policy_handshake_worker_run(void *arg) {
                     usleep(500000);
                 } else {
                     uint64_t now = get_time_ms_hs();
-                    if (!b->rotation_give_up && (now - b->last_rotation_time > KEY_ROTATION_INTERVAL_MS + 15000)) {
+                    if (!b->rotation_give_up && (now - b->last_rotation_time > PQC_KEY_LIFETIME_MS + 15000)) {
                         if (!b->giveup_logged) {
                             fprintf(stderr, "[PQC-HS-L2] Key rotation timed out on Responder side (Policy %d). No HELLO received from Peer.\n", policy_id);
                             sig_pqc_write_log(policy_id, b->key_id, PQC_LOG_LEVEL_ERROR, PQC_LOG_STATUS_ROTATION_FAILED, "Session key rotation failed. No handshake request received from Peer.");
@@ -2108,7 +2107,7 @@ static void* pqc_policy_handshake_worker_run(void *arg) {
                         b->last_sent_time = 0;
                         b->last_recv_time = 0;
                         pthread_mutex_unlock(&g_key_mutex);
-                    } else if (now - b->last_rotation_time > L3_KEY_ROTATION_INTERVAL_MS) {
+                    } else if (now - b->last_rotation_time > PQC_KEY_LIFETIME_MS) {
                         if (!b->rotation_give_up) {
                             if (b->rotation_start_time == 0) {
                                 b->rotation_start_time = now;
@@ -2133,7 +2132,7 @@ static void* pqc_policy_handshake_worker_run(void *arg) {
                 } else {
                     uint64_t now = get_time_ms_hs();
                     if (!b->rotation_give_up &&
-                        (now - b->last_rotation_time > L3_KEY_ROTATION_INTERVAL_MS + 15000)) {
+                        (now - b->last_rotation_time > PQC_KEY_LIFETIME_MS + 15000)) {
                         fprintf(stderr, "[PQC-HS-L3] Key rotation timed out on Responder side (Policy %d). No HELLO received from Peer.\n", policy_id);
                         sig_pqc_write_log(policy_id, b->key_id, PQC_LOG_LEVEL_ERROR, PQC_LOG_STATUS_ROTATION_FAILED, "Session key rotation failed. No handshake request received from Peer.");
                         pthread_mutex_lock(&g_key_mutex);
@@ -2826,6 +2825,61 @@ int sig_pqc_trigger_retry_with_info(int policy_id, char *out_info, size_t out_ma
         );
         return -1;
     }
+}
+
+int sig_pqc_get_key_lifetime_info(int policy_id, char *out_info, size_t out_max) {
+    const uint64_t day_ms = 24ULL * 60ULL * 60ULL * 1000ULL;
+    uint64_t now = get_time_ms_hs();
+    int result = -1;
+
+    if (!out_info || out_max == 0)
+        return -1;
+
+    pthread_mutex_lock(&g_key_mutex);
+    for (int i = 0; i < g_policy_bindings_count; i++) {
+        policy_key_binding_t *b = &g_policy_bindings[i];
+        uint64_t elapsed_ms;
+        uint64_t remaining_ms;
+        uint64_t remaining_days;
+
+        if (b->policy_id != policy_id)
+            continue;
+        if (!b->key_ready || !b->key_slots_valid[KEY_SLOT_CURRENT] ||
+            b->last_rotation_time == 0) {
+            snprintf(out_info, out_max,
+                     "[PQC-KEY-LIFETIME] Policy=%d Status=NO_ACTIVE_KEY "
+                     "RemainingDays=0\n",
+                     policy_id);
+            result = 0;
+            break;
+        }
+
+        elapsed_ms = now >= b->last_rotation_time
+            ? now - b->last_rotation_time : 0;
+        remaining_ms = elapsed_ms >= PQC_KEY_LIFETIME_MS
+            ? 0 : PQC_KEY_LIFETIME_MS - elapsed_ms;
+        remaining_days = remaining_ms == 0
+            ? 0 : (remaining_ms + day_ms - 1) / day_ms;
+        snprintf(out_info, out_max,
+                 "[PQC-KEY-LIFETIME] Policy=%d Profile=%d Mode=%s "
+                 "Status=%s CurrentKeyID=%u AgeDays=%llu "
+                 "RemainingDays=%llu LifetimeDays=%llu\n",
+                 policy_id, b->profile_id, b->is_tunnel ? "L3" : "L2",
+                 remaining_ms ? "ACTIVE" : "ROTATION_DUE",
+                 (unsigned)b->key_ids[KEY_SLOT_CURRENT],
+                 (unsigned long long)(elapsed_ms / day_ms),
+                 (unsigned long long)remaining_days,
+                 (unsigned long long)PQC_KEY_LIFETIME_DAYS);
+        result = 0;
+        break;
+    }
+    pthread_mutex_unlock(&g_key_mutex);
+
+    if (result != 0)
+        snprintf(out_info, out_max,
+                 "[PQC-KEY-LIFETIME] Policy=%d Status=NOT_FOUND\n",
+                 policy_id);
+    return result;
 }
 
 void sig_pqc_load_and_bind_policy(void *conn_ptr, const void *cfg_ptr, int profile_idx, int db_policy_id, int profile_id) {

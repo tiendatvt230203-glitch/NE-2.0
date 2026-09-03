@@ -21,6 +21,11 @@
 #define PQC_TRAFFIC_KEY_SZ 32
 #define PQC_HS_MSG_MAX_SZ  10000
 
+/* Policy traffic keys rotate every 30 days for both L2 and L3. */
+#define PQC_KEY_LIFETIME_DAYS        30ULL
+#define PQC_KEY_LIFETIME_MS          \
+    (PQC_KEY_LIFETIME_DAYS * 24ULL * 60ULL * 60ULL * 1000ULL)
+
 #ifndef KEY_SLOT_COUNT
 #define KEY_SLOT_COUNT   3
 #endif
@@ -222,6 +227,7 @@ void sig_pqc_promote_responder_key(int policy_id);
 void sig_pqc_discard_prev_key(int policy_id);
 void sig_pqc_trigger_retry(int policy_id);
 int sig_pqc_trigger_retry_with_info(int policy_id, char *out_info, size_t out_max);
+int sig_pqc_get_key_lifetime_info(int policy_id, char *out_info, size_t out_max);
 
 void sig_pqc_prepare_reload(void);
 void sig_pqc_finalize_reload(void);
