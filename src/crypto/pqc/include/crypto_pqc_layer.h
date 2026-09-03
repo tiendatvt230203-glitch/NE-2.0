@@ -11,15 +11,9 @@
 
 typedef struct crypto_pqc_sess {
     const uint8_t *key;
-    const uint8_t *aad;
-    int aad_len;
 } crypto_pqc_sess_t;
 
 typedef unsigned char byte;
-
-static const byte HARDCODED_AAD[] = {
-    0x54, 0x45, 0x53, 0x54, 0x5f, 0x41, 0x41, 0x44
-};
 
 static inline int crypto_pqc_key_is_all_zero(const byte *key, size_t len)
 {
@@ -52,8 +46,6 @@ static inline int crypto_pqc_sess_load(struct packet_crypto_ctx *ctx, crypto_pqc
     if (ctx->pqc_from_handshake)
         zero_key_logged[ctx->wire_id] = 0;
     sess->key = key;
-    sess->aad = HARDCODED_AAD;
-    sess->aad_len = 12;
     return 0;
 }
 
@@ -87,7 +79,7 @@ static inline int crypto_pqc_encrypt_payload(const crypto_pqc_sess_t *sess,
     if (!c)
         return -1;
     rc = trf_encrypt_payload_gcm(c, sess->key, nonce, CRYPTO_PQC_NONCE_BYTES,
-                                 sess->aad, sess->aad_len, data, len, out_len);
+                                 data, len, out_len);
     return rc == TRF_PQC_OK ? 0 : -1;
 }
 
@@ -104,7 +96,7 @@ static inline int crypto_pqc_decrypt_payload(const crypto_pqc_sess_t *sess,
     if (!c)
         return -1;
     rc = trf_decrypt_payload_gcm(c, sess->key, nonce, CRYPTO_PQC_NONCE_BYTES,
-                                 sess->aad, sess->aad_len, data, len, out_len);
+                                 data, len, out_len);
     return rc == TRF_PQC_OK ? 0 : -1;
 }
 
@@ -129,8 +121,6 @@ static inline int crypto_pqc_decrypt_payload_resilient(
     for (int i = 0; i < KEY_SLOT_COUNT; i++)
         keys[i] = packet_crypto_get_key(ctx, i);
 
-    sess.aad = HARDCODED_AAD;
-    sess.aad_len = 12;
     for (int oi = 0; oi < KEY_SLOT_COUNT; oi++) {
         const byte *candidate = keys[order[oi]];
         int duplicate = 0;

@@ -21,17 +21,6 @@ int opt_no_frag_split(struct packet_crypto_ctx *ctx, uint8_t *pkt_data, uint32_t
     return -1;
 }
 
-int opt_no_frag_is_fragment(const struct app_config *cfg, const uint8_t *pkt_data,
-                            uint32_t pkt_len, uint16_t *pkt_id, uint8_t *frag_index)
-{
-    (void)cfg;
-    (void)pkt_data;
-    (void)pkt_len;
-    (void)pkt_id;
-    (void)frag_index;
-    return 0;
-}
-
 int opt_no_frag_reasm(int profile_slot, int worker_idx, struct packet_crypto_ctx *ctx,
                       uint8_t *pkt_data, uint32_t *pkt_len,
                       uint8_t *out_buf, uint32_t *out_len)

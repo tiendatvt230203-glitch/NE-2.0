@@ -9,7 +9,6 @@
 #include "../../../inc/crypto/pqc_handshake.h"
 #include "../../../inc/core/dataplane/crypto_route.h"
 #include "../../../inc/core/dataplane/arp_bridge.h"
-#include "../../../inc/core/dataplane/dataplane_stats.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
 
 #include <netinet/in.h>
@@ -56,7 +55,6 @@ static int push_split_to_wan(struct forwarder *fwd, struct ne_packet *job,
     if (ne_ring_try_push(tx, tail) != 0) {
         /* Head already queued; drop only the tail fragment. */
         ne_frame_free(&fwd->pair, tail->addr);
-        ne_dp_stats_local_drop(1);
     } else {
         ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
     }
@@ -100,11 +98,7 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
     (void)flow_ok;
     (void)cp;
 
-    if (pclass == CRYPTO_PROTO_TCP) {
-        if (!flow_ok || dp_tcp_next_tx_seq(pkt, len, &bond_seq) != 0)
-            return -1;
-        crypto_option_tcp_set_tx_seq(bond_seq);
-    } else if (pclass == CRYPTO_PROTO_UDP) {
+    if (pclass == CRYPTO_PROTO_UDP) {
         if (!flow_ok || dp_udp_next_tx_seq(pkt, len, &bond_seq) != 0)
             return -1;
         crypto_option_udp_set_tx_seq(bond_seq);
@@ -221,9 +215,7 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
         goto drop;
 
     if (cp->action == POLICY_ACTION_BYPASS) {
-        ne_dp_stats_local_bypass(1);
-        if (push_to_wan(fwd, &job, wan_dp) != 0)
-            ne_dp_stats_local_drop(1);
+        (void)push_to_wan(fwd, &job, wan_dp);
         return;
     }
     if (!fwd->cfg->crypto_enabled)
@@ -246,11 +238,9 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
         goto drop;
     if (enc > 0)
         return;
-    if (push_to_wan(fwd, &job, wan_dp) != 0)
-        ne_dp_stats_local_drop(1);
+    (void)push_to_wan(fwd, &job, wan_dp);
     return;
 
 drop:
-    ne_dp_stats_local_drop(1);
     ne_frame_free(&fwd->pair, job.addr);
 }

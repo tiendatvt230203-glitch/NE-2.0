@@ -16,20 +16,8 @@
 void crypto_option_bind_worker_idx(uint8_t worker_idx);
 uint8_t crypto_option_worker_idx(void);
 
-struct ne_pair;
-void crypto_l2_pqc_bind_pair(struct ne_pair *p);
-void crypto_l2_pqc_reasm_set_addr(uint64_t addr);
-int crypto_l2_pqc_reasm_held(void);
-uint64_t crypto_l2_pqc_reasm_out_addr(void);
-
 /* --- option router --- */
 
-uint16_t crypto_option_next_pkt_id(void);
-void crypto_option_tcp_set_tx_seq(uint32_t seq);
-int crypto_option_tcp_tx_meta(uint32_t *epoch, uint32_t *seq);
-void crypto_option_tcp_clear_rx_meta(void);
-void crypto_option_tcp_set_rx_meta(uint32_t epoch, uint32_t seq);
-int crypto_option_tcp_take_rx_meta(uint32_t *epoch, uint32_t *seq);
 void crypto_option_udp_set_tx_seq(uint32_t seq);
 int crypto_option_udp_tx_meta(uint32_t *epoch, uint32_t *seq,
                               uint32_t *datagram_id);
@@ -64,8 +52,6 @@ struct crypto_option_ops {
                  uint8_t *frag1, size_t frag1_max, uint32_t *frag1_len);
     int (*encrypt)(struct packet_crypto_ctx *ctx, uint8_t *pkt, uint32_t *pkt_len);
     int (*decrypt)(struct packet_crypto_ctx *ctx, uint8_t *pkt, uint32_t *pkt_len);
-    int (*is_fragment)(const struct app_config *cfg, const uint8_t *pkt_data,
-                       uint32_t pkt_len, uint16_t *pkt_id, uint8_t *frag_index);
     int (*reasm)(int profile_slot, int worker_idx, struct packet_crypto_ctx *ctx,
                  uint8_t *pkt_data, uint32_t *pkt_len, uint8_t *out_buf, uint32_t *out_len);
     void (*frag_gc)(int profile_slot, int worker_idx, uint64_t now_ns);
@@ -87,10 +73,6 @@ int crypto_option_encrypt(crypto_option_id id, crypto_proto_class proto,
 int crypto_option_decrypt(crypto_option_id id, crypto_proto_class proto,
                           struct packet_crypto_ctx *ctx,
                           uint8_t *pkt, uint32_t *pkt_len);
-int crypto_option_is_fragment(crypto_option_id id, crypto_proto_class proto,
-                              const struct app_config *cfg,
-                              const uint8_t *pkt_data, uint32_t pkt_len,
-                              uint16_t *pkt_id, uint8_t *frag_index);
 int crypto_option_reassemble(crypto_option_id id, crypto_proto_class proto,
                              int profile_slot, int worker_idx,
                              struct packet_crypto_ctx *ctx,

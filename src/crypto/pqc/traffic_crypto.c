@@ -181,7 +181,6 @@ int trf_save_key_to_file(const char *filename, const char *data, int mode) {
 // =========================================================
 
 int trf_encrypt_payload_gcm(SCryptCipherCtx* ctx, const byte* key, const byte* nonce, int nonce_len, 
-                            const byte* aad, int aad_len,
                             byte* data, int len, int* new_len_out) {
     if (!g_pqc_initialized || !data || len == 0 || !ctx) return TRF_PQC_ERR_CRYPTO;
 
@@ -192,16 +191,6 @@ int trf_encrypt_payload_gcm(SCryptCipherCtx* ctx, const byte* key, const byte* n
 
     // Explicitly set tag size for GCM
     scrypt_CipherSetTagSize(ctx, TAG_SIZE_GCM);
-
-    // Optional AAD - Must be 64-byte aligned for hardware acceleration to process it
-    // if (aad && aad_len > 0) {
-    //     byte aligned_aad[256] __attribute__((aligned(64)));
-    //     if (aad_len > (int)sizeof(aligned_aad)) return TRF_PQC_ERR_CRYPTO;
-    //     memcpy(aligned_aad, aad, aad_len);
-    //     if ((ret = scrypt_CipherUpdateAAD(ctx, aligned_aad, (word32)aad_len)) != 0) {
-    //         return TRF_PQC_ERR_CRYPTO;
-    //     }
-    // }
 
     word32 outLen = 0, finalLen = 0;
     if ((ret = scrypt_CipherUpdate(ctx, data, len, data, &outLen)) != 0) {
@@ -226,7 +215,6 @@ int trf_encrypt_payload_gcm(SCryptCipherCtx* ctx, const byte* key, const byte* n
 }
 
 int trf_decrypt_payload_gcm(SCryptCipherCtx* ctx, const byte* key, const byte* nonce, int nonce_len, 
-                            const byte* aad, int aad_len,
                             byte* data, int len, int* orig_len_out) {
     if (!g_pqc_initialized || !data || len <= TAG_SIZE_GCM || !ctx) return TRF_PQC_ERR_CRYPTO;
 
@@ -245,15 +233,7 @@ int trf_decrypt_payload_gcm(SCryptCipherCtx* ctx, const byte* key, const byte* n
     // 1. Set tag for verification first
     if (scrypt_CipherSetTag(ctx, tag, TAG_SIZE_GCM) != 0) return TRF_PQC_ERR_CRYPTO;
 
-    // 1. Process AAD (Network Header) - Align to 64-byte for hardware acceleration
-    // if (aad && aad_len > 0) {
-    //     byte aligned_aad[256] __attribute__((aligned(64)));
-    //     if (aad_len > (int)sizeof(aligned_aad)) return TRF_PQC_ERR_CRYPTO;
-    //     memcpy(aligned_aad, aad, aad_len);
-    //     if (scrypt_CipherUpdateAAD(ctx, aligned_aad, (word32)aad_len) != 0) return TRF_PQC_ERR_CRYPTO;
-    // }
-
-    // 3. Process Ciphertext
+    // Process ciphertext.
     word32 outLen = 0, finalLen = 0;
     if (scrypt_CipherUpdate(ctx, data, payload_len, data, &outLen) != 0) return TRF_PQC_ERR_CRYPTO;
     
@@ -612,5 +592,4 @@ int trf_pqc_setup_session(const byte* local_priv_dsa, int local_priv_dsa_sz,
     
     return TRF_PQC_OK;
 }
-
 

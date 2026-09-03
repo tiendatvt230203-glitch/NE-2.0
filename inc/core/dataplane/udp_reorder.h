@@ -10,61 +10,19 @@ struct dp_udp_reorder_key {
     uint32_t dst_ip;
     uint16_t src_port;
     uint16_t dst_port;
-    uint8_t protocol;
 };
 
 struct dp_udp_reorder_item {
     struct ne_packet packet;
     int16_t profile_pi;
     int8_t ingress_wan_dp;
+    uint8_t tx_slot;
 };
 
 struct dp_udp_reorder_ops {
     void *ctx;
     int (*emit)(void *ctx, struct dp_udp_reorder_item *item);
     void (*drop)(void *ctx, struct dp_udp_reorder_item *item);
-};
-
-struct dp_udp_reorder_stats {
-    uint64_t hold_us;
-    uint64_t held;
-    uint64_t released;
-    uint64_t late_or_duplicate;
-    uint64_t gap_skipped;
-    uint64_t overflow;
-    uint64_t evicted;
-    uint64_t high_water;
-    uint64_t tcp_held;
-    uint64_t tcp_released;
-    uint64_t tcp_late_or_duplicate;
-    uint64_t tcp_gap_skipped;
-    uint64_t tcp_overflow;
-    uint64_t tcp_evicted;
-    uint64_t udp_held;
-    uint64_t udp_released;
-    uint64_t udp_late_or_duplicate;
-    uint64_t udp_gap_skipped;
-    uint64_t udp_overflow;
-    uint64_t udp_evicted;
-    uint8_t enabled;
-};
-
-#define DP_REORDER_FLOW_STATS_MAX \
-    (NE_CRYPTO_WORKERS * 64u * 4u)
-
-struct dp_udp_reorder_flow_stats {
-    struct dp_udp_reorder_key key;
-    uint32_t epoch;
-    uint64_t rx_packets;
-    uint64_t reordered_arrivals;
-    uint64_t late_or_duplicate;
-    uint64_t late_recovered;
-    uint64_t gap_skipped;
-    uint64_t net_missing;
-    uint64_t buffer_drops;
-    uint64_t duplicate_drops;
-    uint64_t emit_drops;
-    uint8_t worker_idx;
 };
 
 void dp_udp_reorder_configure_from_env(void);
@@ -82,9 +40,6 @@ void dp_udp_reorder_gc(int worker_idx, uint64_t now_ns,
                        const struct dp_udp_reorder_ops *ops);
 void dp_udp_reorder_reset_worker(int worker_idx,
                                  const struct dp_udp_reorder_ops *ops);
-void dp_udp_reorder_get_stats(struct dp_udp_reorder_stats *out);
-size_t dp_udp_reorder_get_flow_stats(struct dp_udp_reorder_flow_stats *out,
-                                     size_t capacity);
 
 #endif
 #define _POSIX_C_SOURCE 200809L

@@ -1,6 +1,5 @@
 #include "../../../inc/core/dataplane/dataplane_util.h"
 
-#include "../../../inc/core/dataplane/dataplane_stats.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
 #include "../../../inc/core/dataplane/crypto_route.h"
 #include "../../../inc/crypto/eth_parse.h"
@@ -124,7 +123,6 @@ int dp_parse_arp_op(const uint8_t *pkt, uint32_t len, uint16_t *op_out)
 int dp_ring_push(struct forwarder *fwd, struct ne_ring *ring, struct ne_packet *pkt)
 {
     if (pkt->len > fwd->pair.frame_size || ne_ring_try_push(ring, pkt) != 0) {
-        ne_dp_stats_mid_ring_drop(1);
         ne_frame_free(&fwd->pair, pkt->addr);
         return -1;
     }

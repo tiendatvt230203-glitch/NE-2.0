@@ -1785,7 +1785,8 @@ int sig_pqc_get_traffic_key(uint8_t out_key[PQC_TRAFFIC_KEY_SZ]) {
 int sig_pqc_diversify_key(int profile_id, int policy_id, uint8_t *out_policy_key) {
     pthread_mutex_lock(&g_key_mutex);
     for (int i = 0; i < g_policy_bindings_count; i++) {
-        if (g_policy_bindings[i].policy_id == policy_id) {
+        if (g_policy_bindings[i].profile_id == profile_id &&
+            g_policy_bindings[i].policy_id == policy_id) {
             if (g_policy_bindings[i].key_ready) {
                 memcpy(out_policy_key, g_policy_bindings[i].encrypt_key, PQC_TRAFFIC_KEY_SZ);
                 pthread_mutex_unlock(&g_key_mutex);

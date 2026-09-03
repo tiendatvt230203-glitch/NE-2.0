@@ -10,7 +10,6 @@
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/flow/mac_learn.h"
 #include "../../../inc/core/dataplane/arp_bridge.h"
-#include "../../../inc/core/dataplane/dataplane_stats.h"
 #include "../../../inc/core/dataplane/udp_reorder.h"
 
 #include <netinet/in.h>
@@ -83,7 +82,7 @@ static int wan_wire_is_encrypted(struct forwarder *fwd, const uint8_t *pkt, uint
     return 0;
 }
 
-static int decrypt_l2(struct forwarder *fwd, uint8_t *pkt, uint32_t *len)
+static int decrypt_l2(uint8_t *pkt, uint32_t *len)
 {
     struct packet_crypto_ctx *ctx;
     uint8_t wire_id = 0;
@@ -114,8 +113,8 @@ static int decrypt_l2(struct forwarder *fwd, uint8_t *pkt, uint32_t *len)
     return -1;
 }
 
-static int reassemble_l2(struct forwarder *fwd, uint8_t *pkt, uint32_t *len,
-                         uint8_t policy_id, uint64_t addr, int *pending)
+static int reassemble_l2(uint8_t *pkt, uint32_t *len, uint8_t policy_id,
+                         int *pending)
 {
     struct packet_crypto_ctx *ctx;
     int slot, rr;
@@ -128,11 +127,10 @@ static int reassemble_l2(struct forwarder *fwd, uint8_t *pkt, uint32_t *len,
         fwd_crypto_profile_id_for_wire_id(policy_id));
     if (slot < 0)
         return -1;
-    crypto_l2_pqc_reasm_set_addr(addr);
     rr = crypto_option_reassemble(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_UDP, slot, dp_crypto_current_worker_idx(),
                                   ctx, pkt, len, pkt, &blen);
     if (rr == 0) {
-        *pending = crypto_l2_pqc_reasm_held() ? 2 : 1;
+        *pending = 1;
         return 0;
     }
     if (rr != 1)
@@ -143,7 +141,7 @@ static int reassemble_l2(struct forwarder *fwd, uint8_t *pkt, uint32_t *len,
 
 /* The versioned four-byte marker covers both full and split UDP. */
 static int wan_try_l2_pqc_udp(struct forwarder *fwd, uint8_t *pkt, uint32_t *len,
-                              uint64_t addr, int *pending)
+                              int *pending)
 {
     uint8_t wire_pol = 0;
 
@@ -159,7 +157,7 @@ static int wan_try_l2_pqc_udp(struct forwarder *fwd, uint8_t *pkt, uint32_t *len
     if (!fwd_crypto_ctx_for_wire_id(wire_pol))
         return 0;
 
-    if (reassemble_l2(fwd, pkt, len, wire_pol, addr, pending) != 0) {
+    if (reassemble_l2(pkt, len, wire_pol, pending) != 0) {
         if (pending)
             *pending = 0;
         return -1;
@@ -175,11 +173,8 @@ static int wan_l2_is_frag(const uint8_t *pkt, uint32_t len)
 
 static int decrypt_wan(struct forwarder *fwd, struct ne_packet *job)
 {
-    uint8_t scratch[8192];
     uint8_t *pkt = ne_packet_data(&fwd->pair, job->addr);
     uint32_t len = job->len;
-    uint16_t pid = 0;
-    uint8_t fidx = 0;
     int pending = 0;
     int is_l2 = 0;
 
@@ -192,65 +187,20 @@ static int decrypt_wan(struct forwarder *fwd, struct ne_packet *job)
     is_l2 = fwd_crypto_has_l2_marker(pkt, len) || wan_l2_is_udp_tagged(pkt, len);
 
     {
-        int l2_fast = wan_try_l2_pqc_udp(fwd, pkt, &len, job->addr, &pending);
+        int l2_fast = wan_try_l2_pqc_udp(fwd, pkt, &len, &pending);
 
         if (l2_fast < 0)
             return -1;
         if (l2_fast == 1) {
-            uint64_t out_addr;
-
-            if (pending == 2)
-                return 2;
             if (pending)
                 return 1;
-            out_addr = crypto_l2_pqc_reasm_out_addr();
-            if (out_addr && out_addr != job->addr) {
-                ne_frame_free(&fwd->pair, job->addr);
-                job->addr = out_addr;
-            }
             job->len = len;
             return 0;
         }
         if (l2_fast == 0) {
-            uint32_t orig_len = len;
-            uint8_t wire_pol = 0;
-            int need_backup = wan_l2_is_udp_tagged(pkt, len) ||
-                crypto_option_is_fragment(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_UDP,
-                                          fwd->cfg, pkt, len, &pid, &fidx);
-            if (need_backup && orig_len <= sizeof(scratch))
-                memcpy(scratch, pkt, orig_len);
-            if (decrypt_l2(fwd, pkt, &len) != 0 || !wan_l2_plain_ok(pkt, len)) {
-                if (need_backup)
-                    memcpy(pkt, scratch, orig_len);
-                len = orig_len;
-                if (crypto_option_is_fragment(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_UDP,
-                                              fwd->cfg, pkt, len, &pid, &fidx)) {
-                    if (crypto_eth_l2_read_policy_id(pkt, len, &wire_pol) != 0)
-                        return -1;
-                    if (reassemble_l2(fwd, pkt, &len, wire_pol, job->addr, &pending) != 0)
-                        return -1;
-                } else if (is_l2) {
-                    return -1;
-                }
-            }
-        }
-    }
-    if (pending == 2)
-        return 2;
-    if (pending)
-        return 1;
-
-    if (!fwd->cfg->crypto_enabled) {
-        job->len = len;
-        return 0;
-    }
-
-    {
-        uint64_t out_addr = crypto_l2_pqc_reasm_out_addr();
-
-        if (out_addr && out_addr != job->addr) {
-            ne_frame_free(&fwd->pair, job->addr);
-            job->addr = out_addr;
+            if ((decrypt_l2(pkt, &len) != 0 ||
+                 !wan_l2_plain_ok(pkt, len)) && is_l2)
+                return -1;
         }
     }
     job->len = len;
@@ -409,7 +359,6 @@ static int forward_wan_to_local(struct forwarder *fwd, struct ne_packet *job,
         job->local_idx = (uint8_t)li;
         if (dp_ring_push(fwd, &fwd->mid_to_local[li][dp_out_ring_idx()], job) != 0) {
             /* dp_ring_push already returned the UMEM frame to the pool. */
-            ne_dp_stats_wan_drop(1);
             return 1;
         }
         return 0;
@@ -429,15 +378,13 @@ static int bond_reorder_emit(void *ctx, struct dp_udp_reorder_item *item)
     pkt = ne_packet_data(&fwd->pair, item->packet.addr);
     if (!pkt)
         return -1;
-    dp_out_ring_bind(dp_flow_pick_tx_slot(pkt, item->packet.len,
-                                          dp_crypto_current_worker_idx()));
+    dp_out_ring_bind(item->tx_slot);
     rc = forward_wan_to_local(fwd, &item->packet, item->profile_pi,
                               item->ingress_wan_dp);
     if (rc < 0)
         return -1;
     if (rc > 0)
         return 1;
-    ne_dp_stats_wan_fwd(1);
     return 0;
 }
 
@@ -447,7 +394,6 @@ static void bond_reorder_drop(void *ctx, struct dp_udp_reorder_item *item)
 
     if (!fwd || !item)
         return;
-    ne_dp_stats_wan_drop(1);
     ne_frame_free(&fwd->pair, item->packet.addr);
 }
 
@@ -533,7 +479,6 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
 
     encrypted = wan_wire_is_encrypted(fwd, pkt, job.len);
     if (encrypted) {
-        crypto_option_tcp_clear_rx_meta();
         crypto_option_udp_clear_rx_meta();
         if (!fwd->cfg->crypto_enabled)
             goto drop;
@@ -542,8 +487,6 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
             ne_frame_free(&fwd->pair, job.addr);
             return;
         }
-        if (dec == 2)
-            return;
         if (dec != 0)
             goto drop;
         pkt = ne_packet_data(&fwd->pair, job.addr);
@@ -572,9 +515,6 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
 
         if (crypto_option_udp_take_rx_meta(&epoch, &seq) == 0)
             reorder_proto = IPPROTO_UDP;
-        else if (crypto_option_tcp_take_rx_meta(&epoch, &seq) == 0)
-            reorder_proto = IPPROTO_TCP;
-
         if (reorder_proto != 0) {
             struct dp_udp_reorder_key key;
             struct dp_udp_reorder_item item;
@@ -591,26 +531,18 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
             key.dst_ip = dst_ip;
             key.src_port = src_port;
             key.dst_port = dst_port;
-            key.protocol = proto;
             memset(&item, 0, sizeof(item));
             item.packet = job;
             item.profile_pi = (int16_t)profile_pi;
             item.ingress_wan_dp = job.wan_idx < fwd->wan_count
                 ? (int8_t)job.wan_idx : -1;
+            item.tx_slot = (uint8_t)dp_udp_pick_tx_slot(
+                src_ip, dst_ip, src_port, dst_port,
+                dp_crypto_current_worker_idx());
             dp_udp_reorder_submit(dp_crypto_current_worker_idx(), &key,
                                   epoch, seq, &item,
                                   dp_udp_reorder_now_ns(), &ops);
             return;
-        }
-        {
-            uint32_t src_ip = 0, dst_ip = 0;
-            uint16_t src_port = 0, dst_port = 0;
-            uint8_t proto = 0;
-
-            if (dp_parse_flow(pkt, job.len, &src_ip, &dst_ip,
-                              &src_port, &dst_port, &proto) == 0 &&
-                (proto == IPPROTO_TCP || proto == IPPROTO_UDP))
-                ne_dp_stats_seq_untracked(1);
         }
         dp_out_ring_bind(dp_flow_pick_tx_slot(pkt, job.len,
                                               dp_crypto_current_worker_idx()));
@@ -628,16 +560,12 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
         if (rc > 0)
             return;
     }
-    ne_dp_stats_wan_fwd(1);
     return;
 
 policy_drop:
-    ne_dp_stats_wan_policy_drop(1);
-    ne_dp_stats_wan_drop(1);
     ne_frame_free(&fwd->pair, job.addr);
     return;
 
 drop:
-    ne_dp_stats_wan_drop(1);
     ne_frame_free(&fwd->pair, job.addr);
 }

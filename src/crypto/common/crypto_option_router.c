@@ -36,14 +36,8 @@ crypto_proto_class crypto_proto_classify(uint8_t ip_proto)
 
 /* ===================== option router ===================== */
 
-static atomic_uint_fast32_t g_opt_pkt_id = 0;
 static atomic_uint_fast32_t g_opt_frag_mtu = CRYPTO_OPT_FRAG_MTU_DEFAULT;
 static atomic_uint_fast32_t g_bond_epoch;
-static __thread uint32_t g_tcp_tx_seq;
-static __thread uint32_t g_tcp_rx_epoch;
-static __thread uint32_t g_tcp_rx_seq;
-static __thread uint8_t g_tcp_tx_valid;
-static __thread uint8_t g_tcp_rx_valid;
 static __thread uint32_t g_udp_tx_seq;
 static __thread uint32_t g_udp_tx_datagram_id;
 static __thread uint32_t g_udp_tx_datagram_clock;
@@ -51,11 +45,6 @@ static __thread uint32_t g_udp_rx_epoch;
 static __thread uint32_t g_udp_rx_seq;
 static __thread uint8_t g_udp_tx_valid;
 static __thread uint8_t g_udp_rx_valid;
-
-uint16_t crypto_option_next_pkt_id(void)
-{
-    return (uint16_t)(atomic_fetch_add(&g_opt_pkt_id, 1) & 0xFFFF);
-}
 
 static uint32_t crypto_option_bond_epoch(void)
 {
@@ -83,43 +72,6 @@ static uint32_t crypto_option_bond_epoch(void)
             epoch = (uint32_t)expected;
     }
     return epoch;
-}
-
-void crypto_option_tcp_set_tx_seq(uint32_t seq)
-{
-    g_tcp_tx_seq = seq;
-    g_tcp_tx_valid = 1u;
-}
-
-int crypto_option_tcp_tx_meta(uint32_t *epoch, uint32_t *seq)
-{
-    if (!epoch || !seq || !g_tcp_tx_valid)
-        return -1;
-    *epoch = crypto_option_bond_epoch();
-    *seq = g_tcp_tx_seq;
-    return 0;
-}
-
-void crypto_option_tcp_clear_rx_meta(void)
-{
-    g_tcp_rx_valid = 0u;
-}
-
-void crypto_option_tcp_set_rx_meta(uint32_t epoch, uint32_t seq)
-{
-    g_tcp_rx_epoch = epoch;
-    g_tcp_rx_seq = seq;
-    g_tcp_rx_valid = 1u;
-}
-
-int crypto_option_tcp_take_rx_meta(uint32_t *epoch, uint32_t *seq)
-{
-    if (!epoch || !seq || !g_tcp_rx_valid)
-        return -1;
-    *epoch = g_tcp_rx_epoch;
-    *seq = g_tcp_rx_seq;
-    g_tcp_rx_valid = 0u;
-    return 0;
 }
 
 void crypto_option_udp_set_tx_seq(uint32_t seq)
@@ -230,17 +182,6 @@ int crypto_option_decrypt(crypto_option_id id, crypto_proto_class proto,
                           uint8_t *pkt, uint32_t *pkt_len)
 {
     CALL_OPS(decrypt, id, proto, ctx, pkt, pkt_len);
-}
-
-int crypto_option_is_fragment(crypto_option_id id, crypto_proto_class proto,
-                              const struct app_config *cfg,
-                              const uint8_t *pkt_data, uint32_t pkt_len,
-                              uint16_t *pkt_id, uint8_t *frag_index)
-{
-    const struct crypto_option_ops *ops = crypto_option_ops(id, proto);
-    if (!ops || !ops->is_fragment)
-        return 0;
-    return ops->is_fragment(cfg, pkt_data, pkt_len, pkt_id, frag_index);
 }
 
 int crypto_option_reassemble(crypto_option_id id, crypto_proto_class proto,

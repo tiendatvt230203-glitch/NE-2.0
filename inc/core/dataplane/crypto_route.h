@@ -16,13 +16,13 @@ void dp_crypto_worker_bind(int worker_idx);
 int dp_crypto_current_worker_idx(void);
 
 /* Monotonic wire sequence in one flow/direction. Called on its sticky worker. */
-int dp_tcp_next_tx_seq(const uint8_t *pkt, uint32_t len, uint32_t *seq_out);
 int dp_udp_next_tx_seq(const uint8_t *pkt, uint32_t len, uint32_t *seq_out);
 
 /* Learn/lookup a decrypted flow and return its sticky, independently balanced TX slot. */
 int dp_flow_pick_tx_slot(const uint8_t *pkt, uint32_t len, int worker_hint);
-void dp_route_connection_counts(uint64_t worker_counts[NE_CRYPTO_WORKERS],
-                                uint64_t tx_counts[NE_TX_SLOTS]);
+int dp_udp_pick_tx_slot(uint32_t src_ip, uint32_t dst_ip,
+                        uint16_t src_port, uint16_t dst_port,
+                        int worker_hint);
 void dp_route_set_active_tx_slots(uint32_t slots);
 
 /* Bypass TX affinity: hash → TX slot (RX/TX cores only). Not a crypto worker. */
