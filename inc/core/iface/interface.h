@@ -63,12 +63,13 @@ static inline int ne_jumbo_append_bytes(uint8_t *dst, uint32_t capacity,
 #define XDP_PKT_CONTD (1U << 0)
 #endif
 
-/* This dataplane has one supported operating mode. Keep these flags
- * centralized so no call site can silently select generic/SKB XDP or
- * AF_XDP zero-copy. */
-#define NE_XDP_REQUIRED_MODE       XDP_FLAGS_DRV_MODE
-#define NE_XSK_REQUIRED_BIND_FLAGS \
-    (XDP_COPY | XDP_USE_NEED_WAKEUP | XDP_USE_SG)
+/* Native XDP + AF_XDP copy is the baseline for every MTU. Scatter-gather is
+ * added per interface only when its MTU cannot fit in one UMEM frame. Keeping
+ * XDP_USE_SG out of the 1500-byte path preserves compatibility with kernels
+ * and drivers which support native AF_XDP copy but not RX scatter-gather. */
+#define NE_XDP_REQUIRED_MODE         XDP_FLAGS_DRV_MODE
+#define NE_XSK_BASE_BIND_FLAGS       (XDP_COPY | XDP_USE_NEED_WAKEUP)
+#define NE_XSK_SG_BIND_FLAGS         (NE_XSK_BASE_BIND_FLAGS | XDP_USE_SG)
 
 #include "core/util/cpu_map.h"
 

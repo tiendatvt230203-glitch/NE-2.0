@@ -178,8 +178,7 @@ static int xdp_attach_prog(int ifindex, int prog_fd, const char *ifname, const c
         fflush(stderr);
         return -1;
     }
-    fprintf(stderr,
-            "[PROFILE-XDP] attach OK %s %s (drv, AF_XDP copy-only)\n",
+    fprintf(stderr, "[PROFILE-XDP] attach OK %s %s (drv, AF_XDP copy)\n",
             role, ifname);
     fflush(stderr);
     return 0;

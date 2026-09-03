@@ -595,7 +595,16 @@ int interface_validate_mtu_topology(const struct app_config *cfg)
     return 0;
 }
 
-static void interface_log_xsk_context(const char *ifname, int queue_id, int ret)
+static uint16_t interface_xsk_bind_flags(const char *ifname)
+{
+    int mtu = interface_get_mtu(ifname);
+
+    return mtu > (int)NE_FRAME ? NE_XSK_SG_BIND_FLAGS
+                               : NE_XSK_BASE_BIND_FLAGS;
+}
+
+static void interface_log_xsk_context(const char *ifname, int queue_id, int ret,
+                                      uint16_t bind_flags)
 {
     char master[IF_NAMESIZE];
     char path[256];
@@ -625,8 +634,9 @@ static void interface_log_xsk_context(const char *ifname, int queue_id, int ret)
     nq = interface_get_queue_count(ifname);
     fprintf(stderr,
             "[DP] XSK create failed %s q=%d: %s (%d) — mtu=%d queues=%d "
-            "frame=%u mode=drv copy=1 sg=1 fallback=disabled master=%s%s\n",
+            "frame=%u mode=drv copy=1 sg=%d fallback=disabled master=%s%s\n",
             ifname, queue_id, strerror(err), ret, mtu, nq, NE_FRAME,
+            (bind_flags & XDP_USE_SG) != 0,
             master[0] ? master : "-",
             interface_is_bridge_slave(ifname) ? " (bridge-slave, Br kept)" : "");
     if (mtu > (int)NE_FRAME)
@@ -926,13 +936,14 @@ static int xsk_create_queue(struct ne_pair *p, struct ne_iface *iface,
 {
     struct ne_xsk_queue *slot = &iface->queues[q];
     int preserve = is_umem_fq_owner_queue(p, iface, q);
+    uint16_t bind_flags = interface_xsk_bind_flags(ifname);
     struct xsk_socket_config cfg = {
         .rx_size = NE_RING,
         .tx_size = NE_RING,
         .libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
         .xdp_flags = NE_XDP_REQUIRED_MODE,
-        /* i40e: native XDP + AF_XDP copy. No zero-copy/SKB fallback. */
-        .bind_flags = NE_XSK_REQUIRED_BIND_FLAGS,
+        /* SG is required for jumbo only; MTU 1500 keeps the legacy copy path. */
+        .bind_flags = bind_flags,
     };
 
     zero_queue_rings(slot, preserve);
@@ -959,6 +970,7 @@ static void open_iface_queues_rollback(struct ne_pair *p, struct ne_iface *iface
 static int open_iface_queues(struct ne_pair *p, struct ne_iface *iface,
                              const char *ifname, int queue_count)
 {
+    uint16_t bind_flags = interface_xsk_bind_flags(ifname);
     int q;
     int ret = 0;
 
@@ -977,7 +989,7 @@ static int open_iface_queues(struct ne_pair *p, struct ne_iface *iface,
         ret = xsk_create_queue(p, iface, ifname, q);
         if (ret) {
             open_iface_queues_rollback(p, iface, q);
-            interface_log_xsk_context(ifname, q, ret);
+            interface_log_xsk_context(ifname, q, ret, bind_flags);
             iface->queue_count = 0;
             iface->ifindex = 0;
             iface->ifname[0] = '\0';
@@ -986,6 +998,9 @@ static int open_iface_queues(struct ne_pair *p, struct ne_iface *iface,
         }
     }
     iface->xdp_flags = NE_XDP_REQUIRED_MODE;
+    fprintf(stderr, "[DP] XSK ready %s queues=%d mode=drv copy=1 sg=%d\n",
+            ifname, queue_count, (bind_flags & XDP_USE_SG) != 0);
+    fflush(stderr);
     return 0;
 }
 
@@ -1090,7 +1105,8 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
     }
 
     fprintf(stderr,
-            "[DP] AF_XDP copy+SG: UMEM frame=%u packet-cap=%u jumbo-pool=%u (%.1f MiB)\n",
+            "[DP] AF_XDP copy: UMEM frame=%u packet-cap=%u jumbo-pool=%u "
+            "(%.1f MiB); SG selected per-interface MTU\n",
             p->frame_size, p->packet_capacity, p->n_jumbo_frames,
             (double)p->jumbo_bufsize / (1024.0 * 1024.0));
     fflush(stderr);
