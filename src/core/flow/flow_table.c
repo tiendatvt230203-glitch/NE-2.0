@@ -8,6 +8,10 @@
 
 static _Atomic uint64_t g_pkt_wrr_seq;
 
+/* Base byte window per live WAN. A two-WAN profile therefore has a 240 KB
+ * weighted cycle; each WAN receives a share proportional to its weight. */
+#define FLOW_CONNECTION_WINDOW_BYTES 120000u
+
 static inline void normalize_flow_5tuple(uint32_t *src_ip, uint32_t *dst_ip,
                                          uint16_t *src_port, uint16_t *dst_port) {
     if (!src_ip || !dst_ip || !src_port || !dst_port)
@@ -183,16 +187,15 @@ static uint32_t profile_wan_limit(const struct flow_table *ft, int wan_idx,
                                   int allowed_count) {
     if (!ft || wan_idx < 0 || wan_idx >= ft->wan_count)
         return 0;
-    uint32_t base = ft->wan_window_sizes[wan_idx];
-    if (base == 0)
-        return 0;
     int sumw = weights_sum_positive(allowed_weights, allowed_count);
+    uint64_t cycle = (uint64_t)FLOW_CONNECTION_WINDOW_BYTES *
+                     (uint64_t)(allowed_count > 0 ? allowed_count : 1);
     if (sumw <= 0 || !allowed_weights || !allowed_wans || allowed_count <= 0)
-        return base / (uint32_t)(allowed_count > 0 ? allowed_count : 1);
+        return FLOW_CONNECTION_WINDOW_BYTES;
     int pos = wan_allowed_pos(wan_idx, allowed_wans, allowed_count);
     if (pos < 0 || allowed_weights[pos] <= 0)
         return 0;
-    uint64_t limit = ((uint64_t)base * (uint64_t)allowed_weights[pos]) / (uint64_t)sumw;
+    uint64_t limit = (cycle * (uint64_t)allowed_weights[pos]) / (uint64_t)sumw;
     return limit > 0 ? (uint32_t)limit : 1;
 }
 
@@ -223,24 +226,18 @@ static void flow_window_advance(struct flow_entry *entry, struct flow_table *ft,
         entry->drain_until_ns = 0;
     }
 
-    entry->byte_count += window_bytes;
-
-    if (entry->drain_until_ns) {
-        if (now_ns >= entry->drain_until_ns)
-            flow_commit_window_switch(entry, allowed_wans, allowed_weights,
-                                      allowed_count, window_bytes);
-        return;
-    }
-
     {
         uint32_t cur_limit = profile_wan_limit(ft, entry->current_wan,
                                                allowed_wans, allowed_weights,
                                                allowed_count);
         if (cur_limit > 0 && entry->byte_count >= cur_limit) {
-            entry->drain_until_ns = now_ns +
-                (uint64_t)FLOW_WAN_SWITCH_DRAIN_MS * 1000000ULL;
+            flow_commit_window_switch(entry, allowed_wans, allowed_weights,
+                                      allowed_count, window_bytes);
+            return;
         }
     }
+    entry->byte_count += window_bytes;
+    (void)now_ns;
 }
 
 int flow_table_get_wan(struct flow_table *ft,
@@ -410,16 +407,6 @@ int flow_table_get_wan_profile(struct flow_table *ft,
         } else {
             entry->wrr_slot = (int)(h % (uint32_t)allowed_count);
             entry->current_wan = allowed_wans[entry->wrr_slot];
-        }
-    }
-
-    {
-        uint32_t cur_limit = profile_wan_limit(ft, entry->current_wan,
-                                               allowed_wans, allowed_weights,
-                                               allowed_count);
-        if (cur_limit > 0 && entry->byte_count >= cur_limit) {
-            entry->drain_until_ns = now_ns +
-                (uint64_t)FLOW_WAN_SWITCH_DRAIN_MS * 1000000ULL;
         }
     }
 
