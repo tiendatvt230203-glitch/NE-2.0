@@ -496,6 +496,7 @@ static void *crypto_worker_thread(void *arg)
         }
         if (crypto_on && ++gc_tick >= 2048) {
             fwd_crypto_frag_gc_worker_tick(ctx->worker_idx);
+            dataplane_bond_reorder_gc(fwd, ctx->worker_idx);
             gc_tick = 0;
         }
 
@@ -504,6 +505,7 @@ static void *crypto_worker_thread(void *arg)
         else
             crypto_idle_pause(fwd, &idle, ctx->worker_idx);
     }
+    dataplane_bond_reorder_reset(fwd, ctx->worker_idx);
     return NULL;
 }
 
@@ -520,6 +522,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
     }
 
     memset(fwd, 0, sizeof(*fwd));
+    dataplane_bond_reorder_configure();
     fwd->cfg = cfg;
     fwd->local_count = cfg->local_count;
     fwd->wan_count = config_count_dataplane_wans(cfg);

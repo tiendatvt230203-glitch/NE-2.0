@@ -104,6 +104,8 @@ struct dp_route_key {
 
 struct dp_route_entry {
     struct dp_route_key key;
+    atomic_uint_fast32_t tcp_tx_seq[2];
+    atomic_uint_fast32_t udp_tx_seq[2];
     uint8_t worker_idx;
     uint8_t tx_slot;
     atomic_uchar valid;
@@ -122,6 +124,21 @@ static atomic_uint g_worker_rr;
 static atomic_uint g_tx_rr;
 static atomic_uint g_active_tx_slots = ATOMIC_VAR_INIT(NE_TX_SLOTS);
 
+#define DP_UDP_SEQ_FALLBACK_SETS 256u
+#define DP_UDP_SEQ_FALLBACK_WAYS 4u
+
+struct dp_udp_seq_fallback {
+    struct dp_route_key key;
+    uint32_t tcp_next_seq[2];
+    uint32_t next_seq[2];
+    uint32_t stamp;
+    uint8_t valid;
+};
+
+static _Thread_local struct dp_udp_seq_fallback
+    tls_udp_seq_fallback[DP_UDP_SEQ_FALLBACK_SETS][DP_UDP_SEQ_FALLBACK_WAYS];
+static _Thread_local uint32_t tls_udp_seq_stamp;
+
 static uint32_t dp_active_tx_slots(void)
 {
     uint32_t slots = atomic_load_explicit(&g_active_tx_slots, memory_order_relaxed);
@@ -137,7 +154,8 @@ void dp_route_set_active_tx_slots(uint32_t slots)
         slots = NE_TX_SLOTS;
     atomic_store_explicit(&g_active_tx_slots, slots, memory_order_release);
 }
-static int dp_route_key_parse(const uint8_t *pkt, uint32_t len, struct dp_route_key *key)
+static int dp_route_key_parse_direction(const uint8_t *pkt, uint32_t len,
+                                        struct dp_route_key *key, uint8_t *dir_out)
 {
     uint32_t src_ip = 0, dst_ip = 0;
     uint16_t src_port = 0, dst_port = 0;
@@ -163,6 +181,10 @@ static int dp_route_key_parse(const uint8_t *pkt, uint32_t len, struct dp_route_
         ip_b = ip_tmp;
         port_a = port_b;
         port_b = port_tmp;
+        if (dir_out)
+            *dir_out = 1u;
+    } else if (dir_out) {
+        *dir_out = 0u;
     }
 
     key->ip_a = ip_a;
@@ -171,6 +193,12 @@ static int dp_route_key_parse(const uint8_t *pkt, uint32_t len, struct dp_route_
     key->port_b = port_b;
     key->protocol = protocol;
     return 0;
+}
+
+static int dp_route_key_parse(const uint8_t *pkt, uint32_t len,
+                              struct dp_route_key *key)
+{
+    return dp_route_key_parse_direction(pkt, len, key, NULL);
 }
 
 static uint32_t dp_route_key_hash(const struct dp_route_key *key)
@@ -285,6 +313,10 @@ static struct dp_flow_route dp_flow_route_get(const uint8_t *pkt, uint32_t len,
                                           (int)dp_active_tx_slots(), &g_tx_rr);
 
     set[empty].key = key;
+    atomic_store_explicit(&set[empty].tcp_tx_seq[0], 0u, memory_order_relaxed);
+    atomic_store_explicit(&set[empty].tcp_tx_seq[1], 0u, memory_order_relaxed);
+    atomic_store_explicit(&set[empty].udp_tx_seq[0], 0u, memory_order_relaxed);
+    atomic_store_explicit(&set[empty].udp_tx_seq[1], 0u, memory_order_relaxed);
     set[empty].worker_idx = (uint8_t)route.worker_idx;
     set[empty].tx_slot = (uint8_t)route.tx_slot;
     atomic_fetch_add_explicit(&g_worker_connection_count[route.worker_idx], 1u,
@@ -317,6 +349,100 @@ int dp_crypto_pick_local_worker(const uint8_t *pkt, uint32_t len, int *tx_slot_o
 int dp_flow_pick_tx_slot(const uint8_t *pkt, uint32_t len, int worker_hint)
 {
     return dp_flow_route_get(pkt, len, worker_hint).tx_slot;
+}
+
+static int dp_next_tx_seq(const uint8_t *pkt, uint32_t len, uint8_t protocol,
+                          uint32_t *seq_out)
+{
+    struct dp_route_key key;
+    struct dp_route_entry *set;
+    uint32_t hash;
+    uint8_t direction;
+
+    if (!seq_out || dp_route_key_parse_direction(pkt, len, &key, &direction) != 0 ||
+        key.protocol != protocol)
+        return -1;
+
+    hash = dp_route_key_hash(&key);
+    set = g_route_table[hash & (DP_ROUTE_SET_COUNT - 1u)];
+    for (int way = 0; way < (int)DP_ROUTE_WAYS; way++) {
+        if (!atomic_load_explicit(&set[way].valid, memory_order_acquire))
+            continue;
+        if (dp_route_key_equal(&set[way].key, &key)) {
+            atomic_uint_fast32_t *counter = protocol == IPPROTO_TCP
+                ? &set[way].tcp_tx_seq[direction]
+                : &set[way].udp_tx_seq[direction];
+
+            *seq_out = (uint32_t)atomic_fetch_add_explicit(
+                counter, 1u, memory_order_relaxed);
+            return 0;
+        }
+    }
+
+    /* The RX route lookup normally inserted the flow already. Retry once in
+     * case this API is used by another caller before that lookup. */
+    (void)dp_flow_route_get(pkt, len, dp_crypto_current_worker_idx());
+    for (int way = 0; way < (int)DP_ROUTE_WAYS; way++) {
+        if (!atomic_load_explicit(&set[way].valid, memory_order_acquire))
+            continue;
+        if (dp_route_key_equal(&set[way].key, &key)) {
+            atomic_uint_fast32_t *counter = protocol == IPPROTO_TCP
+                ? &set[way].tcp_tx_seq[direction]
+                : &set[way].udp_tx_seq[direction];
+
+            *seq_out = (uint32_t)atomic_fetch_add_explicit(
+                counter, 1u, memory_order_relaxed);
+            return 0;
+        }
+    }
+
+    /* A saturated immutable route set must not disable UDP sequencing. This
+     * rare fallback is worker-local, bounded, and has no packet-path lock. */
+    {
+        struct dp_udp_seq_fallback *fallback =
+            tls_udp_seq_fallback[hash & (DP_UDP_SEQ_FALLBACK_SETS - 1u)];
+        int victim = 0;
+
+        for (int way = 0; way < (int)DP_UDP_SEQ_FALLBACK_WAYS; way++) {
+            if (fallback[way].valid &&
+                dp_route_key_equal(&fallback[way].key, &key)) {
+                fallback[way].stamp = ++tls_udp_seq_stamp;
+                *seq_out = protocol == IPPROTO_TCP
+                    ? fallback[way].tcp_next_seq[direction]++
+                    : fallback[way].next_seq[direction]++;
+                return 0;
+            }
+            if (!fallback[way].valid) {
+                victim = way;
+                continue;
+            }
+            if (fallback[way].stamp < fallback[victim].stamp)
+                victim = way;
+        }
+        fallback[victim].key = key;
+        fallback[victim].tcp_next_seq[0] = 0u;
+        fallback[victim].tcp_next_seq[1] = 0u;
+        fallback[victim].next_seq[0] = 0u;
+        fallback[victim].next_seq[1] = 0u;
+        if (protocol == IPPROTO_TCP)
+            fallback[victim].tcp_next_seq[direction] = 1u;
+        else
+            fallback[victim].next_seq[direction] = 1u;
+        fallback[victim].stamp = ++tls_udp_seq_stamp;
+        fallback[victim].valid = 1u;
+        *seq_out = 0u;
+    }
+    return 0;
+}
+
+int dp_tcp_next_tx_seq(const uint8_t *pkt, uint32_t len, uint32_t *seq_out)
+{
+    return dp_next_tx_seq(pkt, len, IPPROTO_TCP, seq_out);
+}
+
+int dp_udp_next_tx_seq(const uint8_t *pkt, uint32_t len, uint32_t *seq_out)
+{
+    return dp_next_tx_seq(pkt, len, IPPROTO_UDP, seq_out);
 }
 
 int dp_crypto_pick_wan_worker(struct forwarder *fwd, const uint8_t *pkt, uint32_t len)

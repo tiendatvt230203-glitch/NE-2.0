@@ -1,5 +1,6 @@
 #include "../../../inc/core/dataplane/dataplane_stats.h"
 #include "../../../inc/core/dataplane/crypto_route.h"
+#include "../../../inc/core/dataplane/udp_reorder.h"
 #include "../../../inc/core/forwarder/forwarder.h"
 #include "../../../inc/core/iface/interface.h"
 
@@ -291,6 +292,39 @@ void ne_dp_stats_tick(struct forwarder *fwd)
                 (unsigned long long)load64(&s_tx_full_lan[0]),
                 (unsigned long long)load64(&s_tx_full_wan[0]),
                 ne_pool_free_count(&fwd->pair));
+
+        {
+            struct dp_udp_reorder_stats reorder;
+
+            dp_udp_reorder_get_stats(&reorder);
+            fprintf(stderr,
+                    "[DP-STATS] bond_reorder held=%llu released=%llu "
+                    "late_dup=%llu gap_skip=%llu overflow=%llu evicted=%llu "
+                    "held_high_water=%llu\n",
+                    (unsigned long long)reorder.held,
+                    (unsigned long long)reorder.released,
+                    (unsigned long long)reorder.late_or_duplicate,
+                    (unsigned long long)reorder.gap_skipped,
+                    (unsigned long long)reorder.overflow,
+                    (unsigned long long)reorder.evicted,
+                    (unsigned long long)reorder.high_water);
+            fprintf(stderr,
+                    "[DP-STATS] bond_reorder_proto "
+                    "tcp(h=%llu r=%llu late=%llu gap=%llu ovf=%llu evict=%llu) "
+                    "udp(h=%llu r=%llu late=%llu gap=%llu ovf=%llu evict=%llu)\n",
+                    (unsigned long long)reorder.tcp_held,
+                    (unsigned long long)reorder.tcp_released,
+                    (unsigned long long)reorder.tcp_late_or_duplicate,
+                    (unsigned long long)reorder.tcp_gap_skipped,
+                    (unsigned long long)reorder.tcp_overflow,
+                    (unsigned long long)reorder.tcp_evicted,
+                    (unsigned long long)reorder.udp_held,
+                    (unsigned long long)reorder.udp_released,
+                    (unsigned long long)reorder.udp_late_or_duplicate,
+                    (unsigned long long)reorder.udp_gap_skipped,
+                    (unsigned long long)reorder.udp_overflow,
+                    (unsigned long long)reorder.udp_evicted);
+        }
 
         {
             uint64_t worker_connections[NE_CRYPTO_WORKERS];

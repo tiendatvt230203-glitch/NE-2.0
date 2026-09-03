@@ -94,9 +94,20 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
     uint32_t len = job->len;
     uint32_t l1 = 0, l2 = 0;
     crypto_option_id opt_id = CRYPTO_OPT_L2_PQC;
+    uint32_t bond_seq;
 
     (void)flow_ok;
     (void)cp;
+
+    if (pclass == CRYPTO_PROTO_TCP) {
+        if (!flow_ok || dp_tcp_next_tx_seq(pkt, len, &bond_seq) != 0)
+            return -1;
+        crypto_option_tcp_set_tx_seq(bond_seq);
+    } else if (pclass == CRYPTO_PROTO_UDP) {
+        if (!flow_ok || dp_udp_next_tx_seq(pkt, len, &bond_seq) != 0)
+            return -1;
+        crypto_option_udp_set_tx_seq(bond_seq);
+    }
 
     if (crypto_option_need_split(opt_id, pclass, len)) {
         if (split_tail_take(fwd, worker_idx, &tail.addr) != 0)
