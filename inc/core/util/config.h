@@ -6,6 +6,14 @@
 
 #define MAX_INTERFACES 16
 #define MAC_LEN 6
+#define AES_KEY_LEN 32
+
+#define CRYPTO_MODE_CTR  0
+#define CRYPTO_MODE_GCM  1
+#define CRYPTO_MODE_PQC 2
+#define CRYPTO_MODE_PQC_GCM 2
+
+#define WAN_REORDER_WINDOW_KB   120000
 #define MAX_PROFILES 32
 #define MAX_PROFILE_INTERFACES 16
 #define MAX_BRIDGES_PER_PROFILE MAX_PROFILE_INTERFACES
@@ -19,7 +27,9 @@
 
 enum policy_action {
     POLICY_ACTION_BYPASS = 0,
-    POLICY_ACTION_ENCRYPT_L2 = 2
+    POLICY_ACTION_ENCRYPT_L2 = 2,
+    POLICY_ACTION_ENCRYPT_L3 = 3,
+    POLICY_ACTION_ENCRYPT_L4 = 4
 };
 
 struct crypto_policy {
@@ -40,6 +50,9 @@ struct crypto_policy {
     uint32_t src_mask;
     uint32_t dst_net;
     uint32_t dst_mask;
+    int crypto_mode;
+    int aes_bits;
+    uint8_t key[AES_KEY_LEN];
 };
 
 struct bridge_pair {
@@ -80,6 +93,7 @@ struct wan_config {
     uint32_t dst_ip;
     uint8_t src_mac[MAC_LEN];
     uint8_t dst_mac[MAC_LEN];
+    uint32_t window_size;
     int dataplane;
 };
 
@@ -94,7 +108,10 @@ struct app_config {
     char bpf_wan_file[256];
 
     int crypto_enabled;
+    uint8_t crypto_key[AES_KEY_LEN];
     uint16_t fake_ethertype_ipv4;
+    int crypto_mode;
+    int aes_bits;
     struct profile_config profiles[MAX_PROFILES];
     int profile_count;
     struct crypto_policy policies[MAX_CRYPTO_POLICIES];

@@ -123,8 +123,7 @@ int dp_parse_arp_op(const uint8_t *pkt, uint32_t len, uint16_t *op_out)
 
 int dp_ring_push(struct forwarder *fwd, struct ne_ring *ring, struct ne_packet *pkt)
 {
-    if (pkt->len > ne_packet_capacity(&fwd->pair, pkt->addr) ||
-        ne_ring_try_push(ring, pkt) != 0) {
+    if (pkt->len > fwd->pair.frame_size || ne_ring_try_push(ring, pkt) != 0) {
         ne_dp_stats_mid_ring_drop(1);
         ne_frame_free(&fwd->pair, pkt->addr);
         return -1;

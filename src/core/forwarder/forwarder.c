@@ -11,10 +11,9 @@
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/iface/profile_iface_xdp.h"
 #include "../../../inc/core/flow/mac_learn.h"
-#include "../../../inc/core/flow/flow_table.h"
 #include "../../../inc/core/dataplane/dataplane_stats.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
-#include "../../../inc/crypto/pqc_handshake.h"
+#include "../../../inc/crypto/pqc_l2_handshake.h"
 
 #include <net/if.h>
 #include <pthread.h>
@@ -34,9 +33,9 @@ static void dp_maint_tick(struct forwarder *fwd)
     if (!fwd)
         return;
     fwd_crypto_maybe_expire_prev_grace();
-    fwd_crypto_pqc_key_lifetime_tick();
     fwd_wan_drain_tick(fwd);
     fwd_wan_weight_blend_tick();
+    fwd_crypto_cleanup_stale_profile_slots(fwd->cfg);
     mac_learn_tick(fwd);
     ne_dp_stats_tick(fwd);
 }
@@ -195,10 +194,11 @@ static int dp_burst_tx_local(struct forwarder *fwd, int local_idx, int tx_slot)
     return total;
 }
 
-static int dp_tx_wan_once(struct forwarder *fwd, int wan_idx, int tx_slot)
+static int dp_burst_tx_wan(struct forwarder *fwd, int wan_idx, int tx_slot)
 {
     struct ne_ring *rings[NE_CRYPTO_WORKERS];
     int nring;
+    int total = 0;
 
     if (!ne_pair_wan_live(&fwd->pair, wan_idx))
         return 0;
@@ -210,7 +210,13 @@ static int dp_tx_wan_once(struct forwarder *fwd, int wan_idx, int tx_slot)
     if (nring <= 0)
         return 0;
 
-    return ne_tx_drain_wan_all(&fwd->pair, rings, nring, wan_idx, tx_slot);
+    for (int burst = 0; burst < DP_TX_BURST_MAX; burst++) {
+        int sent = ne_tx_drain_wan_all(&fwd->pair, rings, nring, wan_idx, tx_slot);
+        if (sent <= 0)
+            break;
+        total += sent;
+    }
+    return total;
 }
 
 struct dp_tx_slot_ctx {
@@ -236,15 +242,14 @@ static void init_iface_meta(struct fwd_iface *iface, const char *ifname)
 static uint32_t resolve_runtime_frag_mtu(const struct app_config *cfg)
 {
     int sockfd;
-    uint32_t min_mtu = NE_MAX_MTU;
-    int found = 0;
+    uint32_t min_mtu = CRYPTO_OPT_FRAG_MTU_DEFAULT;
 
     if (!cfg)
-        return CRYPTO_OPT_FRAG_MTU_DEFAULT;
+        return min_mtu;
 
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0)
-        return CRYPTO_OPT_FRAG_MTU_DEFAULT;
+        return min_mtu;
 
     for (int wi = 0; wi < cfg->wan_count; wi++) {
         struct ifreq ifr;
@@ -255,15 +260,12 @@ static uint32_t resolve_runtime_frag_mtu(const struct app_config *cfg)
         ifr.ifr_name[IFNAMSIZ - 1] = '\0';
         if (ioctl(sockfd, SIOCGIFMTU, &ifr) != 0)
             continue;
-        if (ifr.ifr_mtu >= 576 && (uint32_t)ifr.ifr_mtu <= NE_MAX_MTU &&
-            (uint32_t)ifr.ifr_mtu < min_mtu)
+        if (ifr.ifr_mtu > 0 && (uint32_t)ifr.ifr_mtu < min_mtu)
             min_mtu = (uint32_t)ifr.ifr_mtu;
-        if (ifr.ifr_mtu >= 576)
-            found = 1;
     }
 
     close(sockfd);
-    return found ? min_mtu : CRYPTO_OPT_FRAG_MTU_DEFAULT;
+    return min_mtu;
 }
 
 static void *local_rx_thread(void *arg)
@@ -274,16 +276,11 @@ static void *local_rx_thread(void *arg)
     struct ne_dp_idle idle = {0};
 
     pin_cpu(ctx->cpu_id);
-    (void)flow_table_thread_init();
 
     while (atomic_load_explicit(&running, memory_order_acquire)) {
         dp_burst_refill_local(fwd, ctx->rx_slot);
 
         int rcvd = ne_recv_local_slot(&fwd->pair, ctx->rx_slot, batch, NE_BATCH_SIZE);
-        /* Multi-buffer peek can end in the middle of a packet and produce no
-         * complete job. Always release consumed descriptors; RX buffers whose
-         * ownership moved to a job are deliberately not returned to FQ here. */
-        ne_recv_release_local_slot(&fwd->pair, ctx->rx_slot);
         if (rcvd <= 0) {
             int fds[NE_DP_POLLFD_MAX];
             int nfds;
@@ -329,8 +326,8 @@ static void *local_rx_thread(void *arg)
             dp_out_ring_bind(dp_pick_tx_slot(pkt, batch[i].len));
             dataplane_process_local(fwd, batch[i]);
         }
+        ne_recv_release_local_slot(&fwd->pair, ctx->rx_slot);
     }
-    flow_table_thread_cleanup();
     return NULL;
 }
 
@@ -339,7 +336,6 @@ static void *tx_thread(void *arg)
     struct dp_tx_slot_ctx *ctx = arg;
     struct forwarder *fwd = ctx->fwd;
     int tx_slot = ctx->tx_slot;
-    uint32_t wan_cursor = (uint32_t)tx_slot;
     struct ne_dp_idle idle = {0};
 
     pin_cpu(ctx->cpu_id);
@@ -358,24 +354,10 @@ static void *tx_thread(void *arg)
         ne_drain_cq_wan(&fwd->pair, tx_slot);
         for (int li = 0; li < fwd->local_count; li++)
             did_work += dp_burst_tx_local(fwd, li, tx_slot);
-        /* Interleave one XSK batch per WAN and rotate the first WAN each
-         * round. The old loop could emit 8*32 frames on WAN0 before touching
-         * WAN1, amplifying cross-path skew even after smooth scheduling. */
-        for (int burst = 0; burst < DP_TX_BURST_MAX && fwd->wan_count > 0; burst++) {
-            int round_work = 0;
-
-            for (int off = 0; off < fwd->wan_count; off++) {
-                int wi = (int)((wan_cursor + (uint32_t)off) %
-                               (uint32_t)fwd->wan_count);
-
-                if (fwd_wan_is_stopped(wi))
-                    continue;
-                round_work += dp_tx_wan_once(fwd, wi, tx_slot);
-            }
-            did_work += round_work;
-            wan_cursor = (wan_cursor + 1u) % (uint32_t)fwd->wan_count;
-            if (round_work == 0)
-                break;
+        for (int wi = 0; wi < fwd->wan_count; wi++) {
+            if (fwd_wan_is_stopped(wi))
+                continue;
+            did_work += dp_burst_tx_wan(fwd, wi, tx_slot);
         }
         if (did_work)
             ne_dp_idle_note_work(&idle);
@@ -404,7 +386,6 @@ static void *wan_rx_thread(void *arg)
         dp_burst_refill_wan(fwd, ctx->rx_slot);
 
         int rcvd = ne_recv_wan_slot(&fwd->pair, ctx->rx_slot, batch, NE_BATCH_SIZE);
-        ne_recv_release_wan_slot(&fwd->pair, ctx->rx_slot);
         if (rcvd <= 0) {
             int fds[NE_DP_POLLFD_MAX];
             int nfds;
@@ -457,6 +438,7 @@ static void *wan_rx_thread(void *arg)
             dp_out_ring_bind(dp_pick_tx_slot(pkt, batch[i].len));
             dataplane_process_wan(fwd, batch[i]);
         }
+        ne_recv_release_wan_slot(&fwd->pair, ctx->rx_slot);
     }
     return NULL;
 }
@@ -494,7 +476,6 @@ static void *crypto_worker_thread(void *arg)
     dp_crypto_worker_bind(ctx->worker_idx);
     crypto_option_bind_worker_idx((uint8_t)ctx->worker_idx);
     crypto_l2_pqc_bind_pair(&fwd->pair);
-    (void)flow_table_thread_init();
 
     /* Encrypt / decrypt / reasm only. Bypass never queues here. */
     while (atomic_load_explicit(&running, memory_order_acquire)) {
@@ -525,7 +506,6 @@ static void *crypto_worker_thread(void *arg)
             crypto_idle_pause(fwd, &idle, ctx->worker_idx);
     }
     dataplane_bond_reorder_reset(fwd, ctx->worker_idx);
-    flow_table_thread_cleanup();
     return NULL;
 }
 
@@ -540,8 +520,6 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
                 "[FWD] no dataplane WAN — LAN-only until a dataplane WAN is added\n");
         fflush(stderr);
     }
-    if (interface_validate_mtu_topology(cfg) != 0)
-        return -1;
 
     memset(fwd, 0, sizeof(*fwd));
     dataplane_bond_reorder_configure();
@@ -579,6 +557,8 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
         return -1;
 
     fwd_crypto_reset_on_init();
+    if (fwd_crypto_ensure_profile_slots(cfg) != 0)
+        return -1;
 
     pqc_handshake_start_all_profiles(cfg);
 
@@ -652,6 +632,7 @@ void forwarder_cleanup(struct forwarder *fwd)
         for (int w = 0; w < (int)NE_CRYPTO_WORKERS; w++)
             ne_ring_destroy(&fwd->mid_to_local[i][w]);
     }
+    fwd_crypto_cleanup_all_profile_slots();
     ne_pair_close(&fwd->pair, fwd->cfg);
     ne_dp_idle_shutdown();
 }

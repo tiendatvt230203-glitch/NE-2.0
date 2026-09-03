@@ -3,7 +3,7 @@ CLANG  = clang
 
 CFLAGS = -D_GNU_SOURCE -I. -Iinc -Iinc/core -Iinc/crypto -Iinc/db -I./include -Isrc/crypto/pqc/include -Wall -O2 -mcmodel=medium $(shell pg_config --includedir 2>/dev/null | xargs -I{} echo -I{})
 LDFLAGS = -Wl,-rpath,'$$ORIGIN/lib' -lbpf -lelf -lz -lpthread \
-          ./lib/libxdp.so.1.6.0 ./lib/libssl.so.3 ./lib/libcrypto.so.3 -lpq ./lib/libscrypt.so
+          ./lib/libxdp.so.1.6.0 ./lib/libssl.so.3 ./lib/libcrypto.so.3 ./lib/libpq.so.5.14 ./lib/libscrypt.so
 
 BPF_CFLAGS     = -O2 -target bpf -g
 KERNEL_HEADERS = /usr/include
@@ -11,7 +11,8 @@ KERNEL_HEADERS = /usr/include
 LIB_DIR = lib
 TARGET  = network-encryptor
 
-OPT_SRCS = $(wildcard src/crypto/options/common/*.c)
+OPT_SRCS = $(wildcard src/crypto/options/common/*.c) \
+           src/crypto/options/bypass.c
 
 PQC_SRCS = $(wildcard src/crypto/pqc/*.c)
 
@@ -41,9 +42,17 @@ DB_OBJ = $(DB_SRC:.c=.o)
 BPF_OBJ = $(LIB_DIR)/lan.o \
           $(LIB_DIR)/wan.o
 
-.PHONY: all clean dirs
+.PHONY: all clean dirs test
+
+TEST_BINS = tests/test_bond_reorder.bin
 
 all: dirs $(BPF_OBJ) $(TARGET)
+
+test: $(TEST_BINS)
+	./tests/test_bond_reorder.bin
+
+tests/test_bond_reorder.bin: tests/test_bond_reorder.c src/core/dataplane/udp_reorder.c
+	$(CC) $(CFLAGS) -Wextra -Werror $^ -lpthread -o $@
 
 $(TARGET): $(APP_OBJ) $(DB_OBJ)
 	$(CC) -o $@ $(APP_OBJ) $(DB_OBJ) $(LDFLAGS)
@@ -58,3 +67,4 @@ clean:
 	rm -rf network-encryptor src/*.o src/core/*/*.o src/crypto/common/*.o \
 		src/crypto/options/*.o src/crypto/options/common/*.o \
 		src/crypto/pqc/*.o src/db/*.o *.o $(BPF_OBJ)
+	rm -f $(TEST_BINS)

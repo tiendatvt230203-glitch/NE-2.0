@@ -36,6 +36,7 @@ crypto_proto_class crypto_proto_classify(uint8_t ip_proto)
 
 /* ===================== option router ===================== */
 
+static atomic_uint_fast32_t g_opt_pkt_id = 0;
 static atomic_uint_fast32_t g_opt_frag_mtu = CRYPTO_OPT_FRAG_MTU_DEFAULT;
 static atomic_uint_fast32_t g_bond_epoch;
 static __thread uint32_t g_tcp_tx_seq;
@@ -50,6 +51,11 @@ static __thread uint32_t g_udp_rx_epoch;
 static __thread uint32_t g_udp_rx_seq;
 static __thread uint8_t g_udp_tx_valid;
 static __thread uint8_t g_udp_rx_valid;
+
+uint16_t crypto_option_next_pkt_id(void)
+{
+    return (uint16_t)(atomic_fetch_add(&g_opt_pkt_id, 1) & 0xFFFF);
+}
 
 static uint32_t crypto_option_bond_epoch(void)
 {
@@ -160,15 +166,15 @@ void crypto_option_set_mtu(uint32_t mtu)
 {
     if (mtu < 512)
         mtu = 512;
-    if (mtu > NE_MAX_MTU)
-        mtu = NE_MAX_MTU;
+    if (mtu > NE_FRAME)
+        mtu = NE_FRAME;
     atomic_store(&g_opt_frag_mtu, mtu);
 }
 
 uint32_t crypto_option_get_mtu(void)
 {
     uint32_t mtu = (uint32_t)atomic_load(&g_opt_frag_mtu);
-    if (mtu < 512 || mtu > NE_MAX_MTU)
+    if (mtu < 512 || mtu > NE_FRAME)
         return CRYPTO_OPT_FRAG_MTU_DEFAULT;
     return mtu;
 }
@@ -176,7 +182,6 @@ uint32_t crypto_option_get_mtu(void)
 uint32_t crypto_option_wire_overhead(crypto_option_id id)
 {
     if (id == CRYPTO_OPT_L2_PQC)
-        /* TCP bonding adds a clear marker and authenticated epoch/sequence. */
         return 42u;
     return 0u;
 }

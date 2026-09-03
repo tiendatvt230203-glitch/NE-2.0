@@ -8,7 +8,7 @@
 #include "packet_crypto.h"
 
 #define CRYPTO_OPT_FRAG_MTU_DEFAULT  1500u
-#define OPT_FRAG_TABLE_SIZE           512
+#define OPT_FRAG_TABLE_SIZE          4096
 #define OPT_FRAG_TIMEOUT_NS          (200ULL * 1000000ULL)
 
 /* --- worker bind (forwarder sets once per crypto thread) --- */
@@ -24,6 +24,7 @@ uint64_t crypto_l2_pqc_reasm_out_addr(void);
 
 /* --- option router --- */
 
+uint16_t crypto_option_next_pkt_id(void);
 void crypto_option_tcp_set_tx_seq(uint32_t seq);
 int crypto_option_tcp_tx_meta(uint32_t *epoch, uint32_t *seq);
 void crypto_option_tcp_clear_rx_meta(void);
@@ -40,6 +41,7 @@ uint32_t crypto_option_get_mtu(void);
 
 typedef enum {
     CRYPTO_OPT_L2_PQC = 0,
+    CRYPTO_OPT_BYPASS,
     CRYPTO_OPT_COUNT
 } crypto_option_id;
 

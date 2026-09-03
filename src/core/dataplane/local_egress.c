@@ -11,7 +11,6 @@
 #include "../../../inc/core/dataplane/arp_bridge.h"
 #include "../../../inc/core/dataplane/dataplane_stats.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
-#include "../../../inc/core/flow/flow_table.h"
 
 #include <netinet/in.h>
 #include <string.h>
@@ -19,35 +18,6 @@
 #include <stdio.h>
 
 #define SPLIT_TAIL_REFILL_BATCH 32u
-#define CRYPTO_PACKET_GROWTH_MAX 64u
-
-static int ensure_crypto_capacity(struct forwarder *fwd, struct ne_packet *job)
-{
-    uint64_t grown_addr;
-    uint8_t *src;
-    uint8_t *dst;
-
-    if (!fwd || !job || job->len > fwd->pair.packet_capacity ||
-        job->len + CRYPTO_PACKET_GROWTH_MAX > fwd->pair.packet_capacity)
-        return -1;
-    if (job->len + CRYPTO_PACKET_GROWTH_MAX <=
-        ne_packet_capacity(&fwd->pair, job->addr))
-        return 0;
-    if (ne_packet_alloc(&fwd->pair, job->len + CRYPTO_PACKET_GROWTH_MAX,
-                        &grown_addr) != 0)
-        return -1;
-    src = ne_packet_data(&fwd->pair, job->addr);
-    dst = ne_packet_data(&fwd->pair, grown_addr);
-    if (!src || !dst) {
-        ne_frame_free(&fwd->pair, grown_addr);
-        return -1;
-    }
-    memcpy(dst, src, job->len);
-    ne_frame_free(&fwd->pair, job->addr);
-    job->addr = grown_addr;
-    return 0;
-}
-
 static int push_to_wan(struct forwarder *fwd, struct ne_packet *job, int wan_dp)
 {
     int ri = dp_out_ring_idx();
@@ -68,9 +38,7 @@ static int push_split_to_wan(struct forwarder *fwd, struct ne_packet *job,
         ne_frame_free(&fwd->pair, tail->addr);
         return -1;
     }
-    if (l1 == 0 || l2 == 0 ||
-        l1 > ne_packet_capacity(&fwd->pair, job->addr) ||
-        l2 > ne_packet_capacity(&fwd->pair, tail->addr)) {
+    if (l1 == 0 || l2 == 0 || l1 > fwd->pair.frame_size || l2 > fwd->pair.frame_size) {
         ne_frame_free(&fwd->pair, tail->addr);
         return -1;
     }
@@ -80,11 +48,17 @@ static int push_split_to_wan(struct forwarder *fwd, struct ne_packet *job,
     job->len = l1;
     job->dir = NE_DIR_WAN;
     job->wan_idx = (uint8_t)wan_dp;
-    if (ne_ring_try_push_pair(tx, job, tail) != 0) {
+    if (ne_ring_try_push(tx, job) != 0) {
         ne_frame_free(&fwd->pair, tail->addr);
         return -1;
     }
     ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
+    if (ne_ring_try_push(tx, tail) != 0) {
+        /* Head already queued; drop only the tail fragment. */
+        ne_frame_free(&fwd->pair, tail->addr);
+    } else {
+        ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
+    }
     return 0;
 }
 
@@ -96,9 +70,8 @@ static int split_tail_take(struct forwarder *fwd, int worker_idx, uint64_t *addr
         return -1;
 
     if (fwd->split_tail_count[worker_idx] == 0) {
-        got = ne_packet_alloc_batch(&fwd->pair, fwd->pair.packet_capacity,
-                                    fwd->split_tail_cache[worker_idx],
-                                    SPLIT_TAIL_REFILL_BATCH);
+        got = ne_frame_alloc_batch(&fwd->pair, fwd->split_tail_cache[worker_idx],
+                                   SPLIT_TAIL_REFILL_BATCH);
         if (got == 0)
             return -1;
         fwd->split_tail_count[worker_idx] = (uint16_t)got;
@@ -112,11 +85,10 @@ static int split_tail_take(struct forwarder *fwd, int worker_idx, uint64_t *addr
 static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
                         const struct crypto_policy *cp, int wan_dp,
                         struct packet_crypto_ctx *pctx,
-                        crypto_proto_class pclass, int flow_ok,
-                        uint32_t *wire_bytes)
+                        crypto_proto_class pclass, int flow_ok)
 {
     int worker_idx = dp_crypto_current_worker_idx();
-    uint8_t *pkt;
+    uint8_t *pkt = ne_packet_data(&fwd->pair, job->addr);
     struct ne_packet tail = {0};
     uint8_t *tail_buf = NULL;
     uint32_t len = job->len;
@@ -126,15 +98,6 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
 
     (void)flow_ok;
     (void)cp;
-
-    if (wire_bytes)
-        *wire_bytes = 0;
-
-    if (ensure_crypto_capacity(fwd, job) != 0)
-        return -1;
-    pkt = ne_packet_data(&fwd->pair, job->addr);
-    if (!pkt)
-        return -1;
 
     if (pclass == CRYPTO_PROTO_TCP) {
         if (!flow_ok || dp_tcp_next_tx_seq(pkt, len, &bond_seq) != 0)
@@ -150,25 +113,19 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
         if (split_tail_take(fwd, worker_idx, &tail.addr) != 0)
             return -1;
         tail_buf = ne_packet_data(&fwd->pair, tail.addr);
-        if (crypto_option_split(opt_id, pclass, pctx, pkt, len,
-                                ne_packet_capacity(&fwd->pair, job->addr), &l1,
-                                tail_buf, ne_packet_capacity(&fwd->pair, tail.addr),
-                                &l2) != 0) {
+        if (crypto_option_split(opt_id, pclass, pctx, pkt, len, fwd->pair.frame_size, &l1,
+                                tail_buf, fwd->pair.frame_size, &l2) != 0) {
             ne_frame_free(&fwd->pair, tail.addr);
             return -1;
         }
         if (push_split_to_wan(fwd, job, l1, &tail, l2, wan_dp) != 0)
             return -1;
-        if (wire_bytes)
-            *wire_bytes = l1 + l2;
         return 1;
     }
 
     if (crypto_option_encrypt(opt_id, pclass, pctx, pkt, &len) != 0)
         return -1;
     job->len = len;
-    if (wire_bytes)
-        *wire_bytes = len;
     return 0;
 }
 
@@ -198,8 +155,6 @@ static int pick_profile_policy(struct forwarder *fwd, int local_idx, int flow_ok
         : NULL;
     if (!c)
         return -1;
-    if (c->action != POLICY_ACTION_BYPASS && c->action != POLICY_ACTION_ENCRYPT_L2)
-        return -1;
     *profile_idx = 0;
     *cp = c;
     return 0;
@@ -227,8 +182,6 @@ int dataplane_local_needs_mid(struct forwarder *fwd, const uint8_t *pkt, uint32_
     if (pick_profile_policy(fwd, local_idx, flow_ok, src_ip, dst_ip, src_port, dst_port,
                             proto, &profile_idx, &cp) != 0)
         return 0;
-    /* Unsupported legacy encryption policies must enter the crypto path and
-     * be rejected there, never fall through as plaintext bypass traffic. */
     return cp && cp->action != POLICY_ACTION_BYPASS;
 }
 
@@ -245,19 +198,10 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     int wan_dp;
     int pi;
     struct packet_crypto_ctx *pctx;
-    uint32_t wire_bytes = 0;
     int enc;
 
     if (!fwd || !pkt)
         goto drop;
-
-    if (flow_ok) {
-        int l3_off = crypto_eth_ipv4_offset(pkt, job.len);
-
-        ne_dp_stats_observe_traffic(NE_DP_TRAFFIC_LAN_TO_WAN, proto,
-                                    l3_off >= 0 ? job.len - (uint32_t)l3_off
-                                                : job.len);
-    }
 
     if (dp_pkt_is_arp(pkt, job.len)) {
         /* ARP: bridge path only — học MAC trong arp_bridge_from_local (client local). */
@@ -271,22 +215,20 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
         goto drop;
     wan_dp = fwd_wan_pick_for_local(fwd, profile_idx, flow_ok, src_ip, dst_ip,
                                     src_port, dst_port, proto,
-                                    crypto_option_get_mtu());
+                                    dp_flow_window_bytes(pkt, job.len, job.len));
     if (wan_dp < 0 || !fwd_wan_has_tx_room(fwd,wan_dp))
         goto drop;
 
     if (cp->action == POLICY_ACTION_BYPASS) {
         ne_dp_stats_local_bypass(1);
-        if (push_to_wan(fwd, &job, wan_dp) == 0 && flow_ok)
-            flow_table_account_per_flow_bytes(src_ip, dst_ip, src_port, dst_port,
-                                              proto, job.len);
+        (void)push_to_wan(fwd, &job, wan_dp);
         return;
     }
     if (!fwd->cfg->crypto_enabled)
         goto drop;
 
     if (proto == IPPROTO_TCP) {
-        (void)crypto_tcp_clamp_mss(pkt, job.len, crypto_option_get_mtu(),
+        (void)crypto_tcp_clamp_mss(pkt, job.len, CRYPTO_OPT_FRAG_MTU_DEFAULT,
                                    crypto_option_wire_overhead(CRYPTO_OPT_L2_PQC));
     }
 
@@ -297,18 +239,12 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     if (!pctx)
         goto drop;
     enc = encrypt_to_wan(fwd, &job, cp, wan_dp, pctx,
-                        crypto_proto_classify(proto), flow_ok, &wire_bytes);
+                        crypto_proto_classify(proto), flow_ok);
     if (enc < 0)
         goto drop;
-    if (enc > 0) {
-        if (flow_ok)
-            flow_table_account_per_flow_bytes(src_ip, dst_ip, src_port, dst_port,
-                                              proto, wire_bytes);
+    if (enc > 0)
         return;
-    }
-    if (push_to_wan(fwd, &job, wan_dp) == 0 && flow_ok)
-        flow_table_account_per_flow_bytes(src_ip, dst_ip, src_port, dst_port,
-                                          proto, wire_bytes);
+    (void)push_to_wan(fwd, &job, wan_dp);
     return;
 
 drop:

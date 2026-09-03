@@ -90,9 +90,7 @@ static void ne_pqc_tbl_print_locked(const char *event)
 void main_diag_log_ne_pqc_match(int profile_id, int policy_id,
                                 const uint8_t ne_key[32])
 {
-    uint8_t hs_keys[KEY_SLOT_COUNT][PQC_TRAFFIC_KEY_SZ];
-    uint8_t key_ids[KEY_SLOT_COUNT];
-    bool key_slots_valid[KEY_SLOT_COUNT];
+    uint8_t hs_key[PQC_TRAFFIC_KEY_SZ];
     int slot = -1;
     int changed = 0;
 
@@ -100,10 +98,9 @@ void main_diag_log_ne_pqc_match(int profile_id, int policy_id,
         return;
     if (profile_id <= 0 || policy_id <= 0)
         return;
-    if (sig_pqc_get_keys(policy_id, hs_keys, key_ids, key_slots_valid) != 0 ||
-        !key_slots_valid[KEY_SLOT_CURRENT])
+    if (sig_pqc_diversify_key(profile_id, policy_id, hs_key) != 0)
         return;
-    if (memcmp(ne_key, hs_keys[KEY_SLOT_CURRENT], PQC_TRAFFIC_KEY_SZ) != 0)
+    if (memcmp(ne_key, hs_key, PQC_TRAFFIC_KEY_SZ) != 0)
         return;
 
     pthread_mutex_lock(&ne_pqc_tbl_lock);

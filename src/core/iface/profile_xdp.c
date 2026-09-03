@@ -50,20 +50,16 @@ static int profile_iface_ifname_safe(const char *ifname)
 static void profile_iface_xdp_link_off(const char *ifname)
 {
     char cmd[160];
-    int rc;
 
     if (!profile_iface_ifname_safe(ifname))
         return;
 
     profile_xdp_stop_log("detach begin", ifname);
-    /* ip link only — bpf_xdp_detach can block forever when no prog
+    /* ip link only — bpf_xdp_detach on ice can block forever when no prog
      * is attached (post-crash scrub) or after bpf_object__close already ran. */
     snprintf(cmd, sizeof(cmd), "/sbin/ip link set dev %s xdp off >/dev/null 2>&1",
              ifname);
-    rc = system(cmd);
-    if (rc != 0)
-        fprintf(stderr, "[PROFILE-XDP] failed to detach XDP from %s (system=%d)\n",
-                ifname, rc);
+    (void)system(cmd);
     profile_xdp_stop_log("detach done", ifname);
 }
 
@@ -168,18 +164,15 @@ static int profile_iface_ifindex(const char *ifname, const char *role)
 
 static int xdp_attach_prog(int ifindex, int prog_fd, const char *ifname, const char *role)
 {
-    int rc = bpf_xdp_attach(ifindex, prog_fd, NE_XDP_REQUIRED_MODE, NULL);
+    int rc = bpf_xdp_attach(ifindex, prog_fd, XDP_FLAGS_DRV_MODE, NULL);
 
     if (rc) {
-        fprintf(stderr,
-                "[PROFILE-XDP] attach failed %s %s: native DRV mode required; "
-                "SKB/generic fallback disabled: %s\n",
+        fprintf(stderr, "[PROFILE-XDP] attach failed %s %s drv: %s\n",
                 role, ifname, strerror(rc < 0 ? -rc : rc));
         fflush(stderr);
         return -1;
     }
-    fprintf(stderr, "[PROFILE-XDP] attach OK %s %s (drv, AF_XDP copy)\n",
-            role, ifname);
+    fprintf(stderr, "[PROFILE-XDP] attach OK %s %s (drv)\n", role, ifname);
     fflush(stderr);
     return 0;
 }
@@ -268,7 +261,6 @@ static void update_wan_fake_ethertype(struct bpf_object *obj, uint16_t fake_ethe
     struct bpf_map *map;
     int key = 0;
     uint16_t et = (uint16_t)NE_L2_FAKE_ETHERTYPE;
-    uint16_t udp_et = (uint16_t)NE_L2_FAKE_ETHERTYPE_UDP;
 
     (void)fake_ethertype_ipv4;
     if (!obj) {
@@ -278,9 +270,7 @@ static void update_wan_fake_ethertype(struct bpf_object *obj, uint16_t fake_ethe
     if (!map) {
         return;
     }
-    (void)bpf_map_update_elem(bpf_map__fd(map), &key, &et, BPF_ANY);
-    key = 1;
-    (void)bpf_map_update_elem(bpf_map__fd(map), &key, &udp_et, BPF_ANY);
+    (void)bpf_map_update_elem(bpf_map__fd(map),&key, &et, BPF_ANY);
 }
 
 int profile_iface_xdp_bind_local(struct ne_pair *p, const struct app_config *cfg, int pair_li)

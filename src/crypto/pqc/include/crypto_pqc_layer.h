@@ -108,8 +108,8 @@ static inline int crypto_pqc_decrypt_payload(const crypto_pqc_sess_t *sess,
     return rc == TRF_PQC_OK ? 0 : -1;
 }
 
-/* Encrypt always uses CURRENT. During a confirmed rotation the peer may move
- * first, so decrypt accepts staged NEXT as well as the grace-period PREV. */
+/* Accept the current key and the staged/grace keys during a coordinated
+ * rotation. Every retry restores the ciphertext before authenticating. */
 static inline int crypto_pqc_decrypt_payload_resilient(
     struct packet_crypto_ctx *ctx,
     const byte nonce[CRYPTO_PQC_NONCE_BYTES],
@@ -120,7 +120,7 @@ static inline int crypto_pqc_decrypt_payload_resilient(
     const int order[KEY_SLOT_COUNT] = {
         KEY_SLOT_CURRENT, KEY_SLOT_NEXT, KEY_SLOT_PREV
     };
-    static _Thread_local byte saved[12288];
+    byte saved[2048];
     int attempted = 0;
 
     if (!ctx || !data || len <= 0 || len > (int)sizeof(saved))

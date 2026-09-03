@@ -1,4 +1,5 @@
 #include "../../../inc/core/forwarder/forwarder_wan.h"
+#include "../../../inc/core/forwarder/forwarder_crypto_runtime.h"
 #include "../../../inc/core/iface/profile_iface_xdp.h"
 #include "../../../inc/core/failover/wan_failover.h"
 
@@ -587,9 +588,9 @@ static int pick_least_loaded_wan(struct forwarder *fwd, int profile_idx, int sel
 int fwd_wan_pick_for_local(struct forwarder *fwd, int profile_idx, int flow_ok,
                            uint32_t src_ip, uint32_t dst_ip,
                            uint16_t src_port, uint16_t dst_port,
-                           uint8_t proto, uint32_t path_mtu)
+                           uint8_t proto, uint32_t window_bytes)
 {
-    int actual_dp;
+    int wan_cfg;
 
     if (!fwd || fwd->wan_count <= 0)
         return -1;
@@ -604,11 +605,21 @@ int fwd_wan_pick_for_local(struct forwarder *fwd, int profile_idx, int flow_ok,
     if (pool_n <= 0)
         return pick_least_loaded_wan(fwd, profile_idx, 0);
 
-    int wan_cfg = flow_ok
-        ? flow_table_pick_wan_per_flow_window(src_ip, dst_ip, src_port, dst_port, proto,
-                                              allowed_wans, allowed_weights, pool_n,
-                                              path_mtu)
-        : flow_table_pick_wan_per_packet(allowed_wans, allowed_weights, pool_n);
+    if (flow_ok) {
+        int slot = fwd_crypto_profile_slot_for_id(p->id);
+        struct flow_table *ft = slot >= 0 && fwd_crypto_flow_table_ready(slot)
+                              ? fwd_crypto_flow_table(slot) : NULL;
+
+        wan_cfg = ft
+            ? flow_table_get_wan_profile(ft, src_ip, dst_ip, src_port, dst_port,
+                                         proto, window_bytes, allowed_wans,
+                                         pool_n, allowed_weights)
+            : flow_table_pick_wan_per_packet(allowed_wans, allowed_weights,
+                                             pool_n);
+    } else {
+        wan_cfg = flow_table_pick_wan_per_packet(allowed_wans, allowed_weights,
+                                                 pool_n);
+    }
     if (wan_cfg < 0)
         return pick_least_loaded_wan(fwd, profile_idx, 0);
 
@@ -618,16 +629,5 @@ int fwd_wan_pick_for_local(struct forwarder *fwd, int profile_idx, int flow_ok,
     if (dp < 0 || dp >= fwd->wan_count || !fwd_wan_dp_ok_for_new_traffic(dp))
         return pick_least_loaded_wan(fwd, profile_idx, 0);
 
-    /* A pressure fallback is an early window boundary, not a one-packet spill.
-     * Rebind the flow so following packets stay on the fallback WAN. */
-    actual_dp = pick_least_loaded_wan(fwd, profile_idx, dp);
-    if (flow_ok && actual_dp >= 0 && actual_dp < fwd->wan_count && actual_dp != dp) {
-        int actual_cfg = fwd->wan_cfg_idx[actual_dp];
-
-        if (actual_cfg >= 0)
-            flow_table_rebind_per_flow_wan(src_ip, dst_ip, src_port, dst_port,
-                                           proto, actual_cfg, allowed_weights,
-                                           pool_n, path_mtu);
-    }
-    return actual_dp;
+    return dp;
 }

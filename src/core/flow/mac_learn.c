@@ -751,8 +751,8 @@ static void mac_fdb_persist_save_locked(const struct mac_learn_table *t,
             if (merge_find_mac(merged, merged_count, mac) >= 0)
                 continue;
             memcpy(merged[merged_count].mac, mac, MAC_LEN);
-            snprintf(merged[merged_count].ifname,
-                     sizeof(merged[merged_count].ifname), "%s", ifname);
+            strncpy(merged[merged_count].ifname, ifname, IF_NAMESIZE - 1);
+            merged[merged_count].ifname[IF_NAMESIZE - 1] = '\0';
             merged_count++;
         }
         fclose(fp);
@@ -909,8 +909,8 @@ static int mac_fdb_persist_load_locked(struct mac_learn_table *t,
             break;
         idx = t->count++;
         memcpy(t->list[idx].mac, mac, MAC_LEN);
-        snprintf(t->list[idx].ifname, sizeof(t->list[idx].ifname), "%s",
-                 ifname);
+        strncpy(t->list[idx].ifname, ifname, IF_NAMESIZE - 1);
+        t->list[idx].ifname[IF_NAMESIZE - 1] = '\0';
         loaded++;
     }
     fclose(fp);

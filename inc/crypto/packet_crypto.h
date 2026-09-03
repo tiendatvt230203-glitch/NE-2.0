@@ -22,17 +22,21 @@ struct packet_crypto_ctx {
     uint8_t master_key[AES_MAX_KEY_SIZE];
     uint8_t keys[KEY_SLOT_COUNT][AES_MAX_KEY_SIZE];
     bool initialized;
-    int policy_id;
-    uint8_t wire_id;
+    int crypto_mode;
+    int policy_id;   /* PQC diversify / internal; may be db_id */
+    uint8_t wire_id; /* policy wire id written into packet headers */
     int profile_id;
+    int aes_bits;
+    /* 1 = keys come from PQC handshake (diversify/clear on !key_ready).
+     * 0 = static/master-derived keys (e.g. ARP default) — never HS-refresh. */
     bool pqc_from_handshake;
-    uint64_t pqc_key_in_use_ms;
-    uint8_t pqc_timed_key[AES_MAX_KEY_SIZE];
-    bool pqc_rekey_sent;
 };
 
 int packet_crypto_init(struct packet_crypto_ctx *ctx,
-                       const uint8_t master_key[AES_MAX_KEY_SIZE]);
+                       const uint8_t master_key[AES_MAX_KEY_SIZE],
+                       int aes_bits);
+
+void packet_crypto_update_keys(struct packet_crypto_ctx *ctx);
 void packet_crypto_refresh_pqc_keys(struct packet_crypto_ctx *ctx);
 
 const uint8_t *packet_crypto_get_key(struct packet_crypto_ctx *ctx, int slot);

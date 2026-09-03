@@ -7,44 +7,14 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
-#include <string.h>
 #include <xdp/xsk.h>
 
 #define MAX_QUEUES     64
 
-#define NE_RING              16384u
-#define NE_FRAME              4096u
-#define NE_N_FRAMES         524288u
-#define NE_BATCH_SIZE           64u
-
-/* AF_XDP UMEM chunks are limited to 2K/4K. Jumbo packets therefore use
- * multi-buffer descriptors on the XSK rings and are linearized into a
- * separate userspace pool while they pass through the crypto dataplane. */
-#define NE_MAX_MTU             9000u
-#define NE_PACKET_CAPACITY    12288u
-#define NE_JUMBO_N_FRAMES      8192u
-#define NE_MAX_PACKET_SEGS \
-    ((NE_PACKET_CAPACITY + NE_FRAME - 1u) / NE_FRAME)
-#define NE_ADDR_JUMBO_FLAG (1ULL << 63)
-
-static inline uint32_t ne_packet_segment_count_for_len(uint32_t len)
-{
-    if (len == 0 || len > NE_PACKET_CAPACITY)
-        return 0;
-    return (len + NE_FRAME - 1u) / NE_FRAME;
-}
-
-static inline int ne_jumbo_append_bytes(uint8_t *dst, uint32_t capacity,
-                                        uint32_t *used, const uint8_t *src,
-                                        uint32_t len)
-{
-    if (!dst || !used || !src || len == 0 || *used > capacity ||
-        len > capacity - *used)
-        return -1;
-    memcpy(dst + *used, src, len);
-    *used += len;
-    return 0;
-}
+#define NE_RING        16384u
+#define NE_FRAME       2048u
+#define NE_N_FRAMES    1048576u
+#define NE_BATCH_SIZE   64u
 
 #define NE_QUEUE_OVERRIDE 0
 
@@ -56,20 +26,6 @@ static inline int ne_jumbo_append_bytes(uint8_t *dst, uint32_t capacity,
 #ifndef XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD
 #define XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD (1U << 0)
 #endif
-#ifndef XDP_USE_SG
-#define XDP_USE_SG (1U << 4)
-#endif
-#ifndef XDP_PKT_CONTD
-#define XDP_PKT_CONTD (1U << 0)
-#endif
-
-/* Native XDP + AF_XDP copy is the baseline for every MTU. Scatter-gather is
- * added per interface only when its MTU cannot fit in one UMEM frame. Keeping
- * XDP_USE_SG out of the 1500-byte path preserves compatibility with kernels
- * and drivers which support native AF_XDP copy but not RX scatter-gather. */
-#define NE_XDP_REQUIRED_MODE         XDP_FLAGS_DRV_MODE
-#define NE_XSK_BASE_BIND_FLAGS       (XDP_COPY | XDP_USE_NEED_WAKEUP)
-#define NE_XSK_SG_BIND_FLAGS         (NE_XSK_BASE_BIND_FLAGS | XDP_USE_SG)
 
 #include "core/util/cpu_map.h"
 
@@ -116,11 +72,6 @@ struct ne_xsk_queue {
     struct xsk_ring_prod fq;
     struct xsk_ring_cons cq;
     uint32_t rx_pending;
-    uint64_t rx_recycle[NE_BATCH_SIZE];
-    uint32_t rx_recycle_count;
-    uint64_t rx_partial_addr;
-    uint32_t rx_partial_len;
-    uint8_t rx_partial_drop;
 };
 
 struct ne_iface {
@@ -137,10 +88,6 @@ struct ne_pair {
     size_t bufsize;
     uint32_t frame_size;
     uint32_t n_frames;
-    void *jumbo_bufs;
-    size_t jumbo_bufsize;
-    uint32_t packet_capacity;
-    uint32_t n_jumbo_frames;
     struct xsk_umem *umem;
     int umem_fq_li;
     int umem_fq_q;
@@ -158,19 +105,6 @@ struct ne_pair {
     uint8_t local_live[MAX_INTERFACES];
     uint8_t wan_live[MAX_INTERFACES];
     uint32_t xdp_flags;
-    struct ne_pool jumbo_pool;
-    uint64_t rx_jumbo_packets;
-    uint64_t rx_jumbo_drops;
-    uint64_t tx_jumbo_packets;
-};
-
-struct ne_xdp_statistics {
-    uint64_t rx_dropped;
-    uint64_t rx_invalid_descs;
-    uint64_t tx_invalid_descs;
-    uint64_t rx_ring_full;
-    uint64_t rx_fill_ring_empty_descs;
-    uint64_t tx_ring_empty_descs;
 };
 
 int ne_pair_local_live(const struct ne_pair *p, int pair_local_idx);
@@ -187,8 +121,6 @@ int ne_pair_teardown_live(struct ne_pair *p);
 int ne_ring_init(struct ne_ring *r, uint32_t cap, int mpsc_pop);
 void ne_ring_destroy(struct ne_ring *r);
 int ne_ring_try_push(struct ne_ring *r, const struct ne_packet *pkt);
-int ne_ring_try_push_pair(struct ne_ring *r, const struct ne_packet *first,
-                          const struct ne_packet *second);
 int ne_ring_try_pop(struct ne_ring *r, struct ne_packet *pkt);
 uint32_t ne_ring_count(const struct ne_ring *r);
 
@@ -216,24 +148,16 @@ int ne_tx_drain_wan_all(struct ne_pair *p, struct ne_ring *srcs[], int src_count
                         int wan_idx, int tx_slot);
 
 void *ne_packet_data(struct ne_pair *p, uint64_t addr);
-uint32_t ne_packet_capacity(const struct ne_pair *p, uint64_t addr);
-int ne_packet_alloc(struct ne_pair *p, uint32_t min_capacity, uint64_t *addr_out);
-uint32_t ne_packet_alloc_batch(struct ne_pair *p, uint32_t min_capacity,
-                               uint64_t *addrs_out, uint32_t max_n);
 int ne_frame_alloc(struct ne_pair *p, uint64_t *addr_out);
 uint32_t ne_frame_alloc_batch(struct ne_pair *p, uint64_t *addrs_out, uint32_t max_n);
 void ne_frame_free(struct ne_pair *p, uint64_t addr);
 /* Frames currently idle in the shared UMEM pool (leak watchdog metric). */
 uint32_t ne_pool_free_count(struct ne_pair *p);
-uint32_t ne_jumbo_free_count(struct ne_pair *p);
-void ne_xdp_read_statistics(const struct ne_pair *p, enum ne_packet_dir dir,
-                            struct ne_xdp_statistics *out);
 
 void interface_reset_redirect_maps(void);
 void interface_promisc_off_config(const struct app_config *cfg);
 int interface_set_queue_count(const char *ifname, int desired_count);
 int interface_get_queue_count(const char *ifname);
-int interface_validate_mtu_topology(const struct app_config *cfg);
 
 int ne_rx_lan_slots_for(int local_queue_total);
 int ne_rx_wan_slots_for(int wan_queue_total);

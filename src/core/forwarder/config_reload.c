@@ -5,7 +5,7 @@
 #include "../../../inc/core/iface/profile_iface_xdp.h"
 #include "../../../inc/core/failover/wan_failover.h"
 #include "../../../inc/core/flow/mac_learn.h"
-#include "../../../inc/crypto/pqc_handshake.h"
+#include "pqc_l2_handshake.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -81,9 +81,13 @@ static int forwarder_reload_config_impl(struct forwarder *fwd, struct app_config
         return -1;
 
     fwd->cfg = cfg;
-    fwd_wan_weight_blend_begin(old_cfg, cfg, NULL);
+    fwd_wan_weight_blend_begin(old_cfg, cfg, fwd_crypto_profile_slot_for_id);
     if (cfg->crypto_enabled) {
         pqc_handshake_start_all_profiles(cfg);
+    }
+    if (fwd_crypto_ensure_profile_slots(cfg) != 0) {
+        fprintf(stderr, "[RELOAD] fwd_crypto_ensure_profile_slots failed\n");
+        return -1;
     }
     if (forwarder_should_stop()) {
         fprintf(stderr, "[RELOAD] aborted before crypto rebuild (stop requested)\n");
@@ -97,6 +101,8 @@ static int forwarder_reload_config_impl(struct forwarder *fwd, struct app_config
         return -1;
     if (rc != 0)
         fwd_crypto_clear_grace();
+    fwd_crypto_sync_flow_table_windows(fwd);
+    fwd_crypto_cleanup_stale_profile_slots(cfg);
     wan_failover_on_cfg(fwd);
     /* Re-merge FDB from mac_lan.log after iface/settings hot reload. */
     mac_learn_restore(fwd);
