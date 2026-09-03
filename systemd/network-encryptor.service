@@ -7,9 +7,6 @@ Environment="LD_LIBRARY_PATH=/usr/bin/bin-ne/lib"
 Type=simple
 User=root
 EnvironmentFile=/opt/SEP/be/.env
-# UDP multipath per-window uses receiver-side sequence repair.
-Environment="NE_BOND_REORDER=1"
-Environment="NE_BOND_REORDER_US=3000"
 WorkingDirectory=/usr/bin/bin-ne
 ExecStart=/usr/bin/bin-ne/network-encryptor
 Restart=always

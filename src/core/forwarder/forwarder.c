@@ -498,7 +498,6 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
     }
 
     memset(fwd, 0, sizeof(*fwd));
-    dataplane_bond_reorder_configure();
     fwd->cfg = cfg;
     fwd->local_count = cfg->local_count;
     fwd->wan_count = config_count_dataplane_wans(cfg);
@@ -506,6 +505,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
         fwd->local_count = MAX_INTERFACES;
     if (fwd->wan_count > MAX_INTERFACES)
         fwd->wan_count = MAX_INTERFACES;
+    dataplane_bond_reorder_configure(fwd);
 
     crypto_option_set_mtu(resolve_runtime_frag_mtu(cfg));
     fprintf(stderr, "[FRAG] runtime MTU set to %u\n", crypto_option_get_mtu());

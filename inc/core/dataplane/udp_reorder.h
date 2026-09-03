@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Reorder is useful only when traffic can arrive over multiple WAN paths. */
+#define UDP_REORDER_AUTO_MIN_WANS       2u
+#define UDP_REORDER_DEFAULT_HOLD_NS     (3ULL * 1000000ULL)
+
 struct dp_udp_reorder_key {
     uint32_t src_ip;
     uint32_t dst_ip;
@@ -25,7 +29,7 @@ struct dp_udp_reorder_ops {
     void (*drop)(void *ctx, struct dp_udp_reorder_item *item);
 };
 
-void dp_udp_reorder_configure_from_env(void);
+void dp_udp_reorder_configure(uint32_t wan_count);
 uint64_t dp_udp_reorder_now_ns(void);
 
 /* Takes ownership of item in every return path: emit, hold, or drop. */

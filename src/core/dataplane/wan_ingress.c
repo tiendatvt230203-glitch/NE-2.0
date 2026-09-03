@@ -408,9 +408,9 @@ static struct dp_udp_reorder_ops bond_reorder_ops(struct forwarder *fwd)
     return ops;
 }
 
-void dataplane_bond_reorder_configure(void)
+void dataplane_bond_reorder_configure(struct forwarder *fwd)
 {
-    dp_udp_reorder_configure_from_env();
+    dp_udp_reorder_configure(fwd ? (uint32_t)fwd->wan_count : 0u);
 }
 
 void dataplane_bond_reorder_gc(struct forwarder *fwd, int worker_idx)

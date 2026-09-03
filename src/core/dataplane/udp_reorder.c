@@ -3,7 +3,6 @@
 
 #include <netinet/in.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -15,9 +14,6 @@
 #define UDP_REORDER_HELD_CAP          8192u
 #define UDP_REORDER_GC_SLICE          16u
 #define UDP_REORDER_FLOW_IDLE_NS      (60ULL * 1000000000ULL)
-/* Fixed UDP resequencing budget for the 2.5-3.5 ms bonded paths. */
-#define UDP_REORDER_DEFAULT_HOLD_NS   (3ULL * 1000000ULL)
-
 struct udp_reorder_slot {
     struct dp_udp_reorder_item item;
     uint32_t seq;
@@ -43,7 +39,7 @@ static uint32_t g_held_by_worker[NE_CRYPTO_WORKERS];
 static uint32_t g_gc_cursor[NE_CRYPTO_WORKERS];
 static uint64_t g_stamp_by_worker[NE_CRYPTO_WORKERS];
 static uint64_t g_hold_ns = UDP_REORDER_DEFAULT_HOLD_NS;
-static int g_enabled = 1;
+static int g_enabled;
 
 static int seq_delta(uint32_t seq, uint32_t base)
 {
@@ -269,46 +265,13 @@ static void flow_make_window_room(int worker_idx, uint32_t flow_idx,
     }
 }
 
-void dp_udp_reorder_configure_from_env(void)
+void dp_udp_reorder_configure(uint32_t wan_count)
 {
-    const char *enabled = getenv("NE_BOND_REORDER");
-    const char *hold_us = getenv("NE_BOND_REORDER_US");
-    const char *enabled_name = "NE_BOND_REORDER";
-    const char *hold_name = "NE_BOND_REORDER_US";
-
-    /* Keep the old deployment knobs compatible. */
-    if (!enabled) {
-        enabled = getenv("NE_UDP_REORDER");
-        enabled_name = enabled ? "NE_UDP_REORDER" : "default";
-    }
-    if (!hold_us) {
-        hold_us = getenv("NE_UDP_REORDER_US");
-        hold_name = hold_us ? "NE_UDP_REORDER_US" : "default";
-    }
-
-    /* forwarder_init() can run again after a profile reload. Recompute both
-     * values from their defaults so a previous disabled/overridden profile
-     * cannot leave reorder permanently disabled in this process. */
-    g_enabled = !(enabled && enabled[0] == '0');
+    g_enabled = wan_count >= UDP_REORDER_AUTO_MIN_WANS;
     g_hold_ns = UDP_REORDER_DEFAULT_HOLD_NS;
-    if (hold_us && hold_us[0]) {
-        char *end = NULL;
-        unsigned long value = strtoul(hold_us, &end, 10);
-
-        if (end != hold_us && *end == '\0') {
-            if (value < 100)
-                value = 100;
-            if (value > 50000)
-                value = 50000;
-            g_hold_ns = (uint64_t)value * 1000ULL;
-        }
-    }
-
-    fprintf(stderr,
-            "[BOND-REORDER] enabled=%d hold_us=%llu enabled_source=%s "
-            "hold_source=%s\n",
-            g_enabled, (unsigned long long)(g_hold_ns / 1000ULL),
-            enabled_name, hold_name);
+    fprintf(stderr, "[BOND-REORDER] auto enabled=%d wan_count=%u hold_us=%llu\n",
+            g_enabled, wan_count,
+            (unsigned long long)(g_hold_ns / 1000ULL));
 }
 
 uint64_t dp_udp_reorder_now_ns(void)
