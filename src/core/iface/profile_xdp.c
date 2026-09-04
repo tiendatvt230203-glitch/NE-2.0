@@ -16,9 +16,8 @@
 #include <time.h>
 #include <unistd.h>
 
-/* The deployed headers can predate this API even when the linked libbpf
- * exports it.  XDP multi-buffer programs must carry this load flag; the ELF
- * section name alone is not handled by every deployed libbpf version. */
+/* The packaged libxdp carries the matching libbpf implementation, including
+ * this API, while the appliance headers can predate its declaration. */
 #ifndef BPF_F_XDP_HAS_FRAGS
 #define BPF_F_XDP_HAS_FRAGS (1U << 5)
 #endif

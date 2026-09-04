@@ -2,7 +2,10 @@ CC     = gcc
 CLANG  = clang
 
 CFLAGS = -D_GNU_SOURCE -I. -Iinc -Iinc/core -Iinc/crypto -Iinc/db -I./include -Isrc/crypto/pqc/include -Wall -O2 -mcmodel=medium $(shell pg_config --includedir 2>/dev/null | xargs -I{} echo -I{})
-LDFLAGS = -Wl,-rpath,'$$ORIGIN/lib' -lbpf -lelf -lz -lpthread \
+# The packaged libxdp contains the matching libbpf implementation.  Do not
+# also link the appliance's libbpf.so.0 (0.5.x): mixing both ABIs makes BPF
+# objects created by one implementation crash when used by the other.
+LDFLAGS = -Wl,-rpath,'$$ORIGIN/lib' -lelf -lz -lpthread \
           ./lib/libxdp.so.1.6.0 ./lib/libssl.so.3 ./lib/libcrypto.so.3 ./lib/libpq.so.5.14 ./lib/libscrypt.so
 
 BPF_CFLAGS     = -O2 -target bpf -g
