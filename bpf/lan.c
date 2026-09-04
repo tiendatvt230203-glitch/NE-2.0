@@ -1,10 +1,8 @@
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
-#include <linux/ip.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-#define ETH_P_ARP_VAL 0x0806
 #define ETH_P_8021Q_VAL 0x8100
 #define PATH_MTU 1500
 #define ETH_FRAME_MAX (14 + PATH_MTU)
@@ -37,22 +35,7 @@ static __always_inline int xdp_redirect_common(struct xdp_md *ctx, int legacy_mt
         }
     }
 
-    if (eth->h_proto == bpf_htons(ETH_P_ARP_VAL)) {
-        goto redirect;
-    }
-
-    if (eth->h_proto == bpf_htons(ETH_P_IP)) {
-        struct iphdr *ip = (void *)(eth + 1);
-        if ((void *)(ip + 1) > data_end)
-            return XDP_PASS;
-
-        goto redirect;
-    }
-
-    return XDP_PASS;
-
-redirect:
-    ;
+    /* Every valid LAN Ethernet frame belongs to the encrypted core. */
     __u32 qid = ctx->rx_queue_index;
     return bpf_redirect_map(&xsks_map, qid, 0);
 }

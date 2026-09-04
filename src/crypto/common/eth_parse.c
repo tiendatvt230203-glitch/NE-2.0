@@ -138,34 +138,15 @@ int crypto_eth_l2_has_arp_marker(const uint8_t *pkt, size_t pkt_len)
     return et == NE_L2_FAKE_ETHERTYPE_ARP;
 }
 
-int crypto_eth_l2_policy_off(const uint8_t *packet, size_t pkt_len)
-{
-    int et_off = crypto_eth_inner_et_off(packet, pkt_len);
-
-    if (et_off < 0)
-        return -1;
-    if (pkt_len < (size_t)(et_off + 2 + 1))
-        return -1;
-    return et_off + 2;
-}
-
-int crypto_eth_l2_read_policy_id(const uint8_t *packet, uint32_t pkt_len, uint8_t *policy_id_out)
-{
-    int off = crypto_eth_l2_policy_off(packet, pkt_len);
-
-    if (off < 0 || !policy_id_out)
-        return -1;
-    *policy_id_out = packet[off];
-    return 0;
-}
-
 int crypto_eth_l2_core_id_off(const uint8_t *packet, size_t pkt_len)
 {
-    int off = crypto_eth_l2_policy_off(packet, pkt_len);
+    int off = crypto_eth_inner_et_off(packet, pkt_len);
 
     if (off < 0)
         return -1;
-    return off + 1;
+    if (pkt_len < (size_t)(off + 3))
+        return -1;
+    return off + 2;
 }
 
 int crypto_eth_l2_frag_magic_off(const uint8_t *packet, size_t pkt_len, int nonce_size)

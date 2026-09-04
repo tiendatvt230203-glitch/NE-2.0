@@ -1,571 +1,132 @@
 #include "../../../inc/core/dataplane/dataplane.h"
 #include "../../../inc/core/dataplane/dataplane_util.h"
-#include "../../../inc/core/forwarder/forwarder_crypto_runtime.h"
-
-#include "../../../inc/crypto/eth_parse.h"
-#include "../../../inc/crypto/crypto_option.h"
-#include "../../../inc/crypto/packet_crypto.h"
-
 #include "../../../inc/core/dataplane/crypto_route.h"
-#include "../../../inc/core/iface/interface.h"
-#include "../../../inc/core/flow/mac_learn.h"
 #include "../../../inc/core/dataplane/arp_bridge.h"
 #include "../../../inc/core/dataplane/udp_reorder.h"
-
+#include "../../../inc/core/util/static_config.h"
+#include "../../../inc/crypto/l2_crypto.h"
+#include "../../../inc/crypto/eth_parse.h"
 #include <netinet/in.h>
 #include <string.h>
-#include <net/if.h>
-#include <stdio.h>
 
-/* UDP bonding format. Wire after nonce:
- *   [0x5B 'U' 'D' v1][ciphertext(kind+epoch32+seq32+datagram_id32+
- *                                IPv4/fragment)||tag]
- * The four-byte marker makes this path unambiguous without copying a full
- * frame solely for rollback; sequence/kind remain authenticated ciphertext. */
-#define WAN_L2_UDP_MARKER_LEN  4u
-#define WAN_L2_UDP_SHIM_LEN    13u
-#define WAN_L2_GCM_TAG_LEN     16u
-static const uint8_t wan_l2_udp_marker[WAN_L2_UDP_MARKER_LEN] = {
-    0x5Bu, 0x55u, 0x44u, 0x01u
-};
+#define UDP_MARK_LEN 4u
+static const uint8_t udp_mark[UDP_MARK_LEN] = {0x5b,0x55,0x44,0x01};
 
-static int wan_l2_is_udp_tagged(const uint8_t *pkt, uint32_t len)
+static int is_udp_wire(const uint8_t *pkt, uint32_t len)
 {
-    int mark_off;
-
-    if (!pkt || !crypto_eth_l2_has_marker(pkt, len))
-        return 0;
-    mark_off = crypto_eth_l2_frag_magic_off(pkt, len, PACKET_CRYPTO_NONCE_BYTES);
-    if (mark_off < 0)
-        return 0;
-    if (len < (uint32_t)mark_off + WAN_L2_UDP_MARKER_LEN +
-        WAN_L2_UDP_SHIM_LEN + WAN_L2_GCM_TAG_LEN)
-        return 0;
-    return memcmp(pkt + mark_off, wan_l2_udp_marker,
-                  WAN_L2_UDP_MARKER_LEN) == 0;
+    int off;
+    if (!crypto_eth_l2_has_marker(pkt, len)) return 0;
+    off = crypto_eth_l2_frag_magic_off(pkt, len, PACKET_CRYPTO_NONCE_BYTES);
+    return off >= 0 && len >= (uint32_t)off + UDP_MARK_LEN &&
+           memcmp(pkt + off, udp_mark, UDP_MARK_LEN) == 0;
 }
 
-static const struct crypto_policy *fwd_policy_by_wire_id(struct forwarder *fwd, uint8_t wire_id)
-{
-    if (!fwd || !fwd->cfg)
-        return NULL;
-    for (int i = 0; i < fwd->cfg->policy_count && i < MAX_CRYPTO_POLICIES; i++) {
-        const struct crypto_policy *cp = &fwd->cfg->policies[i];
-        if (cp->action == POLICY_ACTION_BYPASS)
-            continue;
-        if ((uint8_t)cp->id == wire_id)
-            return cp;
-    }
-    return NULL;
-}
-
-
-static int wan_l2_plain_ipv4(const uint8_t *pkt, uint32_t len)
-{
-    return crypto_pkt_is_ipv4(pkt, len);
-}
-
-static int wan_l2_plain_ok(const uint8_t *pkt, uint32_t len)
-{
-    return crypto_pkt_is_ipv4(pkt, len) || crypto_pkt_is_arp(pkt, len);
-}
-
-/* Encrypted NE wire: L2 PQC marker / UDP frag — not plain bypass. */
-static int wan_wire_is_encrypted(struct forwarder *fwd, const uint8_t *pkt, uint32_t len)
-{
-    if (!pkt || !fwd || !fwd->cfg)
-        return 0;
-    if (fwd_crypto_has_l2_marker(pkt, len) || crypto_eth_l2_has_marker(pkt, len))
-        return 1;
-    if (wan_l2_is_udp_tagged(pkt, len))
-        return 1;
-    return 0;
-}
-
-static int decrypt_l2(uint8_t *pkt, uint32_t *len)
-{
-    struct packet_crypto_ctx *ctx;
-    uint8_t wire_id = 0;
-    uint8_t scratch[NE_FRAME];
-    uint32_t orig_len;
-
-    if (!pkt || !len)
-        return 0;
-    if (!crypto_eth_l2_has_marker(pkt, *len))
-        return 0;
-    if (crypto_eth_l2_read_policy_id(pkt, *len, &wire_id) != 0)
-        return 0;
-    ctx = fwd_crypto_ctx_for_wire_id(wire_id);
-    if (!ctx)
-        return -1;
-
-    orig_len = *len;
-    if (orig_len > NE_FRAME)
-        return -1;
-    memcpy(scratch, pkt, orig_len);
-
-    if (crypto_option_decrypt(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_TCP, ctx, pkt, len) == 0 &&
-        crypto_pkt_is_ipv4(pkt, *len))
-        return 0;
-
-    memcpy(pkt, scratch, orig_len);
-    *len = orig_len;
-    return -1;
-}
-
-static int reassemble_l2(uint8_t *pkt, uint32_t *len, uint8_t policy_id,
-                         int *pending)
-{
-    struct packet_crypto_ctx *ctx;
-    int slot, rr;
-    uint32_t blen = 0;
-
-    ctx = fwd_crypto_ctx_for_wire_id(policy_id);
-    if (!ctx)
-        return -1;
-    slot = fwd_crypto_profile_slot_for_id(
-        fwd_crypto_profile_id_for_wire_id(policy_id));
-    if (slot < 0)
-        return -1;
-    rr = crypto_option_reassemble(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_UDP, slot, dp_crypto_current_worker_idx(),
-                                  ctx, pkt, len, pkt, &blen);
-    if (rr == 0) {
-        *pending = 1;
-        return 0;
-    }
-    if (rr != 1)
-        return -1;
-    *len = blen;
-    return 0;
-}
-
-/* The versioned four-byte marker covers both full and split UDP. */
-static int wan_try_l2_pqc_udp(struct forwarder *fwd, uint8_t *pkt, uint32_t *len,
-                              int *pending)
-{
-    uint8_t wire_pol = 0;
-
-    if (!wan_l2_is_udp_tagged(pkt, *len))
-        return 0;
-
-    if (crypto_eth_l2_read_policy_id(pkt, *len, &wire_pol) != 0)
-        return 0;
-
-    if (!fwd_policy_by_wire_id(fwd, wire_pol))
-        return 0;
-
-    if (!fwd_crypto_ctx_for_wire_id(wire_pol))
-        return 0;
-
-    if (reassemble_l2(pkt, len, wire_pol, pending) != 0) {
-        if (pending)
-            *pending = 0;
-        return -1;
-    }
-    return 1;
-}
-
-/* L2 UDP fragment on wire: profile lookup only needs L2 header + policy_id. */
-static int wan_l2_is_frag(const uint8_t *pkt, uint32_t len)
-{
-    return wan_l2_is_udp_tagged(pkt, len);
-}
-
-static int decrypt_wan(struct forwarder *fwd, struct ne_packet *job)
+static int forward_local(struct forwarder *fwd, struct ne_packet *job)
 {
     uint8_t *pkt = ne_packet_data(&fwd->pair, job->addr);
-    uint32_t len = job->len;
-    int pending = 0;
-    int is_l2 = 0;
-
-    if (!fwd || !pkt || !job)
-        return -1;
-    /* Caller must only invoke this for encrypted wire; plain bypass never enters. */
-    if (!wan_wire_is_encrypted(fwd, pkt, len))
-        return 0;
-
-    is_l2 = fwd_crypto_has_l2_marker(pkt, len) || wan_l2_is_udp_tagged(pkt, len);
-
-    {
-        int l2_fast = wan_try_l2_pqc_udp(fwd, pkt, &len, &pending);
-
-        if (l2_fast < 0)
-            return -1;
-        if (l2_fast == 1) {
-            if (pending)
-                return 1;
-            job->len = len;
-            return 0;
-        }
-        if (l2_fast == 0) {
-            if ((decrypt_l2(pkt, &len) != 0 ||
-                 !wan_l2_plain_ok(pkt, len)) && is_l2)
-                return -1;
-        }
-    }
-    job->len = len;
-    return 0;
-}
-
-static int eth_dmac_is_unicast(const uint8_t *pkt)
-{
-    return (pkt[0] & 0x01u) == 0;
-}
-
-static int profile_pi_for_wire_policy(struct forwarder *fwd, uint8_t wire_id)
-{
-    int profile_id;
-
-    if (!fwd || !fwd->cfg)
-        return -1;
-    profile_id = fwd_crypto_profile_id_for_wire_id(wire_id);
-    if (profile_id < 0 || fwd->cfg->profile_count < 1)
-        return -1;
-    if (fwd->cfg->profiles[0].id == profile_id)
-        return 0;
-    return -1;
-}
-
-static int profile_owns_local(struct forwarder *fwd, int profile_pi, int fwd_local_idx)
-{
-    const struct profile_config *prof;
-    const char *ifname;
-
-    if (!fwd || !fwd->cfg || profile_pi < 0 || profile_pi >= fwd->cfg->profile_count)
-        return 0;
-    if (fwd_local_idx < 0 || fwd_local_idx >= fwd->local_count)
-        return 0;
-    if (!ne_pair_local_live(&fwd->pair, fwd_local_idx))
-        return 0;
-
-    prof = &fwd->cfg->profiles[profile_pi];
-    if (!prof->enabled)
-        return 0;
-
-    ifname = fwd->locals[fwd_local_idx].ifname;
-    if (!ifname[0])
-        return 0;
-
-    for (int i = 0; i < prof->local_count; i++) {
-        int ci = prof->local_indices[i];
-
-        if (ci < 0 || ci >= fwd->cfg->local_count)
-            continue;
-        if (strcmp(fwd->cfg->locals[ci].ifname, ifname) == 0)
-            return 1;
-    }
-    return 0;
-}
-
-/* Data path only (tcp/udp/icmp/ospf): never floods — FDB miss drops. */
-
-static int wan_profile_pi_bypass(struct forwarder *fwd, const uint8_t *pkt, uint32_t len)
-{
-    uint32_t src_ip = 0, dst_ip = 0;
-    uint16_t src_port = 0, dst_port = 0;
-    uint8_t proto = 0;
-    const struct crypto_policy *cp;
-
-    if (!fwd || !pkt || !fwd->cfg || fwd->cfg->profile_count < 1)
-        return -1;
-    if (!fwd->cfg->profiles[0].enabled)
-        return -1;
-    if (dp_parse_flow((void *)pkt, len, &src_ip, &dst_ip,
-                      &src_port, &dst_port, &proto) != 0)
-        return -1;
-
-    cp = config_select_crypto_policy(fwd->cfg, 0, dst_ip, src_ip,
-                                     dst_port, src_port, proto);
-    if (!cp || cp->action != POLICY_ACTION_BYPASS)
-        return -1;
-    return 0;
-}
-
-static int wan_policy_in_ok(struct forwarder *fwd, int profile_pi,
-                            const uint8_t *pkt, uint32_t len)
-{
-    uint32_t src_ip = 0, dst_ip = 0;
-    uint16_t src_port = 0, dst_port = 0;
-    uint8_t proto = 0;
-
-    if (!fwd || !fwd->cfg || !pkt || profile_pi < 0)
-        return 0;
-    if (dp_parse_flow((void *)pkt, len, &src_ip, &dst_ip,
-                      &src_port, &dst_port, &proto) != 0)
-        return 0;
-    return config_policy_in_ok(fwd->cfg, profile_pi,
-                               src_ip, dst_ip, src_port, dst_port, proto);
-}
-
-static void wan_clamp_tcp_mss(struct forwarder *fwd, uint8_t *pkt, uint32_t len)
-{
-    uint32_t src_ip = 0, dst_ip = 0;
-    uint16_t src_port = 0, dst_port = 0;
-    uint8_t proto = 0;
-    const struct crypto_policy *cp;
-
-    if (!fwd || !pkt || !fwd->cfg || fwd->cfg->profile_count < 1)
-        return;
-    if (!fwd->cfg->profiles[0].enabled)
-        return;
-    if (dp_parse_flow(pkt, len, &src_ip, &dst_ip, &src_port, &dst_port, &proto) != 0)
-        return;
-    if (proto != IPPROTO_TCP)
-        return;
-
-    cp = config_select_crypto_policy(fwd->cfg, 0, src_ip, dst_ip,
-                                     src_port, dst_port, proto);
-    if (!cp || cp->action == POLICY_ACTION_BYPASS)
-        return;
-    (void)crypto_tcp_clamp_mss(pkt, len, CRYPTO_OPT_FRAG_MTU_DEFAULT,
-                               crypto_option_wire_overhead(CRYPTO_OPT_L2_PQC));
-}
-
-static int wan_profile_pi(struct forwarder *fwd, const uint8_t *pkt, uint32_t len)
-{
-    if (!fwd || !pkt || !fwd->cfg)
-        return -1;
-    if (fwd_crypto_has_l2_marker(pkt, len) || crypto_eth_l2_has_marker(pkt, len)) {
-        uint8_t wire_pol = 0;
-
-        if (crypto_eth_l2_read_policy_id(pkt, len, &wire_pol) != 0)
-            return -1;
-        return profile_pi_for_wire_policy(fwd, wire_pol);
-    }
-    return wan_profile_pi_bypass(fwd, pkt, len);
-}
-
-static int forward_wan_to_local(struct forwarder *fwd, struct ne_packet *job,
-                                int profile_pi, int ingress_wan_dp)
-{
-    uint8_t *pkt;
     int li;
 
-    if (!fwd || !job || profile_pi < 0)
-        return -1;
-    pkt = ne_packet_data(&fwd->pair, job->addr);
-    if (!pkt || job->len < 14u)
-        return -1;
-    if (!eth_dmac_is_unicast(pkt))
-        return -1;
-
-    li = mac_lookup(fwd, pkt);
-    if (li < 0 || !profile_owns_local(fwd, profile_pi, li)) {
-        if (ingress_wan_dp >= 0)
-            li = mac_fwd_local_for_wan_dp(fwd, profile_pi, ingress_wan_dp);
-    }
-    if (li >= 0 && profile_owns_local(fwd, profile_pi, li)) {
-        job->dir = NE_DIR_LOCAL;
-        job->local_idx = (uint8_t)li;
-        if (dp_ring_push(fwd, &fwd->mid_to_local[li][dp_out_ring_idx()], job) != 0) {
-            /* dp_ring_push already returned the UMEM frame to the pool. */
-            return 1;
+    if (pkt[0] & 1u) {
+        for (li = 1; li < fwd->local_count; li++) {
+            struct ne_packet clone = *job;
+            if (ne_frame_alloc(&fwd->pair, &clone.addr) != 0)
+                continue;
+            memcpy(ne_packet_data(&fwd->pair, clone.addr), pkt, job->len);
+            clone.dir = NE_DIR_LOCAL;
+            clone.local_idx = (uint8_t)li;
+            (void)dp_ring_push(fwd, &fwd->mid_to_local[li][dp_out_ring_idx()], &clone);
         }
-        return 0;
+        li = 0;
+    } else {
+        li = static_config_local_for_dmac(fwd->cfg, pkt);
+        if (li < 0)
+            return -1;
     }
-
-    return -1;
+    job->dir = NE_DIR_LOCAL;
+    job->local_idx = (uint8_t)li;
+    return dp_ring_push(fwd, &fwd->mid_to_local[li][dp_out_ring_idx()], job);
 }
 
-static int bond_reorder_emit(void *ctx, struct dp_udp_reorder_item *item)
+static int reorder_emit(void *ctx, struct dp_udp_reorder_item *item)
 {
     struct forwarder *fwd = ctx;
-    uint8_t *pkt;
-    int rc;
-
-    if (!fwd || !item)
-        return -1;
-    pkt = ne_packet_data(&fwd->pair, item->packet.addr);
-    if (!pkt)
-        return -1;
     dp_out_ring_bind(item->tx_slot);
-    rc = forward_wan_to_local(fwd, &item->packet, item->profile_pi,
-                              item->ingress_wan_dp);
-    if (rc < 0)
-        return -1;
-    if (rc > 0)
-        return 1;
-    return 0;
+    return forward_local(fwd, &item->packet);
 }
-
-static void bond_reorder_drop(void *ctx, struct dp_udp_reorder_item *item)
+static void reorder_drop(void *ctx, struct dp_udp_reorder_item *item)
 {
     struct forwarder *fwd = ctx;
-
-    if (!fwd || !item)
-        return;
     ne_frame_free(&fwd->pair, item->packet.addr);
 }
-
-static struct dp_udp_reorder_ops bond_reorder_ops(struct forwarder *fwd)
+static struct dp_udp_reorder_ops reorder_ops(struct forwarder *fwd)
 {
-    struct dp_udp_reorder_ops ops = {
-        .ctx = fwd,
-        .emit = bond_reorder_emit,
-        .drop = bond_reorder_drop,
-    };
-
-    return ops;
+    struct dp_udp_reorder_ops o = {.ctx=fwd,.emit=reorder_emit,.drop=reorder_drop};
+    return o;
 }
 
 void dataplane_bond_reorder_configure(struct forwarder *fwd)
 {
-    dp_udp_reorder_configure(fwd ? (uint32_t)fwd->wan_count : 0u);
+    dp_udp_reorder_configure(fwd ? (uint32_t)fwd->wan_count : 0);
 }
-
-void dataplane_bond_reorder_gc(struct forwarder *fwd, int worker_idx)
+void dataplane_bond_reorder_gc(struct forwarder *fwd, int worker)
 {
-    struct dp_udp_reorder_ops ops = bond_reorder_ops(fwd);
-
-    dp_udp_reorder_gc(worker_idx, dp_udp_reorder_now_ns(), &ops);
+    struct dp_udp_reorder_ops o = reorder_ops(fwd);
+    dp_udp_reorder_gc(worker, dp_udp_reorder_now_ns(), &o);
 }
-
-void dataplane_bond_reorder_reset(struct forwarder *fwd, int worker_idx)
+void dataplane_bond_reorder_reset(struct forwarder *fwd, int worker)
 {
-    struct dp_udp_reorder_ops ops = bond_reorder_ops(fwd);
-
-    dp_udp_reorder_reset_worker(worker_idx, &ops);
+    struct dp_udp_reorder_ops o = reorder_ops(fwd);
+    dp_udp_reorder_reset_worker(worker, &o);
 }
 
 int dataplane_wan_needs_mid(struct forwarder *fwd, const uint8_t *pkt, uint32_t len)
 {
-    if (!fwd || !pkt || !fwd->cfg)
-        return 0;
-    /* ARP (plain or NE arp-marker) stays on crypto workers. */
-    if (crypto_eth_l2_has_arp_marker(pkt, len) || dp_pkt_is_arp(pkt, len))
-        return 1;
-    if (!fwd->cfg->crypto_enabled)
-        return 0;
-    return wan_wire_is_encrypted(fwd, pkt, len);
+    (void)fwd;
+    return crypto_eth_l2_has_marker(pkt, len) ||
+           crypto_eth_l2_has_arp_marker(pkt, len);
 }
 
 void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
 {
-    uint8_t *pkt = ne_packet_data(&fwd->pair, job.addr);
-    uint8_t wire_buf[NE_FRAME];
-    uint32_t wire_len;
-    int dec;
-    int encrypted;
-    int profile_pi;
-
-    if (!fwd || !pkt)
-        goto drop;
-
-    wire_len = job.len;
-    if (wire_len < 14u || wire_len > NE_FRAME)
-        goto drop;
-    /* L2 frag pending is freed after decrypt; snapshot header only (policy_id). */
-    if (wan_l2_is_frag(pkt, wire_len)) {
-        uint32_t snap = wire_len < 64u ? wire_len : 64u;
-
-        memcpy(wire_buf, pkt, snap);
-        wire_len = snap;
-    } else {
-        memcpy(wire_buf, pkt, wire_len);
-    }
-
-    if (crypto_eth_l2_has_arp_marker(pkt, job.len) || dp_pkt_is_arp(pkt, job.len)) {
-        int wan_dp = job.wan_idx < fwd->wan_count ? (int)job.wan_idx : -1;
-        int bridged = -1;
-
+    uint8_t *pkt;
+    uint32_t len, out_len = 0, epoch = 0, seq = 0;
+    int rr;
+    if (!fwd || !(pkt = ne_packet_data(&fwd->pair, job.addr))) goto drop;
+    if (crypto_eth_l2_has_arp_marker(pkt, job.len)) {
         dp_out_ring_bind(dp_pick_tx_slot(pkt, job.len));
-        if (wan_dp >= 0)
-            bridged = arp_bridge_from_wan(fwd, &job, pkt, wan_dp, NULL);
-
-        if (bridged == 0)
-            return;
+        if (arp_bridge_from_wan(fwd, &job) == 0) return;
         goto drop;
     }
-
-    encrypted = wan_wire_is_encrypted(fwd, pkt, job.len);
-    if (encrypted) {
-        crypto_option_udp_clear_rx_meta();
-        if (!fwd->cfg->crypto_enabled)
-            goto drop;
-        dec = decrypt_wan(fwd, &job);
-        if (dec == 1) {
-            ne_frame_free(&fwd->pair, job.addr);
-            return;
-        }
-        if (dec != 0)
-            goto drop;
-        pkt = ne_packet_data(&fwd->pair, job.addr);
-        profile_pi = wan_profile_pi(fwd, wire_buf, wire_len);
-        if (profile_pi < 0)
-            goto drop;
-        /* Any/any: không so 5-tuple từng gói. Không any mới wan_policy_in_ok. */
-        if (!fwd->cfg->profiles[profile_pi].policy_in_any) {
-            if (!wan_policy_in_ok(fwd, profile_pi, pkt, job.len))
-                goto policy_drop;
-        }
-        wan_clamp_tcp_mss(fwd, pkt, job.len);
+    if (!crypto_eth_l2_has_marker(pkt, job.len)) goto drop;
+    len = job.len;
+    l2_crypto_udp_clear_rx_meta();
+    if (is_udp_wire(pkt, len)) {
+        rr = l2_crypto_reassemble_udp(dp_crypto_current_worker_idx(),
+             &fwd->crypto, pkt, &len, pkt, &out_len);
+        if (rr == 0) { ne_frame_free(&fwd->pair, job.addr); return; }
+        if (rr != 1) goto drop;
+        job.len = out_len;
     } else {
-        if (!wan_l2_plain_ipv4(pkt, job.len))
+        if (l2_crypto_decrypt(L2_PROTO_DATA, &fwd->crypto, pkt, &len) != 0)
             goto drop;
-        /* Bypass đã AND 5-tuple trong wan_profile_pi_bypass — không quét lại. */
-        profile_pi = wan_profile_pi(fwd, wire_buf, wire_len);
-        if (profile_pi < 0)
-            goto drop;
+        job.len = len;
     }
-
-    if (encrypted) {
-        uint32_t epoch = 0;
-        uint32_t seq = 0;
-        uint8_t reorder_proto = 0;
-
-        if (crypto_option_udp_take_rx_meta(&epoch, &seq) == 0)
-            reorder_proto = IPPROTO_UDP;
-        if (reorder_proto != 0) {
-            struct dp_udp_reorder_key key;
-            struct dp_udp_reorder_item item;
-            struct dp_udp_reorder_ops ops = bond_reorder_ops(fwd);
-            uint32_t src_ip = 0, dst_ip = 0;
-            uint16_t src_port = 0, dst_port = 0;
-            uint8_t proto = 0;
-
-            if (dp_parse_flow(pkt, job.len, &src_ip, &dst_ip,
-                              &src_port, &dst_port, &proto) != 0 ||
-                proto != reorder_proto)
-                goto drop;
-            key.src_ip = src_ip;
-            key.dst_ip = dst_ip;
-            key.src_port = src_port;
-            key.dst_port = dst_port;
-            memset(&item, 0, sizeof(item));
-            item.packet = job;
-            item.profile_pi = (int16_t)profile_pi;
-            item.ingress_wan_dp = job.wan_idx < fwd->wan_count
-                ? (int8_t)job.wan_idx : -1;
-            item.tx_slot = (uint8_t)dp_udp_pick_tx_slot(
-                src_ip, dst_ip, src_port, dst_port,
-                dp_crypto_current_worker_idx());
-            dp_udp_reorder_submit(dp_crypto_current_worker_idx(), &key,
-                                  epoch, seq, &item,
-                                  dp_udp_reorder_now_ns(), &ops);
-            return;
-        }
-        dp_out_ring_bind(dp_flow_pick_tx_slot(pkt, job.len,
-                                              dp_crypto_current_worker_idx()));
-    } else {
-        dp_out_ring_bind(dp_pick_tx_slot(pkt, job.len));
+    if (l2_crypto_udp_take_rx_meta(&epoch, &seq) == 0) {
+        struct dp_udp_reorder_key key;
+        struct dp_udp_reorder_item item = {.packet=job};
+        struct dp_udp_reorder_ops ops = reorder_ops(fwd);
+        uint8_t proto;
+        if (dp_parse_flow(pkt, job.len, &key.src_ip, &key.dst_ip,
+                          &key.src_port, &key.dst_port, &proto) != 0 ||
+            proto != IPPROTO_UDP) goto drop;
+        item.tx_slot = (uint8_t)dp_udp_pick_tx_slot(key.src_ip,key.dst_ip,
+            key.src_port,key.dst_port,dp_crypto_current_worker_idx());
+        dp_udp_reorder_submit(dp_crypto_current_worker_idx(), &key, epoch, seq,
+                              &item, dp_udp_reorder_now_ns(), &ops);
+        return;
     }
-
-    {
-        int rc = forward_wan_to_local(
-            fwd, &job, profile_pi,
-            job.wan_idx < fwd->wan_count ? (int)job.wan_idx : -1);
-
-        if (rc < 0)
-            goto drop;
-        if (rc > 0)
-            return;
-    }
-    return;
-
-policy_drop:
-    ne_frame_free(&fwd->pair, job.addr);
-    return;
-
+    dp_out_ring_bind(dp_flow_pick_tx_slot(pkt, job.len, dp_crypto_current_worker_idx()));
+    if (forward_local(fwd, &job) == 0) return;
 drop:
     ne_frame_free(&fwd->pair, job.addr);
 }

@@ -9,9 +9,9 @@
 #define UDP_REORDER_SETS              64u
 #define UDP_REORDER_WAYS              4u
 #define UDP_REORDER_FLOW_CAP          (UDP_REORDER_SETS * UDP_REORDER_WAYS)
-#define UDP_REORDER_WINDOW            2048u
+#define UDP_REORDER_WINDOW            1024u
 #define UDP_REORDER_START_BACKTRACK   32u
-#define UDP_REORDER_HELD_CAP          8192u
+#define UDP_REORDER_HELD_CAP          4096u
 #define UDP_REORDER_GC_SLICE          16u
 #define UDP_REORDER_FLOW_IDLE_NS      (60ULL * 1000000000ULL)
 struct udp_reorder_slot {

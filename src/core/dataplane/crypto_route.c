@@ -1,7 +1,6 @@
 #include "../../../inc/core/dataplane/crypto_route.h"
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/dataplane/dataplane_util.h"
-#include "../../../inc/core/forwarder/forwarder_crypto_runtime.h"
 #include "../../../inc/crypto/eth_parse.h"
 #include "../../../inc/crypto/crypto_option.h"
 
@@ -461,8 +460,7 @@ int dp_crypto_pick_wan_worker(struct forwarder *fwd, const uint8_t *pkt, uint32_
     if (crypto_eth_l2_has_arp_marker(pkt, len) || dp_pkt_is_arp(pkt, len))
         return dp_crypto_pick_local_worker(pkt, len, NULL);
 
-    /* Encrypt data only. Bypass never calls this. */
-    if (!fwd->cfg || !fwd->cfg->crypto_enabled || !fwd_crypto_has_l2_marker(pkt, len))
+    if (!fwd->cfg || !crypto_eth_l2_has_marker(pkt, len))
         return -1;
 
     if (crypto_eth_l2_read_worker_idx(pkt, len, &wire_id) != 0)

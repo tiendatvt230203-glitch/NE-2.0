@@ -1,5 +1,5 @@
 #include "../../../inc/core/iface/interface.h"
-#include "../../../inc/core/iface/profile_iface_xdp.h"
+#include "../../../inc/core/iface/xdp_attach.h"
 #include <bpf/libbpf.h>
 #include <linux/if_link.h>
 #include <linux/if_xdp.h>
@@ -110,14 +110,6 @@ void ne_dp_warn_rx_drop(const char *dir, int cpu, int worker, uint32_t q_depth)
     (void)q_depth;
 }
 
-void ne_dp_warn_crypto(int cpu, int worker, uint32_t lan_q, uint32_t wan_q)
-{
-    (void)cpu;
-    (void)worker;
-    (void)lan_q;
-    (void)wan_q;
-}
-
 static int ne_rx_slots_for_queues(int queue_total, uint32_t slots_max)
 {
     if (queue_total <= 0)
@@ -147,27 +139,6 @@ static int ifname_is_safe(const char *ifname)
     }
     return 1;
 }
-
-static int interface_set_promisc_off(const char *ifname)
-{
-    if (!ifname_is_safe(ifname))
-        return -1;
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "ip link set dev %s promisc off >/dev/null 2>&1", ifname);
-    return system(cmd) == 0 ? 0 : -1;
-}
-
-void interface_promisc_off_config(const struct app_config *cfg)
-{
-    if (!cfg)
-        return;
-    for (int i = 0; i < cfg->local_count && i < MAX_INTERFACES; i++)
-        interface_set_promisc_off(cfg->locals[i].ifname);
-    for (int i = 0; i < cfg->wan_count && i < MAX_INTERFACES; i++)
-        interface_set_promisc_off(cfg->wans[i].ifname);
-}
-
-void interface_reset_redirect_maps(void) {}
 
 int interface_set_queue_count(const char *ifname, int desired_count)
 {
@@ -283,7 +254,7 @@ int ne_ring_init(struct ne_ring *r, uint32_t cap, int mpsc_pop)
 
 void ne_ring_destroy(struct ne_ring *r)
 {
-    if (!r)
+    if (!r || !r->buf)
         return;
     if (r->mpsc_pop)
         pthread_spin_destroy(&r->pop_lock);
@@ -588,60 +559,6 @@ static void zero_queue_rings(struct ne_xsk_queue *slot, int preserve_fq_cq)
     }
 }
 
-static void drain_cq_queue(struct ne_xsk_queue *slot, struct ne_pool *pool);
-
-static void reclaim_rx_queue(struct ne_xsk_queue *slot, struct ne_pool *pool)
-{
-    uint64_t addrs[NE_BATCH_SIZE];
-    uint32_t idx = 0;
-    uint32_t n;
-
-    if (!slot || !pool || !slot->rx.ring)
-        return;
-
-    if (slot->rx_pending) {
-        uint32_t start = slot->rx.cached_cons - slot->rx_pending;
-        uint32_t pending = slot->rx_pending;
-        uint32_t off = 0;
-
-        while (off < pending) {
-            uint32_t batch = pending - off;
-            uint32_t i;
-
-            if (batch > NE_BATCH_SIZE)
-                batch = NE_BATCH_SIZE;
-            for (i = 0; i < batch; i++)
-                addrs[i] = xsk_ring_cons__rx_desc(&slot->rx, start + off + i)->addr;
-            (void)pool_push(pool, addrs, batch);
-            off += batch;
-        }
-        xsk_ring_cons__release(&slot->rx, pending);
-        slot->rx_pending = 0;
-        slot->rx_reject_count = 0;
-        slot->rx_reject_chain = 0;
-    }
-
-    while ((n = xsk_ring_cons__peek(&slot->rx, NE_BATCH_SIZE, &idx)) > 0) {
-        for (uint32_t i = 0; i < n; i++)
-            addrs[i] = xsk_ring_cons__rx_desc(&slot->rx, idx + i)->addr;
-        (void)pool_push(pool, addrs, n);
-        xsk_ring_cons__release(&slot->rx, n);
-        if (n < NE_BATCH_SIZE)
-            break;
-    }
-}
-
-static void reclaim_iface_umem_frames(struct ne_pair *p, struct ne_iface *iface)
-{
-    if (!p || !iface)
-        return;
-    for (int q = 0; q < iface->queue_count; q++) {
-        struct ne_xsk_queue *slot = &iface->queues[q];
-
-        drain_cq_queue(slot, &p->pool);
-        reclaim_rx_queue(slot, &p->pool);
-    }
-}
 
 static int queue_holds_umem_fd(const struct ne_pair *p, const struct ne_xsk_queue *slot)
 {
@@ -650,35 +567,6 @@ static int queue_holds_umem_fd(const struct ne_pair *p, const struct ne_xsk_queu
     return xsk_socket__fd(slot->xsk) == xsk_umem__fd(p->umem);
 }
 
-static int iface_holds_umem_fd(const struct ne_pair *p, const struct ne_iface *iface, int nq)
-{
-    for (int q = 0; q < nq; q++) {
-        if (queue_holds_umem_fd(p, &iface->queues[q]))
-            return 1;
-    }
-    return 0;
-}
-
-static int ne_pair_other_live_count(const struct ne_pair *p, int skip_local, int skip_wan)
-{
-    int n = 0;
-
-    if (!p)
-        return 0;
-    for (int i = 0; i < p->local_count; i++) {
-        if (i == skip_local)
-            continue;
-        if (p->local_live[i])
-            n++;
-    }
-    for (int i = 0; i < p->wan_count; i++) {
-        if (i == skip_wan)
-            continue;
-        if (p->wan_live[i])
-            n++;
-    }
-    return n;
-}
 
 /* Delete XSK sockets: non-UMEM-fd first, UMEM-fd last (libxdp shares via umem->fd). */
 static void delete_iface_xsks(struct ne_pair *p, struct ne_iface *iface, int nq)
@@ -701,20 +589,6 @@ static void delete_iface_xsks(struct ne_pair *p, struct ne_iface *iface, int nq)
     }
 }
 
-void ne_pair_delete_local_xsks(struct ne_pair *p, int pair_li)
-{
-    if (!p || pair_li < 0 || pair_li >= MAX_INTERFACES)
-        return;
-    delete_iface_xsks(p, &p->locals[pair_li], p->locals[pair_li].queue_count);
-}
-
-void ne_pair_delete_wan_xsks(struct ne_pair *p, int dp_slot)
-{
-    if (!p || dp_slot < 0 || dp_slot >= MAX_INTERFACES)
-        return;
-    delete_iface_xsks(p, &p->wans[dp_slot], p->wans[dp_slot].queue_count);
-}
-
 static void delete_all_live_xsks(struct ne_pair *p)
 {
     for (int i = 0; i < MAX_INTERFACES; i++) {
@@ -725,102 +599,6 @@ static void delete_all_live_xsks(struct ne_pair *p)
     }
 }
 
-static int pool_reset_full(struct ne_pool *pool, uint32_t n_frames, uint32_t frame_size)
-{
-    if (!pool || !pool->buf || n_frames == 0)
-        return -1;
-    pthread_spin_lock(&pool->lock);
-    pool->head = 0;
-    pool->tail = 0;
-    pthread_spin_unlock(&pool->lock);
-    for (uint32_t i = 0; i < n_frames; i++) {
-        uint64_t addr = (uint64_t)i * frame_size;
-        if (pool_push(pool, &addr, 1) != 1)
-            return -1;
-    }
-    return 0;
-}
-
-static int ne_pair_destroy_umem(struct ne_pair *p)
-{
-    if (!p)
-        return -1;
-
-    if (p->umem) {
-        (void)xsk_umem__delete(p->umem);
-        p->umem = NULL;
-    }
-    p->umem_fq_li = -1;
-    p->umem_fq_q = -1;
-
-    if (!p->bufs || p->bufs == MAP_FAILED || p->n_frames == 0)
-        return 0;
-    if (pool_reset_full(&p->pool, p->n_frames, p->frame_size) != 0) {
-        fprintf(stderr, "[DP] umem destroy: pool reset failed\n");
-        fflush(stderr);
-        return -1;
-    }
-    fprintf(stderr, "[DP] umem cleared — next LAN plumb will create fresh\n");
-    fflush(stderr);
-    return 0;
-}
-
-static int ne_pair_create_umem_on_local(struct ne_pair *p, int pair_li)
-{
-    struct xsk_umem_config ucfg = {
-        .fill_size = NE_RING,
-        .comp_size = NE_RING,
-        .frame_size = 0,
-        .frame_headroom = XSK_UMEM__DEFAULT_FRAME_HEADROOM,
-        .flags = 0,
-    };
-
-    if (!p || !p->bufs || p->bufs == MAP_FAILED || pair_li < 0 ||
-        pair_li >= MAX_INTERFACES)
-        return -1;
-    if (p->umem)
-        return 0;
-
-    if (pool_reset_full(&p->pool, p->n_frames, p->frame_size) != 0) {
-        fprintf(stderr, "[DP] umem create: pool reset failed\n");
-        fflush(stderr);
-        return -1;
-    }
-
-    ucfg.frame_size = p->frame_size;
-    memset(&p->locals[pair_li].queues[0].fq, 0, sizeof(p->locals[pair_li].queues[0].fq));
-    memset(&p->locals[pair_li].queues[0].cq, 0, sizeof(p->locals[pair_li].queues[0].cq));
-    if (xsk_umem__create(&p->umem, p->bufs, p->bufsize,
-                         &p->locals[pair_li].queues[0].fq,
-                         &p->locals[pair_li].queues[0].cq, &ucfg) != 0) {
-        fprintf(stderr, "[DP] umem create on LAN slot %d failed: %s\n",
-                pair_li, strerror(errno));
-        fflush(stderr);
-        return -1;
-    }
-    p->umem_fq_li = pair_li;
-    p->umem_fq_q = 0;
-    fprintf(stderr, "[DP] fresh umem on LAN slot %d\n", pair_li);
-    fflush(stderr);
-    return 0;
-}
-
-static void clear_iface_queues_after_delete(struct ne_pair *p, struct ne_iface *iface, int nq)
-{
-    if (!p || !iface)
-        return;
-    for (int q = 0; q < nq; q++) {
-        struct ne_xsk_queue *slot = &iface->queues[q];
-
-        slot->xsk = NULL;
-        zero_queue_rings(slot, is_umem_fq_owner_queue(p, iface, q));
-    }
-    iface->ifindex = 0;
-    iface->ifname[0] = '\0';
-    iface->queue_count = 0;
-    iface->xdp_flags = 0;
-    iface->xdp_sg_enabled = 0;
-}
 
 static int xsk_create_queue(struct ne_pair *p, struct ne_iface *iface, const char *ifname,
                             int q, uint32_t xdp_flags, int use_sg)
@@ -959,23 +737,6 @@ static uint32_t prefill_per_queue(const struct ne_pair *p, int queue_total)
     return (uint32_t)per_queue;
 }
 
-static uint32_t hotplug_prefill_per_queue(struct ne_pair *p, int new_queue_count)
-{
-    uint32_t planned;
-    uint32_t free_now;
-    uint32_t reserve_limited;
-    int total;
-
-    if (!p || new_queue_count <= 0)
-        return NE_BATCH_SIZE;
-    total = p->local_queue_total + p->wan_queue_total;
-    planned = prefill_per_queue(p, total);
-    free_now = ne_pool_free_count(p);
-    reserve_limited = free_now / ((uint32_t)new_queue_count * 2u);
-    if (planned > reserve_limited)
-        planned = reserve_limited;
-    return planned;
-}
 
 int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
 {
@@ -1015,7 +776,7 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
     p->local_count = cfg->local_count;
     if (p->local_count > MAX_INTERFACES)
         p->local_count = MAX_INTERFACES;
-    p->wan_count = config_count_dataplane_wans(cfg);
+    p->wan_count = cfg->wan_count;
     if (p->wan_count > MAX_INTERFACES)
         p->wan_count = MAX_INTERFACES;
     struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
@@ -1040,16 +801,13 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
         p->locals[i].queue_count = nq;
         p->local_queue_total += nq;
     }
-    for (int di = 0; di < p->wan_count; di++) {
-        int ci = config_wan_dp_to_cfg(cfg, di);
-        if (ci < 0)
-            NE_OPEN_ABORT("WAN-config-map", NULL, -1);
-        int nq = resolve_iface_queue_count(cfg->wans[ci].ifname);
-        NE_OPEN_TRY(interface_preflight(cfg->wans[ci].ifname),
-                    "WAN-preflight", cfg->wans[ci].ifname);
-        NE_OPEN_TRY(apply_iface_queue_count(cfg->wans[ci].ifname, nq),
-                    "WAN-queue-config", cfg->wans[ci].ifname);
-        p->wans[di].queue_count = nq;
+    for (int i = 0; i < p->wan_count; i++) {
+        int nq = resolve_iface_queue_count(cfg->wans[i].ifname);
+        NE_OPEN_TRY(interface_preflight(cfg->wans[i].ifname),
+                    "WAN-preflight", cfg->wans[i].ifname);
+        NE_OPEN_TRY(apply_iface_queue_count(cfg->wans[i].ifname, nq),
+                    "WAN-queue-config", cfg->wans[i].ifname);
+        p->wans[i].queue_count = nq;
         p->wan_queue_total += nq;
     }
 
@@ -1078,23 +836,15 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
         NE_OPEN_TRY(interface_set_promisc(cfg->locals[i].ifname),
                     "LAN-promisc-on", cfg->locals[i].ifname);
     }
-    for (int di = 0; di < p->wan_count; di++) {
-        int ci = config_wan_dp_to_cfg(cfg, di);
-        if (ci < 0)
-            NE_OPEN_ABORT("WAN-config-map-promisc", NULL, -1);
-        NE_OPEN_TRY(interface_set_promisc(cfg->wans[ci].ifname),
-                    "WAN-promisc-on", cfg->wans[ci].ifname);
-    }
+    for (int i = 0; i < p->wan_count; i++)
+        NE_OPEN_TRY(interface_set_promisc(cfg->wans[i].ifname),
+                    "WAN-promisc-on", cfg->wans[i].ifname);
 
     /* Scrub stale XDP before AF_XDP bind (delete→create EINVAL -22). */
     for (int i = 0; i < p->local_count; i++)
-        profile_iface_xdp_detach_ifname(cfg->locals[i].ifname);
-    for (int di = 0; di < p->wan_count; di++) {
-        int ci = config_wan_dp_to_cfg(cfg, di);
-        if (ci < 0)
-            NE_OPEN_ABORT("WAN-config-map-XDP-scrub", NULL, -1);
-        profile_iface_xdp_detach_ifname(cfg->wans[ci].ifname);
-    }
+        xdp_attach_detach_ifname(cfg->locals[i].ifname);
+    for (int i = 0; i < p->wan_count; i++)
+        xdp_attach_detach_ifname(cfg->wans[i].ifname);
     usleep(50000);
 
     struct xsk_umem_config ucfg = {
@@ -1121,7 +871,7 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
                     "[DP] LAN %s XSK bind failed — scrub XDP and retry once\n",
                     cfg->locals[i].ifname);
             fflush(stderr);
-            profile_iface_xdp_detach_ifname(cfg->locals[i].ifname);
+            xdp_attach_detach_ifname(cfg->locals[i].ifname);
             usleep(150000);
             rc = open_iface_queues(p, &p->locals[i], cfg->locals[i].ifname,
                                    p->locals[i].queue_count);
@@ -1130,24 +880,21 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
             NE_OPEN_ABORT("LAN-XSK-create", cfg->locals[i].ifname, rc);
     }
     for (int di = 0; di < p->wan_count; di++) {
-        int ci = config_wan_dp_to_cfg(cfg, di);
         int rc;
-        if (ci < 0)
-            NE_OPEN_ABORT("WAN-config-map-XSK", NULL, -1);
-        rc = open_iface_queues(p, &p->wans[di], cfg->wans[ci].ifname,
+        rc = open_iface_queues(p, &p->wans[di], cfg->wans[di].ifname,
                                p->wans[di].queue_count);
         if (rc) {
             fprintf(stderr,
                     "[DP] WAN %s XSK bind failed — scrub XDP and retry once\n",
-                    cfg->wans[ci].ifname);
+                    cfg->wans[di].ifname);
             fflush(stderr);
-            profile_iface_xdp_detach_ifname(cfg->wans[ci].ifname);
+            xdp_attach_detach_ifname(cfg->wans[di].ifname);
             usleep(150000);
-            rc = open_iface_queues(p, &p->wans[di], cfg->wans[ci].ifname,
+            rc = open_iface_queues(p, &p->wans[di], cfg->wans[di].ifname,
                                    p->wans[di].queue_count);
         }
         if (rc)
-            NE_OPEN_ABORT("WAN-XSK-create", cfg->wans[ci].ifname, rc);
+            NE_OPEN_ABORT("WAN-XSK-create", cfg->wans[di].ifname, rc);
     }
 
     uint32_t prefill = prefill_per_queue(
@@ -1188,7 +935,7 @@ fail:
         fputc('\n', stderr);
         fflush(stderr);
     }
-    profile_iface_xdp_detach_config(cfg);
+    xdp_attach_detach_config(cfg);
     ne_pair_close(p, cfg);
     return -1;
 #undef NE_OPEN_ABORT
@@ -1225,15 +972,15 @@ void ne_pair_close(struct ne_pair *p, const struct app_config *cfg)
     fprintf(stderr, "[STOP] ne_pair_close: (3/4) ip link xdp off\n");
     fflush(stderr);
     if (cfg)
-        profile_iface_xdp_detach_config(cfg);
+        xdp_attach_detach_config(cfg);
     else {
         for (int i = 0; i < p->local_count; i++) {
             if (p->locals[i].ifname[0])
-                profile_iface_xdp_detach_ifname(p->locals[i].ifname);
+                xdp_attach_detach_ifname(p->locals[i].ifname);
         }
         for (int i = 0; i < p->wan_count; i++) {
             if (p->wans[i].ifname[0])
-                profile_iface_xdp_detach_ifname(p->wans[i].ifname);
+                xdp_attach_detach_ifname(p->wans[i].ifname);
         }
     }
 
@@ -1249,201 +996,18 @@ void ne_pair_close(struct ne_pair *p, const struct app_config *cfg)
     memset(p, 0, sizeof(*p));
 }
 
-int ne_pair_local_live(const struct ne_pair *p, int pair_local_idx)
+int ne_pair_local_live(const struct ne_pair *p, int local_idx)
 {
-    if (!p || pair_local_idx < 0 || pair_local_idx >= p->local_count)
-        return 0;
-    return p->local_live[pair_local_idx] != 0;
+    return p && local_idx >= 0 && local_idx < p->local_count &&
+           p->local_live[local_idx] != 0;
 }
 
-int ne_pair_wan_live(const struct ne_pair *p, int dp_slot)
+int ne_pair_wan_live(const struct ne_pair *p, int wan_idx)
 {
-    if (!p || dp_slot < 0 || dp_slot >= p->wan_count)
-        return 0;
-    return p->wan_live[dp_slot] != 0;
+    return p && wan_idx >= 0 && wan_idx < p->wan_count &&
+           p->wan_live[wan_idx] != 0;
 }
 
-int ne_pair_plumb_local(struct ne_pair *p, const struct app_config *cfg, int cfg_local_idx,
-                        int pair_li)
-{
-    if (!p || !cfg || cfg_local_idx < 0 || cfg_local_idx >= cfg->local_count)
-        return -1;
-    if (pair_li < 0 || pair_li >= MAX_INTERFACES)
-        return -1;
-    if (!p->bufs || p->bufs == MAP_FAILED)
-        return -1;
-
-    const char *ifname = cfg->locals[cfg_local_idx].ifname;
-
-    if (interface_preflight(ifname) != 0)
-        return -1;
-
-    
-    profile_iface_xdp_detach_ifname(ifname);
-
-    int nq = resolve_iface_queue_count(ifname);
-    if (apply_iface_queue_count(ifname, nq) != 0) {
-        fprintf(stderr, "[DP] plumb LAN %s: queue_count apply failed (want=%d)\n",
-                ifname, nq);
-        fflush(stderr);
-        return -1;
-    }
-    p->locals[pair_li].queue_count = nq;
-    if (interface_set_promisc(ifname) != 0) {
-        fprintf(stderr, "[DP] plumb LAN %s: promisc on failed\n", ifname);
-        fflush(stderr);
-        return -1;
-    }
-    if (!p->umem && ne_pair_create_umem_on_local(p, pair_li) != 0) {
-        p->locals[pair_li].queue_count = 0;
-        return -1;
-    }
-    if (open_iface_queues(p, &p->locals[pair_li], ifname, nq) != 0) {
-        fprintf(stderr, "[DP] plumb LAN %s: open_iface_queues/XSK failed\n", ifname);
-        fflush(stderr);
-        p->locals[pair_li].queue_count = 0;
-        if (p->umem_fq_li == pair_li && ne_pair_other_live_count(p, -1, -1) <= 0)
-            (void)ne_pair_destroy_umem(p);
-        return -1;
-    }
-
-    if (pair_li >= p->local_count)
-        p->local_count = pair_li + 1;
-    p->local_queue_total += nq;
-    prefill_iface(p, &p->locals[pair_li], hotplug_prefill_per_queue(p, nq));
-    p->local_live[pair_li] = 1;
-    return 0;
-}
-
-int ne_pair_plumb_wan_dp(struct ne_pair *p, const struct app_config *cfg, int cfg_wan_idx,
-                         int dp_slot)
-{
-    if (!p || !cfg || !p->umem || cfg_wan_idx < 0 || cfg_wan_idx >= cfg->wan_count)
-        return -1;
-    if (!cfg->wans[cfg_wan_idx].dataplane || dp_slot < 0 || dp_slot >= MAX_INTERFACES)
-        return -1;
-
-    const char *ifname = cfg->wans[cfg_wan_idx].ifname;
-
-    if (interface_preflight(ifname) != 0)
-        return -1;
-
-    profile_iface_xdp_detach_ifname(ifname);
-
-    int nq = resolve_iface_queue_count(ifname);
-    if (apply_iface_queue_count(ifname, nq) != 0) {
-        fprintf(stderr, "[DP] plumb WAN %s: queue_count apply failed (want=%d)\n",
-                ifname, nq);
-        fflush(stderr);
-        return -1;
-    }
-    p->wans[dp_slot].queue_count = nq;
-    if (interface_set_promisc(ifname) != 0) {
-        fprintf(stderr, "[DP] plumb WAN %s: promisc on failed\n", ifname);
-        fflush(stderr);
-        return -1;
-    }
-    if (open_iface_queues(p, &p->wans[dp_slot], ifname, nq) != 0) {
-        fprintf(stderr, "[DP] plumb WAN %s: open_iface_queues/XSK failed\n", ifname);
-        fflush(stderr);
-        p->wans[dp_slot].queue_count = 0;
-        return -1;
-    }
-
-    if (dp_slot >= p->wan_count)
-        p->wan_count = dp_slot + 1;
-    p->wan_queue_total += nq;
-    prefill_iface(p, &p->wans[dp_slot], hotplug_prefill_per_queue(p, nq));
-    p->wan_live[dp_slot] = 1;
-    return 0;
-}
-
-void ne_pair_unplumb_local(struct ne_pair *p, int pair_li)
-{
-    int nq;
-    int holds;
-
-    if (!p || pair_li < 0 || pair_li >= p->local_count || !p->local_live[pair_li])
-        return;
-
-    nq = p->locals[pair_li].queue_count;
-    holds = iface_holds_umem_fd(p, &p->locals[pair_li], nq);
-
-    profile_iface_xdp_detach_local(p, pair_li);
-    p->local_live[pair_li] = 0;
-
-    reclaim_iface_umem_frames(p, &p->locals[pair_li]);
-    delete_iface_xsks(p, &p->locals[pair_li], nq);
-    clear_iface_queues_after_delete(p, &p->locals[pair_li], nq);
-    if (p->local_queue_total >= nq)
-        p->local_queue_total -= nq;
-    else
-        p->local_queue_total = 0;
-
-    if (holds && ne_pair_other_live_count(p, -1, -1) <= 0)
-        (void)ne_pair_destroy_umem(p);
-}
-
-int ne_pair_teardown_live(struct ne_pair *p)
-{
-    if (!p)
-        return -1;
-
-    fprintf(stderr, "[DP] teardown all live XSK + clear UMEM\n");
-    fflush(stderr);
-
-    for (int i = 0; i < MAX_INTERFACES; i++) {
-        if (p->local_live[i] || p->locals[i].queue_count > 0 || p->bpf_locals[i])
-            profile_iface_xdp_detach_local(p, i);
-        if (p->wan_live[i] || p->wans[i].queue_count > 0 || p->bpf_wans[i])
-            profile_iface_xdp_detach_wan(p, i);
-    }
-
-    for (int i = 0; i < MAX_INTERFACES; i++) {
-        if (p->locals[i].queue_count > 0)
-            reclaim_iface_umem_frames(p, &p->locals[i]);
-        if (p->wans[i].queue_count > 0)
-            reclaim_iface_umem_frames(p, &p->wans[i]);
-    }
-
-    delete_all_live_xsks(p);
-
-    for (int i = 0; i < MAX_INTERFACES; i++) {
-        if (p->locals[i].queue_count > 0)
-            clear_iface_queues_after_delete(p, &p->locals[i], p->locals[i].queue_count);
-        if (p->wans[i].queue_count > 0)
-            clear_iface_queues_after_delete(p, &p->wans[i], p->wans[i].queue_count);
-        p->local_live[i] = 0;
-        p->wan_live[i] = 0;
-    }
-
-    p->local_queue_total = 0;
-    p->wan_queue_total = 0;
-    p->local_count = 0;
-    p->wan_count = 0;
-
-    return ne_pair_destroy_umem(p);
-}
-
-void ne_pair_unplumb_wan_dp(struct ne_pair *p, int dp_slot)
-{
-    int nq;
-
-    if (!p || dp_slot < 0 || dp_slot >= p->wan_count || !p->wan_live[dp_slot])
-        return;
-
-    profile_iface_xdp_detach_wan(p, dp_slot);
-    p->wan_live[dp_slot] = 0;
-    nq = p->wans[dp_slot].queue_count;
-
-    reclaim_iface_umem_frames(p, &p->wans[dp_slot]);
-    delete_iface_xsks(p, &p->wans[dp_slot], nq);
-    clear_iface_queues_after_delete(p, &p->wans[dp_slot], nq);
-    if (p->wan_queue_total >= nq)
-        p->wan_queue_total -= nq;
-    else
-        p->wan_queue_total = 0;
-}
 // RX
 static int recv_queue(struct ne_xsk_queue *slot, struct ne_packet *out, uint32_t max,
                       uint8_t dir, uint8_t wan_idx, uint8_t local_idx)
@@ -1926,63 +1490,4 @@ int ne_tx_drain_wan_all(struct ne_pair *p, struct ne_ring *srcs[], int src_count
     if (tx_slot < 0 || tx_slot >= (int)NE_TX_SLOTS)
         return 0;
     return tx_drain_iface_all_rings(&p->wans[wan_idx], srcs, src_count, p->frame_size, tx_slot);
-}
-
-static int collect_iface_tx_fds(struct ne_iface *iface, int tx_slot, int *fds, int max, int n)
-{
-    int nq;
-
-    if (!iface || !fds || n >= max)
-        return n;
-    nq = iface->queue_count;
-    for (int q = 0; q < nq && n < max; q++) {
-        int fd;
-
-        if (!xsk_queue_for_tx_slot(q, tx_slot, nq))
-            continue;
-        if (!iface->queues[q].xsk)
-            continue;
-        fd = xsk_socket__fd(iface->queues[q].xsk);
-        if (fd < 0)
-            continue;
-        fds[n++] = fd;
-    }
-    return n;
-}
-
-int ne_tx_local_fds(struct ne_pair *p, int tx_slot, int *fds, int max)
-{
-    int n = 0;
-
-    if (!p || !fds || max <= 0 || tx_slot < 0 || tx_slot >= (int)NE_TX_SLOTS)
-        return 0;
-    for (int i = 0; i < p->local_count && n < max; i++) {
-        if (!p->local_live[i])
-            continue;
-        n = collect_iface_tx_fds(&p->locals[i], tx_slot, fds, max, n);
-    }
-    return n;
-}
-
-int ne_tx_wan_fds(struct ne_pair *p, int tx_slot, int *fds, int max)
-{
-    int n = 0;
-
-    if (!p || !fds || max <= 0 || tx_slot < 0 || tx_slot >= (int)NE_TX_SLOTS)
-        return 0;
-    for (int i = 0; i < p->wan_count && n < max; i++) {
-        if (!p->wan_live[i])
-            continue;
-        n = collect_iface_tx_fds(&p->wans[i], tx_slot, fds, max, n);
-    }
-    return n;
-}
-
-int ne_tx_fds(struct ne_pair *p, int tx_slot, int *fds, int max)
-{
-    int n = ne_tx_local_fds(p, tx_slot, fds, max);
-
-    if (n >= max)
-        return n;
-    return n + ne_tx_wan_fds(p, tx_slot, fds + n, max - n);
 }

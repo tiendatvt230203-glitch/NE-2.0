@@ -25,7 +25,7 @@ int dp_udp_pick_tx_slot(uint32_t src_ip, uint32_t dst_ip,
                         int worker_hint);
 void dp_route_set_active_tx_slots(uint32_t slots);
 
-/* Bypass TX affinity: hash → TX slot (RX/TX cores only). Not a crypto worker. */
+/* Stable packet hash to TX slot for direct drop/control handling. */
 int dp_pick_tx_slot(const uint8_t *pkt, uint32_t len);
 void dp_out_ring_bind(int ring_idx);
 int dp_out_ring_idx(void);

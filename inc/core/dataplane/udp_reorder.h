@@ -18,8 +18,6 @@ struct dp_udp_reorder_key {
 
 struct dp_udp_reorder_item {
     struct ne_packet packet;
-    int16_t profile_pi;
-    int8_t ingress_wan_dp;
     uint8_t tx_slot;
 };
 
