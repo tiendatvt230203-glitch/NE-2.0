@@ -26,9 +26,13 @@ struct {
 #define ETH_P_NE_ARP_ENC 0x1048
 #define ETH_P_NE_UDP_ENC 0x104B
 #define ETH_P_CFM        0x8902
+#define ETH_P_8021Q_VAL  0x8100
+#define PATH_MTU         1500
+#define ETH_FRAME_MAX    (14 + PATH_MTU)
+#define ETH_VLAN_FRAME_MAX (18 + PATH_MTU)
 
-SEC("xdp")
-int xdp_wan_redirect_prog(struct xdp_md *ctx)
+static __always_inline int xdp_wan_redirect_common(struct xdp_md *ctx,
+                                                    int phase1_mtu_guard)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
@@ -38,6 +42,17 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
         return XDP_PASS;
 
     __u16 proto = eth->h_proto;
+
+    if (phase1_mtu_guard) {
+        __u32 pkt_len = (__u32)((long)data_end - (long)data);
+
+        if (proto == __constant_htons(ETH_P_8021Q_VAL)) {
+            if (pkt_len > ETH_VLAN_FRAME_MAX)
+                return XDP_DROP;
+        } else if (pkt_len > ETH_FRAME_MAX) {
+            return XDP_DROP;
+        }
+    }
 
     /* CFM failover — luôn vào kernel stack cho AF_PACKET raw socket. */
     if (proto == __constant_htons(ETH_P_CFM))
@@ -79,6 +94,20 @@ redirect:
     ;
     __u32 qid = ctx->rx_queue_index;
     return bpf_redirect_map(&wan_xsks_map, qid, 0);
+}
+
+SEC("xdp")
+int xdp_wan_redirect_prog(struct xdp_md *ctx)
+{
+    return xdp_wan_redirect_common(ctx, 0);
+}
+
+SEC("xdp.frags")
+int xdp_wan_redirect_prog_frags(struct xdp_md *ctx)
+{
+    /* Keep phase-1 behavior bounded to MTU 1500 until WAN jumbo ownership
+     * and crypto processing are implemented. */
+    return xdp_wan_redirect_common(ctx, 1);
 }
 
 char _license[] SEC("license") = "GPL";

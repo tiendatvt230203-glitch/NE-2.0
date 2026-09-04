@@ -47,17 +47,11 @@ static int push_split_to_wan(struct forwarder *fwd, struct ne_packet *job,
     job->len = l1;
     job->dir = NE_DIR_WAN;
     job->wan_idx = (uint8_t)wan_dp;
-    if (ne_ring_try_push(tx, job) != 0) {
+    if (ne_ring_try_push_pair(tx, job, tail) != 0) {
         ne_frame_free(&fwd->pair, tail->addr);
         return -1;
     }
     ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
-    if (ne_ring_try_push(tx, tail) != 0) {
-        /* Head already queued; drop only the tail fragment. */
-        ne_frame_free(&fwd->pair, tail->addr);
-    } else {
-        ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
-    }
     return 0;
 }
 

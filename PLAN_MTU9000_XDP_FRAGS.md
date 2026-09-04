@@ -16,12 +16,38 @@ Baseline khi lập kế hoạch:
 - Reassembly hiện chỉ ghép hai mảnh và kết quả không được vượt `NE_FRAME`.
 - TCP không dùng reorder buffer; TCP dùng MSS clamp.
 
-Tài liệu này chỉ là kế hoạch. Không được coi các phase bên dưới là đã triển khai.
+Các phase bên dưới vẫn là checklist; chỉ các mục được ghi rõ trong phần trạng thái mới được coi là
+đã có trong source. Kiểm thử phần cứng chưa hoàn thành thì không được đánh dấu phase hoàn tất.
+
+### Trạng thái triển khai ngày 2026-09-04
+
+Đã triển khai phần plumbing đầu tiên, nhưng **chưa bật xử lý payload jumbo**:
+
+- UMEM đổi sang `524,288 x 4 KiB = 2 GiB`; tổng RAM payload không tăng so với baseline.
+- Giới hạn thiết kế là tối đa 4 XDP segments, đủ sức chứa logical frame 9216 byte.
+- BPF LAN/WAN có cả program `xdp` và `xdp.frags` trong cùng object.
+- XSK thử `XDP_USE_SG` trước; nếu kernel/driver trả lỗi thì tự tạo lại socket legacy.
+- Nếu load/attach program `xdp.frags` thất bại thì tự load/attach program legacy.
+- Loader chỉ autoload program được chọn để kernel cũ không phải verify section `xdp.frags`.
+- TX một descriptor luôn ghi `options = 0` để không tạo `XDP_PKT_CONTD` rác.
+- Multi-buffer RX hiện được nhận diện và giải phóng an toàn, chưa đưa vào crypto/dataplane.
+- Cả program `xdp.frags` LAN/WAN vẫn giữ MTU guard 1500 trong phase xác nhận này.
+- `struct ne_packet` vẫn giữ đúng 16 byte để không làm phình toàn bộ hot rings của MTU 1500.
+- FQ prefill được chia theo tổng số queue và giữ lại 25% UMEM cho TX/split/burst.
+
+Việc còn bắt buộc trước khi đánh dấu phase này hoàn thành:
+
+- Chạy thực tế trên kernel/NIC đích và xác nhận không còn `EINVAL (-22)`.
+- Test ping, TCP, UDP MTU 1500 trên topology đã cấu hình interface MTU 9000.
+- So sánh throughput/PPS/CPU/drop/reorder với commit baseline.
+- Chưa được gỡ MTU guard 1500 và chưa được đưa multi-buffer packet vào crypto.
 
 Thứ tự công việc cấp cao:
 
 - [ ] Chốt baseline MTU 1500 để làm mốc chống regression.
-- [ ] Hạng mục triển khai đầu tiên: nền tảng `xdp.frags`/AF_XDP multi-buffer.
+- [x] Chuẩn bị UMEM 4 KiB, BPF `xdp.frags`, `XDP_USE_SG` và fallback legacy.
+- [ ] Xác nhận phần plumbing trên kernel/NIC thật không lỗi 22.
+- [ ] Chứng minh traffic MTU 1500 không suy giảm trên topology MTU 9000.
 - [ ] Bổ sung packet-chain và ownership cho nhiều descriptor (điều kiện để `xdp.frags` chạy đúng).
 - [ ] RX/TX được một jumbo frame dạng nhiều segment.
 - [ ] Chuẩn hóa packet jumbo thành packet-chain có tối đa 4 XDP segments để xử lý nội bộ.
@@ -209,8 +235,8 @@ Nếu giữ nguyên số frame nhưng tăng chunk:
 | 8 KiB | 8 GiB |
 | 16 KiB | 16 GiB |
 
-Do giới hạn packet-chain là 4 XDP segments, chunk 2 KiB hiện tại không chứa được worst-case frame
-9 KiB (`4 * 2048 = 8192`). Phương án dự kiến là chunk 4 KiB và giảm `NE_N_FRAMES` còn 524,288 để
+Do giới hạn packet-chain là 4 XDP segments, chunk 2 KiB baseline không chứa được worst-case frame
+9 KiB (`4 * 2048 = 8192`). Plumbing hiện đã đổi sang chunk 4 KiB và `NE_N_FRAMES` 524,288 để
 tổng UMEM vẫn khoảng 2 GiB. Một jumbo frame khoảng 9 KiB cần 3 segment 4 KiB; slot thứ tư là headroom
 cho Ethernet/VLAN/driver layout. Phải xác nhận driver thực tế không trả về hơn 4 descriptors.
 
@@ -325,7 +351,7 @@ MTU của bond/WAN và crypto overhead thực tế.
 |---|---|
 | `bpf/lan.c` | Tạo chương trình jumbo `SEC("xdp.frags")`; bỏ hard-drop 1500 trong jumbo mode; chỉ đọc header trong linear first fragment. Giữ program legacy. |
 | `bpf/wan.c` | Tạo chương trình jumbo `SEC("xdp.frags")`; giữ redirect marker và CFM; giữ program legacy. |
-| `Makefile` | Build object legacy và jumbo riêng, ví dụ `lan.o/wan.o` và `lan_frags.o/wan_frags.o`; thêm test mới. |
+| `Makefile` | BPF object hiện chứa cả section legacy và frags; chỉ tách object nếu toolchain/kernel đích chứng minh cần thiết. Thêm test mới. |
 | `src/core/iface/profile_xdp.c` | Chọn object/program legacy hoặc frags theo capability; fallback có log rõ; không attach frags mù quáng. |
 | `inc/core/iface/profile_iface_xdp.h` | Khai báo API chọn mode/capability nếu cần. |
 
@@ -386,7 +412,7 @@ src/core/dataplane/udp_frag.c
 | File | Thay đổi dự kiến |
 |---|---|
 | `inc/core/util/config.h` | Thêm jumbo mode/capability/runtime MTU fields hoặc cấu trúc riêng. |
-| `src/db/db_config.c` | Đọc default object legacy/jumbo và jumbo mode nếu cấu hình từ DB/env. |
+| `src/db/db_config.c` | Thêm jumbo mode/capability config nếu về sau cần; không cần hai đường dẫn object khi dùng chung object hiện tại. |
 | `main.c` | Validate config; reload phải từ chối thay mode cần rebuild UMEM nếu không restart dataplane an toàn. |
 | `systemd/network-encryptor.service` | Chỉ thêm `NE_JUMBO_MODE=off/auto/on` sau khi code hoàn chỉnh; mặc định rollout đầu là `off`. |
 
@@ -432,23 +458,26 @@ Quy tắc atomicity:
 
 Điều kiện qua phase: có kết quả baseline đủ để phát hiện regression.
 
-### Phase 1 — Nền tảng cho `xdp.frags`: packet-chain nhưng vẫn chạy legacy 1500
+### Phase 1 — Xác nhận nền tảng `xdp.frags` bằng traffic MTU 1500
 
-- Thêm abstraction packet-chain và unified release.
-- Chuyển toàn bộ 144 vị trí tham chiếu `ne_packet/addr/len` qua helper khi ownership có thể đổi.
-- `seg_count == 1` vẫn đi fast path như cũ.
-- Chưa bật `XDP_USE_SG`, chưa đổi wire format.
+- Dùng UMEM chunk 4 KiB nhưng giữ tổng UMEM 2 GiB.
+- Thử `XDP_USE_SG` + program `xdp.frags`, tự fallback legacy nếu không hỗ trợ.
+- Giữ MTU guard 1500 trong cả program frags.
+- Nhận diện và drop/recycle an toàn multi-buffer RX; chưa xử lý jumbo.
+- Giữ `struct ne_packet` 16 byte và đường xử lý single-descriptor như trước.
+- Chưa đổi wire format.
 
-Packet-chain là bước con đầu tiên bắt buộc của hạng mục `xdp.frags`: nếu đổi section BPF trước mà
-userspace vẫn coi mỗi descriptor là một packet thì jumbo frame sẽ bị tách sai thành nhiều packet.
+Trong phase này, nếu driver đưa multi-buffer vào RX thì userspace phải drop cả packet và trả toàn
+bộ UMEM segments, không được coi mỗi descriptor là một packet độc lập.
 
 Điều kiện qua phase: test MTU 1500 cho kết quả chức năng như baseline, không leak, hiệu năng giảm không
 quá ngưỡng đã thống nhất (đề xuất tối đa 1–2%).
 
-### Phase 2 — XDP/AF_XDP multi-buffer pass-through
+### Phase 2 — Packet-chain và XDP/AF_XDP multi-buffer pass-through
 
-- Build/load `xdp.frags` object riêng.
-- Thêm capability probe và `XDP_USE_SG` khi tạo XSK.
+- Thêm abstraction packet-chain và unified release.
+- Chuyển các đường ownership `ne_packet/addr/len` qua helper mà không làm phình fast path 1500.
+- Gỡ MTU guard 1500 chỉ sau khi packet-chain RX/TX hoàn chỉnh.
 - Implement RX/TX descriptor chain.
 - Test jumbo plain/bypass trước, chưa tích hợp crypto fragmentation.
 - Fallback legacy nếu probe hoặc bind thất bại.

@@ -12,8 +12,12 @@
 #define MAX_QUEUES     64
 
 #define NE_RING        16384u
-#define NE_FRAME       2048u
-#define NE_N_FRAMES    1048576u
+/* 4 KiB is an AF_XDP-supported UMEM chunk size.  Keep the total UMEM at 2 GiB
+ * while reserving enough room for a future 9K packet chain (up to 4 chunks). */
+#define NE_FRAME       4096u
+#define NE_N_FRAMES    524288u
+#define NE_PACKET_MAX_SEGS 4u
+#define NE_JUMBO_FRAME_MAX 9216u
 #define NE_BATCH_SIZE   64u
 
 #define NE_QUEUE_OVERRIDE 0
@@ -25,6 +29,14 @@
 #endif
 #ifndef XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD
 #define XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD (1U << 0)
+#endif
+#ifndef XDP_USE_SG
+#define XDP_USE_SG (1U << 4)
+#endif
+#ifndef XDP_PKT_CONTD
+/* UAPI value from linux/if_xdp.h.  Older distro kernel headers can expose
+ * struct xdp_desc without the multi-buffer continuation flag. */
+#define XDP_PKT_CONTD (1U << 0)
 #endif
 
 #include "core/util/cpu_map.h"
@@ -44,6 +56,11 @@ struct ne_packet {
     uint8_t local_idx;
     uint8_t tx_slot;
 };
+
+_Static_assert(sizeof(struct ne_packet) == 16u,
+               "MTU-1500 fast-path packet descriptor must stay cache-compact");
+_Static_assert(NE_FRAME * NE_PACKET_MAX_SEGS >= NE_JUMBO_FRAME_MAX,
+               "UMEM segment budget cannot hold the planned jumbo frame");
 
 struct ne_ring {
     struct ne_packet *buf;
@@ -72,6 +89,12 @@ struct ne_xsk_queue {
     struct xsk_ring_prod fq;
     struct xsk_ring_cons cq;
     uint32_t rx_pending;
+    /* Phase-1 safety: consume and recycle complete multi-buffer packets instead
+     * of misreading each segment as an independent MTU-1500 packet. */
+    uint64_t rx_reject_addrs[NE_BATCH_SIZE];
+    uint32_t rx_reject_count;
+    uint64_t rx_multibuf_dropped;
+    uint8_t rx_reject_chain;
 };
 
 struct ne_iface {
@@ -81,6 +104,7 @@ struct ne_iface {
     struct ne_xsk_queue queues[MAX_QUEUES];
     uint64_t tx_no_free;
     uint32_t xdp_flags;
+    uint8_t xdp_sg_enabled;
 };
 
 struct ne_pair {
@@ -132,6 +156,8 @@ int ne_pair_teardown_live(struct ne_pair *p);
 int ne_ring_init(struct ne_ring *r, uint32_t cap, int mpsc_pop);
 void ne_ring_destroy(struct ne_ring *r);
 int ne_ring_try_push(struct ne_ring *r, const struct ne_packet *pkt);
+int ne_ring_try_push_pair(struct ne_ring *r, const struct ne_packet *first,
+                          const struct ne_packet *second);
 int ne_ring_try_pop(struct ne_ring *r, struct ne_packet *pkt);
 uint32_t ne_ring_count(const struct ne_ring *r);
 

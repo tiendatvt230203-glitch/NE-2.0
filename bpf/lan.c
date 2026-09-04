@@ -17,8 +17,7 @@ struct {
     __type(value, __u32);
 } xsks_map SEC(".maps");
 
-SEC("xdp")
-int xdp_redirect_prog(struct xdp_md *ctx)
+static __always_inline int xdp_redirect_common(struct xdp_md *ctx, int legacy_mtu_guard)
 {
     void *data     = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
@@ -29,11 +28,13 @@ int xdp_redirect_prog(struct xdp_md *ctx)
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
 
-    if (eth->h_proto == bpf_htons(ETH_P_8021Q_VAL)) {
-        if (pkt_len > ETH_VLAN_FRAME_MAX)
+    if (legacy_mtu_guard) {
+        if (eth->h_proto == bpf_htons(ETH_P_8021Q_VAL)) {
+            if (pkt_len > ETH_VLAN_FRAME_MAX)
+                return XDP_DROP;
+        } else if (pkt_len > ETH_FRAME_MAX) {
             return XDP_DROP;
-    } else if (pkt_len > ETH_FRAME_MAX) {
-        return XDP_DROP;
+        }
     }
 
     if (eth->h_proto == bpf_htons(ETH_P_ARP_VAL)) {
@@ -54,6 +55,20 @@ redirect:
     ;
     __u32 qid = ctx->rx_queue_index;
     return bpf_redirect_map(&xsks_map, qid, 0);
+}
+
+SEC("xdp")
+int xdp_redirect_prog(struct xdp_md *ctx)
+{
+    return xdp_redirect_common(ctx, 1);
+}
+
+SEC("xdp.frags")
+int xdp_redirect_prog_frags(struct xdp_md *ctx)
+{
+    /* Phase 1 validates the 1500-byte dataplane on jumbo-capable plumbing.
+     * Remove this guard only when userspace packet-chain processing lands. */
+    return xdp_redirect_common(ctx, 1);
 }
 
 char _license[] SEC("license") = "GPL";

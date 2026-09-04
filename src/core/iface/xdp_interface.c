@@ -313,6 +313,30 @@ int ne_ring_try_push(struct ne_ring *r, const struct ne_packet *pkt)
     return 0;
 }
 
+int ne_ring_try_push_pair(struct ne_ring *r, const struct ne_packet *first,
+                          const struct ne_packet *second)
+{
+    uint32_t head, tail;
+
+    if (!r || !first || !second || r->cap < 2u)
+        return -1;
+
+    pthread_spin_lock(&r->push_lock);
+    head = __atomic_load_n(&r->head, __ATOMIC_RELAXED);
+    tail = __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE);
+    if ((uint32_t)(head - tail) > r->cap - 2u) {
+        pthread_spin_unlock(&r->push_lock);
+        return -1;
+    }
+    r->buf[head & r->mask] = *first;
+    r->buf[(head + 1u) & r->mask] = *second;
+    /* Publish both fragments together so another producer cannot interleave
+     * a datagram and the consumer can never observe only the first half. */
+    __atomic_store_n(&r->head, head + 2u, __ATOMIC_RELEASE);
+    pthread_spin_unlock(&r->push_lock);
+    return 0;
+}
+
 // Pop gói tin đi ra khỏi ring
 int ne_ring_try_pop(struct ne_ring *r, struct ne_packet *pkt)
 {
@@ -554,6 +578,8 @@ static void zero_queue_rings(struct ne_xsk_queue *slot, int preserve_fq_cq)
     if (!slot)
         return;
     slot->rx_pending = 0;
+    slot->rx_reject_count = 0;
+    slot->rx_reject_chain = 0;
     memset(&slot->rx, 0, sizeof(slot->rx));
     memset(&slot->tx, 0, sizeof(slot->tx));
     if (!preserve_fq_cq) {
@@ -591,6 +617,8 @@ static void reclaim_rx_queue(struct ne_xsk_queue *slot, struct ne_pool *pool)
         }
         xsk_ring_cons__release(&slot->rx, pending);
         slot->rx_pending = 0;
+        slot->rx_reject_count = 0;
+        slot->rx_reject_chain = 0;
     }
 
     while ((n = xsk_ring_cons__peek(&slot->rx, NE_BATCH_SIZE, &idx)) > 0) {
@@ -791,10 +819,11 @@ static void clear_iface_queues_after_delete(struct ne_pair *p, struct ne_iface *
     iface->ifname[0] = '\0';
     iface->queue_count = 0;
     iface->xdp_flags = 0;
+    iface->xdp_sg_enabled = 0;
 }
 
 static int xsk_create_queue(struct ne_pair *p, struct ne_iface *iface, const char *ifname,
-                            int q, uint32_t xdp_flags)
+                            int q, uint32_t xdp_flags, int use_sg)
 {
     struct ne_xsk_queue *slot = &iface->queues[q];
     int preserve = is_umem_fq_owner_queue(p, iface, q);
@@ -804,7 +833,8 @@ static int xsk_create_queue(struct ne_pair *p, struct ne_iface *iface, const cha
         .libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
         .xdp_flags = xdp_flags,
         /* Toggle AF_XDP mode here only: XDP_COPY (ixgbe) or XDP_ZEROCOPY (ice). */
-        .bind_flags = XDP_COPY | XDP_USE_NEED_WAKEUP,
+        .bind_flags = XDP_COPY | XDP_USE_NEED_WAKEUP |
+            (use_sg ? XDP_USE_SG : 0u),
     };
 
     zero_queue_rings(slot, preserve);
@@ -826,13 +856,13 @@ static void open_iface_queues_rollback(struct ne_pair *p, struct ne_iface *iface
     iface->ifindex = 0;
     iface->ifname[0] = '\0';
     iface->xdp_flags = 0;
+    iface->xdp_sg_enabled = 0;
 }
 
 static int open_iface_queues(struct ne_pair *p, struct ne_iface *iface,
                              const char *ifname, int queue_count)
 {
     const uint32_t mode = XDP_FLAGS_DRV_MODE;
-    int q;
     int ret = 0;
 
     iface->ifindex = (int)if_nametoindex(ifname);
@@ -843,23 +873,44 @@ static int open_iface_queues(struct ne_pair *p, struct ne_iface *iface,
     }
     strncpy(iface->ifname, ifname, sizeof(iface->ifname) - 1);
     iface->ifname[sizeof(iface->ifname) - 1] = '\0';
-    iface->queue_count = queue_count;
-    iface->xdp_flags = 0;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        int use_sg = attempt == 0;
+        int q;
 
-    for (q = 0; q < queue_count; q++) {
-        ret = xsk_create_queue(p, iface, ifname, q, mode);
-        if (ret) {
-            open_iface_queues_rollback(p, iface, q);
-            interface_log_xsk_context(ifname, q, ret);
-            iface->queue_count = 0;
-            iface->ifindex = 0;
-            iface->ifname[0] = '\0';
-            iface->xdp_flags = 0;
-            return -1;
+        iface->ifindex = (int)if_nametoindex(ifname);
+        strncpy(iface->ifname, ifname, sizeof(iface->ifname) - 1);
+        iface->ifname[sizeof(iface->ifname) - 1] = '\0';
+        iface->queue_count = queue_count;
+        iface->xdp_flags = 0;
+        iface->xdp_sg_enabled = 0;
+
+        for (q = 0; q < queue_count; q++) {
+            ret = xsk_create_queue(p, iface, ifname, q, mode, use_sg);
+            if (ret)
+                break;
         }
+        if (q == queue_count) {
+            iface->xdp_flags = mode;
+            iface->xdp_sg_enabled = use_sg ? 1u : 0u;
+            fprintf(stderr, "[DP] XSK %s mode=%s frame=%u queues=%d\n",
+                    ifname, use_sg ? "xdp.frags" : "legacy",
+                    p->frame_size, queue_count);
+            fflush(stderr);
+            return 0;
+        }
+
+        open_iface_queues_rollback(p, iface, q);
+        if (use_sg) {
+            fprintf(stderr,
+                    "[DP] XSK %s XDP_USE_SG unavailable (%d), fallback legacy\n",
+                    ifname, ret);
+            fflush(stderr);
+            continue;
+        }
+        interface_log_xsk_context(ifname, q, ret);
+        return -1;
     }
-    iface->xdp_flags = mode;
-    return 0;
+    return -1;
 }
 
 static void prefill_queue(struct ne_pair *p, struct ne_xsk_queue *slot, uint32_t want)
@@ -891,11 +942,72 @@ static void prefill_iface(struct ne_pair *p, struct ne_iface *iface, uint32_t wa
         prefill_queue(p, &iface->queues[q], want_per_queue);
 }
 
+static uint32_t prefill_per_queue(const struct ne_pair *p, int queue_total)
+{
+    uint64_t budget;
+    uint64_t per_queue;
+
+    if (!p || queue_total <= 0)
+        return NE_BATCH_SIZE;
+    /* Keep 25% of UMEM outside FQ rings for TX, crypto split and bursts. */
+    budget = ((uint64_t)p->n_frames * 3u) / 4u;
+    per_queue = budget / (uint32_t)queue_total;
+    if (per_queue > NE_FQ_PREFILL)
+        per_queue = NE_FQ_PREFILL;
+    if (per_queue < NE_BATCH_SIZE)
+        per_queue = NE_BATCH_SIZE;
+    return (uint32_t)per_queue;
+}
+
+static uint32_t hotplug_prefill_per_queue(struct ne_pair *p, int new_queue_count)
+{
+    uint32_t planned;
+    uint32_t free_now;
+    uint32_t reserve_limited;
+    int total;
+
+    if (!p || new_queue_count <= 0)
+        return NE_BATCH_SIZE;
+    total = p->local_queue_total + p->wan_queue_total;
+    planned = prefill_per_queue(p, total);
+    free_now = ne_pool_free_count(p);
+    reserve_limited = free_now / ((uint32_t)new_queue_count * 2u);
+    if (planned > reserve_limited)
+        planned = reserve_limited;
+    return planned;
+}
+
 int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
 {
-#define NE_TRY(expr) do { if (expr) goto fail; } while (0)
-    if (!p || !cfg || cfg->local_count <= 0)
+#define NE_OPEN_TRY(expr, stage_name, interface_name) do { \
+        fail_stage = (stage_name); \
+        fail_ifname = (interface_name); \
+        errno = 0; \
+        fail_rc = (expr); \
+        fail_errno = errno; \
+        if (fail_rc != 0) \
+            goto fail; \
+    } while (0)
+#define NE_OPEN_ABORT(stage_name, interface_name, error_code) do { \
+        fail_stage = (stage_name); \
+        fail_ifname = (interface_name); \
+        fail_rc = (error_code); \
+        fail_errno = errno; \
+        goto fail; \
+    } while (0)
+    const char *fail_stage = "input-validation";
+    const char *fail_ifname = NULL;
+    int fail_rc = -1;
+    int fail_errno = 0;
+
+    if (!p || !cfg || cfg->local_count <= 0) {
+        fprintf(stderr,
+                "[DP][FATAL] ne_pair_open invalid input: pair=%s config=%s local_count=%d\n",
+                p ? "ok" : "null", cfg ? "ok" : "null",
+                cfg ? cfg->local_count : -1);
+        fflush(stderr);
         return -1;
+    }
 
     memset(p, 0, sizeof(*p));
     p->umem_fq_li = -1;
@@ -907,7 +1019,11 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
     if (p->wan_count > MAX_INTERFACES)
         p->wan_count = MAX_INTERFACES;
     struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
-    (void)setrlimit(RLIMIT_MEMLOCK, &rl);
+    if (setrlimit(RLIMIT_MEMLOCK, &rl) != 0) {
+        fprintf(stderr, "[DP][WARN] setrlimit(RLIMIT_MEMLOCK) failed: %s (%d)\n",
+                strerror(errno), errno);
+        fflush(stderr);
+    }
 
     p->frame_size = NE_FRAME;
     p->xdp_flags = XDP_FLAGS_DRV_MODE;
@@ -917,16 +1033,22 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
 
     for (int i = 0; i < p->local_count; i++) {
         int nq = resolve_iface_queue_count(cfg->locals[i].ifname);
-        NE_TRY(apply_iface_queue_count(cfg->locals[i].ifname, nq));
+        NE_OPEN_TRY(interface_preflight(cfg->locals[i].ifname),
+                    "LAN-preflight", cfg->locals[i].ifname);
+        NE_OPEN_TRY(apply_iface_queue_count(cfg->locals[i].ifname, nq),
+                    "LAN-queue-config", cfg->locals[i].ifname);
         p->locals[i].queue_count = nq;
         p->local_queue_total += nq;
     }
     for (int di = 0; di < p->wan_count; di++) {
         int ci = config_wan_dp_to_cfg(cfg, di);
         if (ci < 0)
-            goto fail;
+            NE_OPEN_ABORT("WAN-config-map", NULL, -1);
         int nq = resolve_iface_queue_count(cfg->wans[ci].ifname);
-        NE_TRY(apply_iface_queue_count(cfg->wans[ci].ifname, nq));
+        NE_OPEN_TRY(interface_preflight(cfg->wans[ci].ifname),
+                    "WAN-preflight", cfg->wans[ci].ifname);
+        NE_OPEN_TRY(apply_iface_queue_count(cfg->wans[ci].ifname, nq),
+                    "WAN-queue-config", cfg->wans[ci].ifname);
         p->wans[di].queue_count = nq;
         p->wan_queue_total += nq;
     }
@@ -934,24 +1056,34 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
     p->n_frames = NE_N_FRAMES;
     p->bufsize = (size_t)p->n_frames * (size_t)p->frame_size;
 
+    fprintf(stderr,
+            "[DP] UMEM frame=%u frames=%u bytes=%zu packet_max_segs=%u "
+            "jumbo_max=%u phase=mtu1500-validation\n",
+            p->frame_size, p->n_frames, p->bufsize,
+            NE_PACKET_MAX_SEGS, NE_JUMBO_FRAME_MAX);
+    fflush(stderr);
+
     p->bufs = mmap(NULL, p->bufsize, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p->bufs == MAP_FAILED)
-        return -1;
+        NE_OPEN_ABORT("UMEM-mmap", NULL, -errno);
 
-    NE_TRY(pool_init(&p->pool, p->n_frames));
+    NE_OPEN_TRY(pool_init(&p->pool, p->n_frames), "UMEM-pool-init", NULL);
     for (uint32_t i = 0; i < p->n_frames; i++) {
         uint64_t addr = (uint64_t)i * p->frame_size;
         (void)pool_push(&p->pool, &addr, 1);
     }
 
-    for (int i = 0; i < p->local_count; i++)
-        NE_TRY(interface_set_promisc(cfg->locals[i].ifname));
+    for (int i = 0; i < p->local_count; i++) {
+        NE_OPEN_TRY(interface_set_promisc(cfg->locals[i].ifname),
+                    "LAN-promisc-on", cfg->locals[i].ifname);
+    }
     for (int di = 0; di < p->wan_count; di++) {
         int ci = config_wan_dp_to_cfg(cfg, di);
         if (ci < 0)
-            goto fail;
-        NE_TRY(interface_set_promisc(cfg->wans[ci].ifname));
+            NE_OPEN_ABORT("WAN-config-map-promisc", NULL, -1);
+        NE_OPEN_TRY(interface_set_promisc(cfg->wans[ci].ifname),
+                    "WAN-promisc-on", cfg->wans[ci].ifname);
     }
 
     /* Scrub stale XDP before AF_XDP bind (delete→create EINVAL -22). */
@@ -960,7 +1092,7 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
     for (int di = 0; di < p->wan_count; di++) {
         int ci = config_wan_dp_to_cfg(cfg, di);
         if (ci < 0)
-            goto fail;
+            NE_OPEN_ABORT("WAN-config-map-XDP-scrub", NULL, -1);
         profile_iface_xdp_detach_ifname(cfg->wans[ci].ifname);
     }
     usleep(50000);
@@ -973,9 +1105,10 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
         .flags = 0,
     };
 
-    NE_TRY(xsk_umem__create(&p->umem, p->bufs, p->bufsize,
-                            &p->locals[0].queues[0].fq,
-                            &p->locals[0].queues[0].cq, &ucfg));
+    NE_OPEN_TRY(xsk_umem__create(&p->umem, p->bufs, p->bufsize,
+                                 &p->locals[0].queues[0].fq,
+                                 &p->locals[0].queues[0].cq, &ucfg),
+                "XSK-UMEM-create", cfg->locals[0].ifname);
     p->umem_fq_li = 0;
     p->umem_fq_q = 0;
 
@@ -993,13 +1126,14 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
             rc = open_iface_queues(p, &p->locals[i], cfg->locals[i].ifname,
                                    p->locals[i].queue_count);
         }
-        NE_TRY(rc);
+        if (rc)
+            NE_OPEN_ABORT("LAN-XSK-create", cfg->locals[i].ifname, rc);
     }
     for (int di = 0; di < p->wan_count; di++) {
         int ci = config_wan_dp_to_cfg(cfg, di);
         int rc;
         if (ci < 0)
-            goto fail;
+            NE_OPEN_ABORT("WAN-config-map-XSK", NULL, -1);
         rc = open_iface_queues(p, &p->wans[di], cfg->wans[ci].ifname,
                                p->wans[di].queue_count);
         if (rc) {
@@ -1012,10 +1146,16 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
             rc = open_iface_queues(p, &p->wans[di], cfg->wans[ci].ifname,
                                    p->wans[di].queue_count);
         }
-        NE_TRY(rc);
+        if (rc)
+            NE_OPEN_ABORT("WAN-XSK-create", cfg->wans[ci].ifname, rc);
     }
 
-    uint32_t prefill = NE_FQ_PREFILL;
+    uint32_t prefill = prefill_per_queue(
+        p, p->local_queue_total + p->wan_queue_total);
+
+    fprintf(stderr, "[DP] FQ prefill=%u per_queue total_queues=%d reserve=25%%\n",
+            prefill, p->local_queue_total + p->wan_queue_total);
+    fflush(stderr);
 
     for (int i = 0; i < p->local_count; i++)
         prefill_iface(p, &p->locals[i], prefill);
@@ -1030,10 +1170,29 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
     return 0;
 
 fail:
+    {
+        int report_errno = fail_errno;
+
+        if (report_errno == 0 && fail_rc < 0 && fail_rc >= -4095)
+            report_errno = -fail_rc;
+        fprintf(stderr,
+                "[DP][FATAL] ne_pair_open failed stage=%s iface=%s rc=%d",
+                fail_stage ? fail_stage : "unknown",
+                fail_ifname && fail_ifname[0] ? fail_ifname : "-", fail_rc);
+        if (report_errno > 0)
+            fprintf(stderr, " errno=%d (%s)", report_errno, strerror(report_errno));
+        if (fail_ifname && fail_ifname[0])
+            fprintf(stderr, " ifindex=%u mtu=%d queues=%d",
+                    if_nametoindex(fail_ifname), interface_get_mtu(fail_ifname),
+                    interface_get_queue_count(fail_ifname));
+        fputc('\n', stderr);
+        fflush(stderr);
+    }
     profile_iface_xdp_detach_config(cfg);
     ne_pair_close(p, cfg);
     return -1;
-#undef NE_TRY
+#undef NE_OPEN_ABORT
+#undef NE_OPEN_TRY
 }
 
 void ne_pair_close(struct ne_pair *p, const struct app_config *cfg)
@@ -1151,7 +1310,7 @@ int ne_pair_plumb_local(struct ne_pair *p, const struct app_config *cfg, int cfg
     if (pair_li >= p->local_count)
         p->local_count = pair_li + 1;
     p->local_queue_total += nq;
-    prefill_iface(p, &p->locals[pair_li], NE_FQ_PREFILL);
+    prefill_iface(p, &p->locals[pair_li], hotplug_prefill_per_queue(p, nq));
     p->local_live[pair_li] = 1;
     return 0;
 }
@@ -1194,7 +1353,7 @@ int ne_pair_plumb_wan_dp(struct ne_pair *p, const struct app_config *cfg, int cf
     if (dp_slot >= p->wan_count)
         p->wan_count = dp_slot + 1;
     p->wan_queue_total += nq;
-    prefill_iface(p, &p->wans[dp_slot], NE_FQ_PREFILL);
+    prefill_iface(p, &p->wans[dp_slot], hotplug_prefill_per_queue(p, nq));
     p->wan_live[dp_slot] = 1;
     return 0;
 }
@@ -1291,17 +1450,45 @@ static int recv_queue(struct ne_xsk_queue *slot, struct ne_packet *out, uint32_t
 {
     uint32_t idx = 0;
     uint32_t n = xsk_ring_cons__peek(&slot->rx, max, &idx);
+    uint32_t out_n = 0;
+
     for (uint32_t i = 0; i < n; i++) {
         const struct xdp_desc *d = xsk_ring_cons__rx_desc(&slot->rx, idx + i);
-        out[i].addr = d->addr;
-        out[i].len = d->len;
-        out[i].dir = dir;
-        out[i].wan_idx = wan_idx;
-        out[i].local_idx = local_idx;
-        out[i].tx_slot = 0;
+        int continued = (d->options & XDP_PKT_CONTD) != 0;
+
+        if (slot->rx_reject_chain || continued) {
+            if (slot->rx_reject_count < NE_BATCH_SIZE)
+                slot->rx_reject_addrs[slot->rx_reject_count++] = d->addr;
+            slot->rx_reject_chain = continued ? 1u : 0u;
+            if (!continued)
+                slot->rx_multibuf_dropped++;
+            continue;
+        }
+
+        out[out_n].addr = d->addr;
+        out[out_n].len = d->len;
+        out[out_n].dir = dir;
+        out[out_n].wan_idx = wan_idx;
+        out[out_n].local_idx = local_idx;
+        out[out_n].tx_slot = 0;
+        out_n++;
     }
     slot->rx_pending = n;
-    return (int)n;
+    return (int)out_n;
+}
+
+static void release_rx_queue(struct ne_xsk_queue *slot, struct ne_pool *pool)
+{
+    if (!slot || !pool)
+        return;
+    if (slot->rx_pending) {
+        xsk_ring_cons__release(&slot->rx, slot->rx_pending);
+        slot->rx_pending = 0;
+    }
+    if (slot->rx_reject_count) {
+        (void)pool_push(pool, slot->rx_reject_addrs, slot->rx_reject_count);
+        slot->rx_reject_count = 0;
+    }
 }
 
 static int xsk_queue_for_rx_slot(int q, int rx_slot, int nq, int rx_slots)
@@ -1381,10 +1568,7 @@ void ne_recv_release_local_slot(struct ne_pair *p, int rx_slot)
         for (int q = 0; q < iface->queue_count; q++) {
             if (!xsk_queue_for_rx_slot(q, rx_slot, iface->queue_count, (int)NE_RX_LAN_SLOTS))
                 continue;
-            if (iface->queues[q].rx_pending) {
-                xsk_ring_cons__release(&iface->queues[q].rx, iface->queues[q].rx_pending);
-                iface->queues[q].rx_pending = 0;
-            }
+            release_rx_queue(&iface->queues[q], &p->pool);
         }
     }
 }
@@ -1399,10 +1583,7 @@ void ne_recv_release_wan_slot(struct ne_pair *p, int rx_slot)
         for (int q = 0; q < iface->queue_count; q++) {
             if (!xsk_queue_for_rx_slot(q, rx_slot, iface->queue_count, (int)NE_RX_WAN_SLOTS))
                 continue;
-            if (iface->queues[q].rx_pending) {
-                xsk_ring_cons__release(&iface->queues[q].rx, iface->queues[q].rx_pending);
-                iface->queues[q].rx_pending = 0;
-            }
+            release_rx_queue(&iface->queues[q], &p->pool);
         }
     }
 }
@@ -1670,6 +1851,7 @@ static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src, uint32
         struct xdp_desc *d = xsk_ring_prod__tx_desc(&slot->tx, idx + i);
         d->addr = jobs[i].addr;
         d->len = jobs[i].len > max_frame ? max_frame : jobs[i].len;
+        d->options = 0;
     }
 
     xsk_ring_prod__submit(&slot->tx, popped);
