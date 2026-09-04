@@ -10,6 +10,7 @@
 #include "../../../inc/core/failover/wan_failover.h"
 #include "../../../inc/crypto/crypto_option.h"
 #include "../../../inc/crypto/eth_parse.h"
+#include "../../../inc/crypto/traffic_crypto.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -22,6 +23,7 @@
 #define ARP_DEFAULT_WIRE_ID      250u
 #define ARP_DEFAULT_AES_BITS     256
 #define ARP_ETH_HDR_LEN          14u
+#define ARP_KEY_FINGERPRINT_LEN  8u
 
 /* 1 = mã hóa ARP L2-PQC (key/option riêng), độc lập bảng policy/data crypto.
  * Decrypt vẫn chạy nếu wire có ARP marker (peer vẫn encrypt). */
@@ -33,12 +35,26 @@ static struct packet_crypto_ctx g_arp_crypto_ctx;
 static int g_arp_crypto_ctx_ready;
 static int g_arp_key_loaded;
 static uint8_t g_arp_default_master_key[AES_MAX_KEY_SIZE];
+static char g_arp_key_fingerprint[ARP_KEY_FINGERPRINT_LEN + 1u];
 /* Per-LAN: 1 if last successful ARP TX used failover backup WAN. */
 static uint8_t g_arp_lan_on_backup[MAX_INTERFACES];
 
 /* 32-byte ARP master key: paste 64 hex chars (0-9a-f). Both peers must match. */
 static const char g_arp_hardcoded_master_key_hex[] =
     "73214a9ce15d2fb816c73b90ad44f26e580da137cb7f2495ee6318d489ba05cf";
+
+static int arp_key_fingerprint_update(void)
+{
+    uint8_t digest[32];
+
+    if (trf_calculate_digest(DIGEST_TYPE_SHA256,
+                             g_arp_default_master_key,
+                             AES_MAX_KEY_SIZE, digest) != TRF_PQC_OK)
+        return -1;
+    snprintf(g_arp_key_fingerprint, sizeof(g_arp_key_fingerprint),
+             "%02x%02x%02x%02x", digest[0], digest[1], digest[2], digest[3]);
+    return 0;
+}
 
 static uint64_t arp_monotonic_ms(void)
 {
@@ -56,10 +72,13 @@ static void arp_crypto_ctx_init(const struct app_config *cfg)
         if (parse_hex_bytes_pub(g_arp_hardcoded_master_key_hex,
                                 g_arp_default_master_key, AES_MAX_KEY_SIZE) != 0) {
             fprintf(stderr,
-                    "[ARP] bad key hex (need %d hex chars, got %zu): %s\n",
+                    "[ARP] bad key hex (need %d hex chars, got %zu)\n",
                     AES_MAX_KEY_SIZE * 2,
-                    strlen(g_arp_hardcoded_master_key_hex),
-                    g_arp_hardcoded_master_key_hex);
+                    strlen(g_arp_hardcoded_master_key_hex));
+            return;
+        }
+        if (arp_key_fingerprint_update() != 0) {
+            fprintf(stderr, "[ARP] cannot calculate key fingerprint\n");
             return;
         }
         g_arp_key_loaded = 1;
@@ -197,8 +216,10 @@ void arp_bridge_reload_policies(struct app_config *cfg)
         return;
     arp_crypto_ctx_init(cfg);
     fprintf(stderr,
-            "[ARP] mode=mac-fdb+flood-whohas-only | arp_encrypt=%d (policy-independent) | key=arp-default | opt=L2-PQC/ARP\n",
-            ARP_ENCRYPT_ENABLE);
+            "[ARP] mode=mac-fdb+flood-whohas-only | arp_encrypt=%d "
+            "(policy-independent) | key=arp-default | key_fp=%s | opt=L2-PQC/ARP\n",
+            ARP_ENCRYPT_ENABLE,
+            g_arp_key_loaded ? g_arp_key_fingerprint : "unavailable");
 }
 
 static struct ne_ring *arp_mid_to_local_ring(struct forwarder *fwd, int li)
