@@ -16,6 +16,14 @@
 #include <time.h>
 #include <unistd.h>
 
+/* The deployed headers can predate this API even when the linked libbpf
+ * exports it.  XDP multi-buffer programs must carry this load flag; the ELF
+ * section name alone is not handled by every deployed libbpf version. */
+#ifndef BPF_F_XDP_HAS_FRAGS
+#define BPF_F_XDP_HAS_FRAGS (1U << 5)
+#endif
+extern int bpf_program__set_flags(struct bpf_program *prog, __u32 flags);
+
 static void profile_xdp_stop_log(const char *step, const char *ifname)
 {
     struct timespec ts;
@@ -238,6 +246,18 @@ static int open_bpf_object(const char *path, struct bpf_object **obj_out,
         other_prog = bpf_object__find_program_by_name(obj, "xdp_wan_redirect_prog");
     if (other_prog)
         bpf_program__set_autoload(other_prog, false);
+    if (strstr(prog_name, "_frags") != NULL) {
+        int rc = bpf_program__set_flags(prog, BPF_F_XDP_HAS_FRAGS);
+
+        if (rc != 0) {
+            fprintf(stderr,
+                    "[PROFILE-XDP] cannot enable BPF_F_XDP_HAS_FRAGS: "
+                    "%s program=%s rc=%d\n",
+                    open_path, prog_name, rc);
+            bpf_object__close(obj);
+            return -1;
+        }
+    }
     if (bpf_object__load(obj) != 0) {
         fprintf(stderr, "[PROFILE-XDP] bpf load failed: %s program=%s\n",
                 open_path, prog_name);
