@@ -5,14 +5,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define L2_CRYPTO_MTU 1500u
-#define L2_FRAG_TABLE_SIZE 4096
+#define L2_CRYPTO_MTU 9000u
+#define L2_CRYPTO_DATA_OVERHEAD 29u
+#define L2_CRYPTO_UDP_OVERHEAD  46u
+#define L2_FRAG_TABLE_SIZE 256
 #define L2_FRAG_TIMEOUT_NS (200ULL * 1000000ULL)
 
 enum l2_crypto_proto {
     L2_PROTO_DATA = 0,
     L2_PROTO_UDP,
-    L2_PROTO_ARP,
 };
 
 enum l2_crypto_proto l2_crypto_classify(uint8_t ip_proto);
@@ -22,10 +23,6 @@ uint8_t l2_crypto_worker(void);
 void l2_crypto_udp_set_tx_seq(uint32_t seq);
 int l2_crypto_udp_tx_meta(uint32_t *epoch, uint32_t *seq,
                           uint32_t *datagram_id);
-void l2_crypto_udp_clear_rx_meta(void);
-void l2_crypto_udp_set_rx_meta(uint32_t epoch, uint32_t seq);
-int l2_crypto_udp_take_rx_meta(uint32_t *epoch, uint32_t *seq);
-
 int l2_crypto_need_udp_split(uint32_t packet_len);
 int l2_crypto_split_udp(struct packet_crypto_ctx *ctx,
                         uint8_t *packet, uint32_t packet_len,

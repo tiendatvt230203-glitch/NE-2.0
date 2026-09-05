@@ -16,11 +16,11 @@ TARGET  = network-encryptor
 
 APP_SRC = main.c \
           src/core/forwarder/forwarder.c \
-          src/core/dataplane/arp_bridge.c src/core/dataplane/crypto_route.c \
+          src/core/dataplane/crypto_route.c \
           src/core/dataplane/idle.c src/core/dataplane/local_egress.c \
-          src/core/dataplane/packet_util.c src/core/dataplane/udp_reorder.c \
+          src/core/dataplane/packet_util.c \
           src/core/dataplane/wan_ingress.c src/core/iface/xdp_attach.c \
-          src/core/iface/xdp_interface.c src/core/flow/flow_table.c \
+          src/core/iface/xdp_interface.c \
           src/core/util/static_config.c src/core/util/cpu_map.c \
           src/crypto/common/eth_parse.c \
           src/crypto/common/packet_crypto.c src/crypto/pqc/pqc_l2_option.c \
@@ -42,6 +42,7 @@ $(TARGET): $(APP_OBJ)
 
 $(LIB_DIR)/%.o: bpf/%.c
 	$(CLANG) $(BPF_CFLAGS) -I$(KERNEL_HEADERS) -I./include -c $< -o $@
+
 
 clean:
 	rm -rf network-encryptor src/*.o src/core/*/*.o src/crypto/common/*.o \

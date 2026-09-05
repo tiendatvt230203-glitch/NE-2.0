@@ -11,8 +11,4 @@ int dataplane_local_needs_mid(struct forwarder *fwd, const uint8_t *pkt, uint32_
                               int local_idx);
 int dataplane_wan_needs_mid(struct forwarder *fwd, const uint8_t *pkt, uint32_t len);
 
-void dataplane_bond_reorder_configure(struct forwarder *fwd);
-void dataplane_bond_reorder_gc(struct forwarder *fwd, int worker_idx);
-void dataplane_bond_reorder_reset(struct forwarder *fwd, int worker_idx);
-
 #endif

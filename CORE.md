@@ -6,27 +6,29 @@ MAC-learning code.
 
 Core path:
 
-1. AF_XDP receives on two LAN and two WAN interfaces using the existing
+1. AF_XDP receives on one LAN and one WAN interface using the existing
    multi-core RX/crypto/TX pipeline.
-2. Every LAN frame is encrypted with the single 256-bit key in
+2. BPF redirects only IPv4 TCP, UDP, ICMP and OSPF. ARP and all other
+   protocols, including tagged VLAN frames, use the normal kernel bridge path.
+3. The selected frames are encrypted with the single 256-bit key in
    `src/core/util/static_config.c`.
-3. IPv4 flows move between WANs in equal 120 KB windows. There are no weights.
-4. Oversized encrypted UDP is split into two wire frames. The receiver
-   authenticates, reassembles and reorders UDP before LAN TX.
-5. Other L2 IPv4 traffic is authenticated/decrypted and sent directly.
-6. ARP uses the same key and a dedicated encrypted EtherType.
-7. WAN-to-LAN selection uses only the fixed client-MAC table.
+4. IPv4 input accepts every valid `total_length` up to `9000`, including
+   the full `1501..8999` range. Encrypted non-UDP output must still fit WAN MTU;
+   TCP relies on MSS negotiation, and oversized ICMP/OSPF output is dropped.
+5. UDP is split only if encrypted length exceeds 9014 bytes (14-byte Ethernet
+   header plus WAN MTU 9000); equality stays in one frame. Both fragments are authenticated
+   before being reassembled at the receiver. There is no reorder/hold buffer.
+6. TCP SYN MSS is clamped so encrypted TCP remains within WAN MTU 9000.
+7. TCP, ICMP and OSPF are authenticated/decrypted and sent directly.
 
 The wire header contains no policy/key ID. It is:
 
 ```text
-Ethernet/VLAN | encrypted EtherType | crypto-worker ID | nonce | ciphertext | GCM tag
+Ethernet | encrypted EtherType | crypto-worker ID | nonce | ciphertext | GCM tag
 ```
 
-Before building, edit `client_macs` in `src/core/util/static_config.c` separately
-for each appliance. The single `core_key` value must be identical on both.
-All four configured NICs must already be UP with MTU 9000 or greater. The
-current validation phase still accepts plaintext input frames up to 1500.
+The single `core_key` value must be identical on both appliances. The configured
+LAN and WAN NICs must already be UP with MTU exactly 9000.
 
 ```sh
 make clean

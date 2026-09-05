@@ -20,9 +20,6 @@ int dp_udp_next_tx_seq(const uint8_t *pkt, uint32_t len, uint32_t *seq_out);
 
 /* Learn/lookup a decrypted flow and return its sticky, independently balanced TX slot. */
 int dp_flow_pick_tx_slot(const uint8_t *pkt, uint32_t len, int worker_hint);
-int dp_udp_pick_tx_slot(uint32_t src_ip, uint32_t dst_ip,
-                        uint16_t src_port, uint16_t dst_port,
-                        int worker_hint);
 void dp_route_set_active_tx_slots(uint32_t slots);
 
 /* Stable packet hash to TX slot for direct drop/control handling. */

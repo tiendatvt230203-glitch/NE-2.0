@@ -12,8 +12,7 @@
 #define MAX_QUEUES     64
 
 #define NE_RING        16384u
-/* 4 KiB is an AF_XDP-supported UMEM chunk size.  Keep the total UMEM at 2 GiB
- * while reserving enough room for a future 9K packet chain (up to 4 chunks). */
+/* A logical 9K packet is carried by up to four 4K UMEM chunks. */
 #define NE_FRAME       4096u
 #define NE_N_FRAMES    524288u
 #define NE_PACKET_MAX_SEGS 4u
@@ -50,15 +49,17 @@ enum ne_packet_dir {
 
 struct ne_packet {
     uint64_t addr;
+    uint64_t seg_addr[NE_PACKET_MAX_SEGS - 1u];
     uint32_t len;
+    uint16_t seg_len[NE_PACKET_MAX_SEGS];
+    uint16_t seg_cap[NE_PACKET_MAX_SEGS];
     uint8_t dir;
     uint8_t wan_idx;
     uint8_t local_idx;
     uint8_t tx_slot;
+    uint8_t nsegs;
 };
 
-_Static_assert(sizeof(struct ne_packet) == 16u,
-               "MTU-1500 fast-path packet descriptor must stay cache-compact");
 _Static_assert(NE_FRAME * NE_PACKET_MAX_SEGS >= NE_JUMBO_FRAME_MAX,
                "UMEM segment budget cannot hold the planned jumbo frame");
 
@@ -89,12 +90,11 @@ struct ne_xsk_queue {
     struct xsk_ring_prod fq;
     struct xsk_ring_cons cq;
     uint32_t rx_pending;
-    /* Phase-1 safety: consume and recycle complete multi-buffer packets instead
-     * of misreading each segment as an independent MTU-1500 packet. */
-    uint64_t rx_reject_addrs[NE_BATCH_SIZE];
+    uint64_t rx_reject_addrs[NE_BATCH_SIZE + NE_PACKET_MAX_SEGS];
     uint32_t rx_reject_count;
-    uint64_t rx_multibuf_dropped;
-    uint8_t rx_reject_chain;
+    uint64_t rx_chain_dropped;
+    struct ne_packet rx_chain;
+    uint8_t rx_chain_invalid;
 };
 
 struct ne_iface {
@@ -174,6 +174,11 @@ int ne_tx_drain_wan_all(struct ne_pair *p, struct ne_ring *srcs[], int src_count
                         int wan_idx, int tx_slot);
 
 void *ne_packet_data(struct ne_pair *p, uint64_t addr);
+int ne_packet_linearize(struct ne_pair *p, const struct ne_packet *pkt,
+                        uint8_t *dst, uint32_t dst_size);
+int ne_packet_write(struct ne_pair *p, struct ne_packet *pkt,
+                    const uint8_t *src, uint32_t len);
+void ne_packet_free(struct ne_pair *p, struct ne_packet *pkt);
 int ne_frame_alloc(struct ne_pair *p, uint64_t *addr_out);
 uint32_t ne_frame_alloc_batch(struct ne_pair *p, uint64_t *addrs_out, uint32_t max_n);
 void ne_frame_free(struct ne_pair *p, uint64_t addr);

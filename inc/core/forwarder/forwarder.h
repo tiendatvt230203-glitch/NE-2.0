@@ -3,7 +3,6 @@
 
 #include "core/iface/interface.h"
 #include "core/dataplane/crypto_route.h"
-#include "core/flow/flow_table.h"
 #include "crypto/packet_crypto.h"
 
 struct fwd_iface {
@@ -20,7 +19,6 @@ struct forwarder {
     int wan_count;
     struct ne_pair pair;
     struct packet_crypto_ctx crypto;
-    struct flow_table wan_flows;
     struct ne_ring local_to_mid[NE_CRYPTO_WORKERS];
     struct ne_ring wan_to_mid[NE_CRYPTO_WORKERS];
     struct ne_ring mid_to_wan[MAX_INTERFACES][NE_CRYPTO_WORKERS];
@@ -32,8 +30,10 @@ struct forwarder {
     pthread_t wan_rx_threads[NE_RX_WAN_SLOTS];
     int threads_started;
 
-    uint64_t split_tail_cache[NE_CRYPTO_WORKERS][64];
-    uint16_t split_tail_count[NE_CRYPTO_WORKERS];
+    __attribute__((aligned(64)))
+    uint8_t crypto_buf[NE_CRYPTO_WORKERS][NE_JUMBO_FRAME_MAX];
+    __attribute__((aligned(64)))
+    uint8_t crypto_aux[NE_CRYPTO_WORKERS][NE_JUMBO_FRAME_MAX];
 
 };
 

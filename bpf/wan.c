@@ -1,90 +1,60 @@
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
-#include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
+#include <bpf/bpf_helpers.h>
+
+#define ETH_P_ENCRYPTED_UDP 0x104B
+
+/* Older bundled headers do not declare this XDP multi-buffer helper. */
+static __u64 (*xdp_get_buff_len)(struct xdp_md *ctx) = (void *)188;
 
 struct {
     __uint(type, BPF_MAP_TYPE_XSKMAP);
     __uint(max_entries, 64);
-    __type(key, int);
-    __type(value, int);
+    __type(key, __u32);
+    __type(value, __u32);
 } wan_xsks_map SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 2);
-    __type(key, int);
+    __uint(max_entries, 1);
+    __type(key, __u32);
     __type(value, __u16);
 } wan_config_map SEC(".maps");
 
-#define ETH_P_NE_ARP_ENC 0x1048
-#define ETH_P_NE_UDP_ENC 0x104B
-#define ETH_P_8021Q_VAL  0x8100
-#define PATH_MTU         1500
-#define ETH_FRAME_MAX    (14 + PATH_MTU)
-#define ETH_VLAN_FRAME_MAX (18 + PATH_MTU)
-/* A plaintext 1500-byte IP packet grows on the encrypted WAN wire. */
-#define NE_L2_WIRE_OVERHEAD 41
-#define ETH_ENCRYPTED_FRAME_MAX (ETH_FRAME_MAX + NE_L2_WIRE_OVERHEAD)
-#define ETH_VLAN_ENCRYPTED_FRAME_MAX (ETH_VLAN_FRAME_MAX + NE_L2_WIRE_OVERHEAD)
-
-static __always_inline int xdp_wan_redirect_common(struct xdp_md *ctx,
-                                                    int phase1_mtu_guard)
+static __always_inline int wan_redirect(struct xdp_md *ctx)
 {
-    void *data = (void *)(long)ctx->data;
-    void *data_end = (void *)(long)ctx->data_end;
+    __u8 *data = (__u8 *)(long)ctx->data;
+    __u8 *data_end = (__u8 *)(long)ctx->data_end;
+    struct ethhdr *eth = (struct ethhdr *)data;
+    __u16 ether_type;
+    __u32 l2_len = 14;
+    __u32 key = 0;
+    __u16 *encrypted_et;
+    int encrypted;
 
-    struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end)
+    if ((void *)(eth + 1) > (void *)data_end)
         return XDP_PASS;
-
-    __u16 proto = eth->h_proto;
-    __u16 wire_proto = proto;
-    int key0 = 0;
-    __u16 *fake4 = bpf_map_lookup_elem(&wan_config_map, &key0);
-    if (proto == bpf_htons(ETH_P_8021Q_VAL)) {
-        __u16 *inner_proto = data + 16;
-
-        if ((void *)(inner_proto + 1) > data_end)
-            return XDP_PASS;
-        wire_proto = *inner_proto;
-    }
-    int encrypted_l2 =
-        wire_proto == bpf_htons(ETH_P_NE_ARP_ENC) ||
-        wire_proto == bpf_htons(ETH_P_NE_UDP_ENC) ||
-        (fake4 && *fake4 != 0 && wire_proto == bpf_htons(*fake4));
-
-    if (phase1_mtu_guard) {
-        __u32 pkt_len = (__u32)((long)data_end - (long)data);
-
-        if (proto == bpf_htons(ETH_P_8021Q_VAL)) {
-            if (pkt_len > (encrypted_l2 ? ETH_VLAN_ENCRYPTED_FRAME_MAX
-                                        : ETH_VLAN_FRAME_MAX))
-                return XDP_DROP;
-        } else if (pkt_len > (encrypted_l2 ? ETH_ENCRYPTED_FRAME_MAX
-                                           : ETH_FRAME_MAX)) {
-            return XDP_DROP;
-        }
-    }
-
-    /* Capture every WAN frame. Userspace accepts only authenticated encrypted
-     * markers, so plaintext or unknown EtherTypes cannot leak through a bridge. */
-    __u32 qid = ctx->rx_queue_index;
-    return bpf_redirect_map(&wan_xsks_map, qid, 0);
-}
-
-SEC("xdp")
-int xdp_wan_redirect_prog(struct xdp_md *ctx)
-{
-    return xdp_wan_redirect_common(ctx, 0);
+    ether_type = eth->h_proto;
+    if (ether_type == bpf_htons(ETH_P_8021Q) ||
+        ether_type == bpf_htons(ETH_P_8021AD))
+        return XDP_PASS;
+    encrypted_et = bpf_map_lookup_elem(&wan_config_map, &key);
+    encrypted = ether_type == bpf_htons(ETH_P_ENCRYPTED_UDP) ||
+                (encrypted_et && *encrypted_et != 0 &&
+                 ether_type == bpf_htons(*encrypted_et));
+    /* Plain ARP and all other WAN traffic belong to the kernel bridge. */
+    if (!encrypted)
+        return XDP_PASS;
+    if ((__u32)xdp_get_buff_len(ctx) > l2_len + 9000)
+        return XDP_DROP;
+    return bpf_redirect_map(&wan_xsks_map, ctx->rx_queue_index, 0);
 }
 
 SEC("xdp.frags")
 int xdp_wan_redirect_prog_frags(struct xdp_md *ctx)
 {
-    /* Keep phase-1 behavior bounded to MTU 1500 until WAN jumbo ownership
-     * and crypto processing are implemented. */
-    return xdp_wan_redirect_common(ctx, 1);
+    return wan_redirect(ctx);
 }
 
 char _license[] SEC("license") = "GPL";

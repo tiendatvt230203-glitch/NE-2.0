@@ -2,7 +2,6 @@
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/dataplane/dataplane_util.h"
 #include "../../../inc/crypto/eth_parse.h"
-#include "../../../inc/crypto/crypto_option.h"
 
 #include <arpa/inet.h>
 #include <stdatomic.h>
@@ -363,18 +362,6 @@ int dp_flow_pick_tx_slot(const uint8_t *pkt, uint32_t len, int worker_hint)
     return dp_flow_route_get(pkt, len, worker_hint).tx_slot;
 }
 
-int dp_udp_pick_tx_slot(uint32_t src_ip, uint32_t dst_ip,
-                        uint16_t src_port, uint16_t dst_port,
-                        int worker_hint)
-{
-    struct dp_route_key key;
-
-    if (dp_route_key_from_tuple(src_ip, dst_ip, src_port, dst_port,
-                                IPPROTO_UDP, &key, NULL) != 0)
-        return 0;
-    return dp_flow_route_get_key(&key, worker_hint).tx_slot;
-}
-
 static int dp_next_udp_tx_seq(const uint8_t *pkt, uint32_t len,
                               uint32_t *seq_out)
 {
@@ -456,9 +443,6 @@ int dp_crypto_pick_wan_worker(struct forwarder *fwd, const uint8_t *pkt, uint32_
 
     if (!fwd || !pkt)
         return 0;
-
-    if (crypto_eth_l2_has_arp_marker(pkt, len) || dp_pkt_is_arp(pkt, len))
-        return dp_crypto_pick_local_worker(pkt, len, NULL);
 
     if (!fwd->cfg || !crypto_eth_l2_has_marker(pkt, len))
         return -1;

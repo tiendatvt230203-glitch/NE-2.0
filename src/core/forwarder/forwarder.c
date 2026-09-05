@@ -2,7 +2,6 @@
 #include "../../../inc/crypto/l2_crypto.h"
 #include "../../../inc/core/dataplane/dataplane.h"
 #include "../../../inc/core/dataplane/crypto_route.h"
-#include "../../../inc/core/dataplane/udp_reorder.h"
 
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/iface/xdp_attach.h"
@@ -25,6 +24,15 @@ static uint64_t core_stats_now_ms(void)
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
         return 0;
     return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+}
+
+static uint64_t core_now_ns(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
 static void core_stats_tick(struct forwarder *fwd)
@@ -58,7 +66,7 @@ static void core_stats_tick(struct forwarder *fwd)
                                           __ATOMIC_RELAXED);
         for (int q = 0; q < fwd->pair.locals[i].queue_count; q++)
             multibuf_lan += __atomic_load_n(
-                &fwd->pair.locals[i].queues[q].rx_multibuf_dropped,
+                &fwd->pair.locals[i].queues[q].rx_chain_dropped,
                 __ATOMIC_RELAXED);
     }
     for (int i = 0; i < fwd->pair.wan_count; i++) {
@@ -66,7 +74,7 @@ static void core_stats_tick(struct forwarder *fwd)
                                           __ATOMIC_RELAXED);
         for (int q = 0; q < fwd->pair.wans[i].queue_count; q++)
             multibuf_wan += __atomic_load_n(
-                &fwd->pair.wans[i].queues[q].rx_multibuf_dropped,
+                &fwd->pair.wans[i].queues[q].rx_chain_dropped,
                 __ATOMIC_RELAXED);
     }
     ne_pair_xdp_socket_stats(&fwd->pair, &lan_xdp, &wan_xdp);
@@ -278,7 +286,7 @@ static void *local_rx_thread(void *arg)
                 if (ne_ring_try_push(&fwd->local_to_mid[wi], &batch[i]) != 0) {
                     ne_dp_warn_rx_drop("LAN", (int)ctx->cpu_id, wi,
                                        ne_ring_count(&fwd->local_to_mid[wi]));
-                    ne_frame_free(&fwd->pair, batch[i].addr);
+                    ne_packet_free(&fwd->pair, &batch[i]);
                 } else {
                     ne_dp_idle_wake(NE_DP_WAKE_CRYPTO(wi));
                 }
@@ -364,13 +372,13 @@ static void *wan_rx_thread(void *arg)
             if (dataplane_wan_needs_mid(fwd, pkt, batch[i].len)) {
                 wi = dp_crypto_pick_wan_worker(fwd, pkt, batch[i].len);
                 if (wi < 0 || wi >= (int)NE_CRYPTO_WORKERS) {
-                    ne_frame_free(&fwd->pair, batch[i].addr);
+                    ne_packet_free(&fwd->pair, &batch[i]);
                     continue;
                 }
                 if (ne_ring_try_push(&fwd->wan_to_mid[wi], &batch[i]) != 0) {
                     ne_dp_warn_rx_drop("WAN", (int)ctx->cpu_id, wi,
                                        ne_ring_count(&fwd->wan_to_mid[wi]));
-                    ne_frame_free(&fwd->pair, batch[i].addr);
+                    ne_packet_free(&fwd->pair, &batch[i]);
                 } else {
                     ne_dp_idle_wake(NE_DP_WAKE_CRYPTO(wi));
                 }
@@ -433,8 +441,7 @@ static void *crypto_worker_thread(void *arg)
             did_work = 1;
         }
         if (++gc_tick >= 2048) {
-            l2_crypto_frag_gc(ctx->worker_idx, dp_udp_reorder_now_ns());
-            dataplane_bond_reorder_gc(fwd, ctx->worker_idx);
+            l2_crypto_frag_gc(ctx->worker_idx, core_now_ns());
             gc_tick = 0;
         }
 
@@ -443,7 +450,6 @@ static void *crypto_worker_thread(void *arg)
         else
             crypto_idle_pause(fwd, &idle, ctx->worker_idx);
     }
-    dataplane_bond_reorder_reset(fwd, ctx->worker_idx);
     return NULL;
 }
 
@@ -461,8 +467,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
         fwd->local_count = MAX_INTERFACES;
     if (fwd->wan_count > MAX_INTERFACES)
         fwd->wan_count = MAX_INTERFACES;
-    dataplane_bond_reorder_configure(fwd);
-    fprintf(stderr, "[CORE] multicore/equal-bond/UDP split+reorder enabled\n");
+    fprintf(stderr, "[CORE] debug mode: one LAN, one WAN\n");
 
     fprintf(stderr, "[FRAG] encrypted UDP wire MTU=%u\n", L2_CRYPTO_MTU);
     ne_dp_idle_init();
@@ -479,10 +484,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
 
     if (packet_crypto_init(&fwd->crypto, cfg->key) != 0)
         return -1;
-    flow_table_init(&fwd->wan_flows, fwd->wan_count);
-
     if (ne_pair_open(&fwd->pair, cfg) != 0) {
-        flow_table_cleanup(&fwd->wan_flows);
         ne_dp_idle_shutdown();
         return -1;
     }
@@ -539,7 +541,6 @@ void forwarder_cleanup(struct forwarder *fwd)
         for (int w = 0; w < (int)NE_CRYPTO_WORKERS; w++)
             ne_ring_destroy(&fwd->mid_to_local[i][w]);
     }
-    flow_table_cleanup(&fwd->wan_flows);
     ne_pair_close(&fwd->pair, fwd->cfg);
     ne_dp_idle_shutdown();
 }

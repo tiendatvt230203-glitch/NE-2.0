@@ -164,8 +164,6 @@ static int open_bpf_object(const char *path, struct bpf_object **obj_out,
     char resolved_path[PATH_MAX];
     const char *open_path;
     struct bpf_object *obj;
-    struct bpf_program *other_prog = NULL;
-
     open_path = resolve_bpf_object_path(path, resolved_path);
 
     obj = bpf_object__open_file(open_path, NULL);
@@ -181,19 +179,6 @@ static int open_bpf_object(const char *path, struct bpf_object **obj_out,
         bpf_object__close(obj);
         return -1;
     }
-    /* The repository headers expose bpf_program__next(), but the deployed
-     * libbpf does not.  Disable the known counterpart directly so a legacy
-     * kernel never attempts to load an xdp.frags program. */
-    if (strcmp(prog_name, "xdp_redirect_prog") == 0)
-        other_prog = bpf_object__find_program_by_name(obj, "xdp_redirect_prog_frags");
-    else if (strcmp(prog_name, "xdp_redirect_prog_frags") == 0)
-        other_prog = bpf_object__find_program_by_name(obj, "xdp_redirect_prog");
-    else if (strcmp(prog_name, "xdp_wan_redirect_prog") == 0)
-        other_prog = bpf_object__find_program_by_name(obj, "xdp_wan_redirect_prog_frags");
-    else if (strcmp(prog_name, "xdp_wan_redirect_prog_frags") == 0)
-        other_prog = bpf_object__find_program_by_name(obj, "xdp_wan_redirect_prog");
-    if (other_prog)
-        bpf_program__set_autoload(other_prog, false);
     if (strstr(prog_name, "_frags") != NULL) {
         int rc = bpf_program__set_flags(prog, BPF_F_XDP_HAS_FRAGS);
 
@@ -280,37 +265,15 @@ int xdp_attach_bind_local(struct ne_pair *p, const struct app_config *cfg, int p
 
     if (open_bpf_object(cfg->bpf_file, &p->bpf_locals[pair_li],
                         prog_name, &prog, "xsks_map", &map) != 0) {
-        if (!p->locals[pair_li].xdp_sg_enabled)
-            return -1;
-        fprintf(stderr, "[XDP] LAN %s frags load failed, fallback legacy\n",
-                ifname);
-        p->locals[pair_li].xdp_sg_enabled = 0;
-        prog_name = "xdp_redirect_prog";
-        if (open_bpf_object(cfg->bpf_file, &p->bpf_locals[pair_li],
-                            prog_name, &prog, "xsks_map", &map) != 0)
-            return -1;
+        fprintf(stderr, "[XDP] LAN %s requires xdp.frags; load failed\n", ifname);
+        return -1;
     }
     xdp_attach_link_off(ifname);
     if (xdp_attach_prog(p->locals[pair_li].ifindex, bpf_program__fd(prog),
                         ifname, "LAN") != 0) {
         bpf_object__close(p->bpf_locals[pair_li]);
         p->bpf_locals[pair_li] = NULL;
-        if (!p->locals[pair_li].xdp_sg_enabled)
-            return -1;
-        fprintf(stderr, "[XDP] LAN %s frags attach failed, fallback legacy\n",
-                ifname);
-        p->locals[pair_li].xdp_sg_enabled = 0;
-        prog_name = "xdp_redirect_prog";
-        if (open_bpf_object(cfg->bpf_file, &p->bpf_locals[pair_li],
-                            prog_name, &prog, "xsks_map", &map) != 0 ||
-            xdp_attach_prog(p->locals[pair_li].ifindex, bpf_program__fd(prog),
-                            ifname, "LAN") != 0) {
-            if (p->bpf_locals[pair_li]) {
-                bpf_object__close(p->bpf_locals[pair_li]);
-                p->bpf_locals[pair_li] = NULL;
-            }
-            return -1;
-        }
+        return -1;
     }
     p->xdp_local_on[pair_li] = 1;
     fprintf(stderr, "[XDP] LAN %s program=%s\n", ifname, prog_name);
@@ -333,15 +296,9 @@ int xdp_attach_bind_wan(struct ne_pair *p, const struct app_config *cfg, int dp_
         ? "xdp_wan_redirect_prog_frags" : "xdp_wan_redirect_prog";
     if (open_bpf_object(cfg->bpf_wan_file, &p->bpf_wans[dp_slot],
                         prog_name, &prog, "wan_xsks_map", &map) != 0) {
-        if (!p->wans[dp_slot].xdp_sg_enabled)
-            return -1;
-        fprintf(stderr, "[XDP] WAN %s frags load failed, fallback legacy\n",
+        fprintf(stderr, "[XDP] WAN %s requires xdp.frags; load failed\n",
                 p->wans[dp_slot].ifname);
-        p->wans[dp_slot].xdp_sg_enabled = 0;
-        prog_name = "xdp_wan_redirect_prog";
-        if (open_bpf_object(cfg->bpf_wan_file, &p->bpf_wans[dp_slot],
-                            prog_name, &prog, "wan_xsks_map", &map) != 0)
-            return -1;
+        return -1;
     }
     update_wan_fake_ethertype(p->bpf_wans[dp_slot], fake_ethertype_ipv4);
     xdp_attach_link_off(p->wans[dp_slot].ifname);
@@ -349,23 +306,7 @@ int xdp_attach_bind_wan(struct ne_pair *p, const struct app_config *cfg, int dp_
                         p->wans[dp_slot].ifname, "WAN") != 0) {
         bpf_object__close(p->bpf_wans[dp_slot]);
         p->bpf_wans[dp_slot] = NULL;
-        if (!p->wans[dp_slot].xdp_sg_enabled)
-            return -1;
-        fprintf(stderr, "[XDP] WAN %s frags attach failed, fallback legacy\n",
-                p->wans[dp_slot].ifname);
-        p->wans[dp_slot].xdp_sg_enabled = 0;
-        prog_name = "xdp_wan_redirect_prog";
-        if (open_bpf_object(cfg->bpf_wan_file, &p->bpf_wans[dp_slot],
-                            prog_name, &prog, "wan_xsks_map", &map) != 0) {
-            return -1;
-        }
-        update_wan_fake_ethertype(p->bpf_wans[dp_slot], fake_ethertype_ipv4);
-        if (xdp_attach_prog(p->wans[dp_slot].ifindex, bpf_program__fd(prog),
-                            p->wans[dp_slot].ifname, "WAN") != 0) {
-            bpf_object__close(p->bpf_wans[dp_slot]);
-            p->bpf_wans[dp_slot] = NULL;
-            return -1;
-        }
+        return -1;
     }
     p->xdp_wan_on[dp_slot] = 1;
     fprintf(stderr, "[XDP] WAN %s program=%s\n",

@@ -15,22 +15,10 @@ static const uint8_t core_key[AES_KEY_LEN] = {
     0xee,0x63,0x18,0xd4,0x89,0xba,0x05,0xcf,
 };
 
-/* EDIT ON EACH APPLIANCE: client reachable through each LAN. */
-static const uint8_t client_macs[2][MAC_LEN] = {
-    {0x00,0x00,0x00,0x00,0x00,0x00}, /* enp1s0f0 */
-    {0x00,0x00,0x00,0x00,0x00,0x00}, /* enp1s0f1 */
-};
-
 static void copy_ifname(char dst[IF_NAMESIZE], const char *src)
 {
     strncpy(dst, src, IF_NAMESIZE - 1);
     dst[IF_NAMESIZE - 1] = '\0';
-}
-
-static int valid_mac(const uint8_t mac[MAC_LEN])
-{
-    static const uint8_t zero[MAC_LEN];
-    return memcmp(mac, zero, MAC_LEN) != 0 && !(mac[0] & 1u);
 }
 
 static int require_mtu_9000(const char *ifname)
@@ -41,46 +29,32 @@ static int require_mtu_9000(const char *ifname)
 
     if (fd < 0) return -1;
     copy_ifname(ifr.ifr_name, ifname);
-    ok = ioctl(fd, SIOCGIFMTU, &ifr) == 0 && ifr.ifr_mtu >= 9000;
+    ok = ioctl(fd, SIOCGIFMTU, &ifr) == 0 && ifr.ifr_mtu == 9000;
     close(fd);
-    if (!ok) fprintf(stderr, "[CORE] %s must be UP with MTU >= 9000\n", ifname);
+    if (!ok) fprintf(stderr, "[CORE] %s must be UP with MTU exactly 9000\n", ifname);
     return ok ? 0 : -1;
-}
-
-int static_config_local_for_dmac(const struct app_config *cfg, const uint8_t dmac[MAC_LEN])
-{
-    if (!cfg || !dmac) return -1;
-    for (int i = 0; i < cfg->local_count; i++)
-        if (memcmp(cfg->client_mac[i], dmac, MAC_LEN) == 0) return i;
-    return -1;
 }
 
 int static_config_build(struct app_config *cfg)
 {
-    static const char *lans[2] = {"enp1s0f0", "enp1s0f1"};
-    static const char *wans[2] = {"enp2s0f0", "enp2s0f1"};
+    static const char *lans[1] = {"enp1s0f0"};
+    static const char *wans[1] = {"enp2s0f0"};
 
     if (!cfg) return -1;
     memset(cfg, 0, sizeof(*cfg));
-    for (int i = 0; i < 2; i++) {
-        if (!valid_mac(client_macs[i]) ||
-            (i && memcmp(client_macs[0], client_macs[1], MAC_LEN) == 0)) {
-            fprintf(stderr, "[CORE] set unique client_macs[%d] before build\n", i);
-            return -1;
-        }
+    for (int i = 0; i < 1; i++) {
         if (require_mtu_9000(lans[i]) || require_mtu_9000(wans[i])) return -1;
         copy_ifname(cfg->locals[i].ifname, lans[i]);
         copy_ifname(cfg->wans[i].ifname, wans[i]);
-        memcpy(cfg->client_mac[i], client_macs[i], MAC_LEN);
     }
-    cfg->local_count = 2;
-    cfg->wan_count = 2;
+    cfg->local_count = 1;
+    cfg->wan_count = 1;
     cfg->fake_ethertype_ipv4 = NE_L2_FAKE_ETHERTYPE;
     memcpy(cfg->key, core_key, sizeof(core_key));
     strcpy(cfg->bpf_file, "./lib/lan.o");
     strcpy(cfg->bpf_wan_file, "./lib/wan.o");
     fprintf(stderr,
-            "[CORE] static L2 key=%02x%02x%02x%02x...; 2 LAN; 2 WAN equal-share\n",
+            "[CORE] static L2 key=%02x%02x%02x%02x...; 1 LAN; 1 WAN debug mode\n",
             core_key[0], core_key[1], core_key[2], core_key[3]);
     return 0;
 }

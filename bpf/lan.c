@@ -1,12 +1,10 @@
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
-#include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
+#include <bpf/bpf_helpers.h>
 
-#define ETH_P_8021Q_VAL 0x8100
-#define PATH_MTU 1500
-#define ETH_FRAME_MAX (14 + PATH_MTU)
-#define ETH_VLAN_FRAME_MAX (18 + PATH_MTU)
+/* Older bundled headers do not declare this XDP multi-buffer helper. */
+static __u64 (*xdp_get_buff_len)(struct xdp_md *ctx) = (void *)188;
 
 struct {
     __uint(type, BPF_MAP_TYPE_XSKMAP);
@@ -15,43 +13,40 @@ struct {
     __type(value, __u32);
 } xsks_map SEC(".maps");
 
-static __always_inline int xdp_redirect_common(struct xdp_md *ctx, int legacy_mtu_guard)
+static __always_inline int lan_redirect(struct xdp_md *ctx)
 {
-    void *data     = (void *)(long)ctx->data;
-    void *data_end = (void *)(long)ctx->data_end;
-    __u32 pkt_len;
-    struct ethhdr *eth = data;
+    __u8 *data = (__u8 *)(long)ctx->data;
+    __u8 *data_end = (__u8 *)(long)ctx->data_end;
+    struct ethhdr *eth = (struct ethhdr *)data;
+    __u8 *ip;
+    __u16 ether_type;
+    __u16 ip_len;
+    __u8 protocol;
+    __u32 packet_len;
 
-    pkt_len = (__u32)((long)data_end - (long)data);
-    if ((void *)(eth + 1) > data_end)
+    if ((void *)(eth + 1) > (void *)data_end)
         return XDP_PASS;
-
-    if (legacy_mtu_guard) {
-        if (eth->h_proto == bpf_htons(ETH_P_8021Q_VAL)) {
-            if (pkt_len > ETH_VLAN_FRAME_MAX)
-                return XDP_DROP;
-        } else if (pkt_len > ETH_FRAME_MAX) {
-            return XDP_DROP;
-        }
-    }
-
-    /* Every valid LAN Ethernet frame belongs to the encrypted core. */
-    __u32 qid = ctx->rx_queue_index;
-    return bpf_redirect_map(&xsks_map, qid, 0);
-}
-
-SEC("xdp")
-int xdp_redirect_prog(struct xdp_md *ctx)
-{
-    return xdp_redirect_common(ctx, 1);
+    ether_type = eth->h_proto;
+    ip = data + 14;
+    /* VLAN, ARP and non-IPv4 packets stay in the kernel path. */
+    if (ether_type != bpf_htons(ETH_P_IP) || ip + 20 > data_end)
+        return XDP_PASS;
+    protocol = ip[9];
+    if (protocol != 1 && protocol != 6 && protocol != 17 && protocol != 89)
+        return XDP_PASS;
+    ip_len = ((__u16)ip[2] << 8) | ip[3];
+    packet_len = (__u32)xdp_get_buff_len(ctx);
+    if (ip_len < 20 || ip_len > 9000 ||
+        packet_len < (__u32)(ip - data) + ip_len ||
+        packet_len > (__u32)(ip - data) + 9000)
+        return XDP_DROP;
+    return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, 0);
 }
 
 SEC("xdp.frags")
 int xdp_redirect_prog_frags(struct xdp_md *ctx)
 {
-    /* Phase 1 validates the 1500-byte dataplane on jumbo-capable plumbing.
-     * Remove this guard only when userspace packet-chain processing lands. */
-    return xdp_redirect_common(ctx, 1);
+    return lan_redirect(ctx);
 }
 
 char _license[] SEC("license") = "GPL";

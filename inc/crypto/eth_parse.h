@@ -8,8 +8,6 @@
 #define ETH_HEADER_SIZE 14
 #define NE_L2_FAKE_ETHERTYPE      0x104Au
 #define NE_L2_FAKE_ETHERTYPE_UDP  0x104Bu
-/* Encrypted ARP L2 wire (IANA 823E–8240: Advanced Encryption Systems, Inc.). */
-#define NE_L2_FAKE_ETHERTYPE_ARP  0x1048u
 
 #define CRYPTO_L2_CORE_ID_OFF    ETH_HEADER_SIZE
 #define CRYPTO_L2_CORE_ID_LEN    1
@@ -28,15 +26,9 @@ void crypto_eth_set_ipv4_et(uint8_t *pkt, int inner_et_off);
 
 /** L2 IP encrypt marker (0x88B5) — not ARP. */
 int crypto_eth_l2_has_marker(const uint8_t *pkt, size_t pkt_len);
-/** L2 ARP encrypt marker (0x823E). */
-int crypto_eth_l2_has_arp_marker(const uint8_t *pkt, size_t pkt_len);
 int crypto_eth_l2_core_id_off(const uint8_t *packet, size_t pkt_len);
 int crypto_eth_l2_frag_magic_off(const uint8_t *packet, size_t pkt_len, int nonce_size);
 int crypto_eth_l2_read_worker_idx(const uint8_t *packet, uint32_t pkt_len, uint8_t *worker_idx_out);
-
-int crypto_eth_arp_offset(const uint8_t *pkt, size_t pkt_len);
-int crypto_pkt_is_arp(const uint8_t *pkt, size_t pkt_len);
-void crypto_eth_set_arp_et(uint8_t *pkt, int inner_et_off);
 
 int crypto_tcp_clamp_mss(uint8_t *pkt, uint32_t pkt_len, uint32_t path_mtu, uint32_t wire_overhead);
 

@@ -2,49 +2,55 @@
 
 ## Phạm vi cố định
 
-- Hai LAN: `enp1s0f0`, `enp1s0f1`.
-- Hai WAN: `enp2s0f0`, `enp2s0f1`.
-- NIC vật lý cấu hình MTU 9000; giai đoạn hiện tại chỉ nhận gói LAN tối đa 1500 byte.
+- Một LAN: `enp1s0f0`.
+- Một WAN: `enp2s0f0`.
+- NIC vật lý bắt buộc cấu hình đúng MTU 9000.
+- Core nhận mọi kích thước IPv4 hợp lệ có `total_length <= 9000`, bao gồm
+  toàn bộ khoảng `1501..8999`.
 - Một key 256 bit khai báo trong mã nguồn, giống nhau ở hai appliance.
-- Tất cả Ethernet frame, kể cả ARP, đều được xác thực và mã hóa AES-256-GCM.
+- BPF chỉ redirect IPv4 TCP, UDP, ICMP và OSPF. ARP và traffic khác là
+  `XDP_PASS` cho kernel.
 - Không có control plane, cơ sở dữ liệu, phân loại rule, vòng đời key, học MAC hay failover.
-- Hai WAN luôn chia đều. Mỗi flow đi theo cửa sổ cố định 120000 byte rồi chuyển sang WAN tiếp theo.
-- Chỉ UDP có sequence, tách frame WAN, ráp lại và reorder. TCP không đi qua reorder buffer.
+- Không có bond, chọn WAN, flow affinity hay reorder buffer trong giai đoạn
+  debug này. UDP chỉ có tách/ráp wire-frame khi cần.
 
-## Giai đoạn 1 — xác nhận core 1500 trên topology MTU 9000
+## Trạng thái triển khai
 
-1. UMEM dùng chunk 4096 byte và socket yêu cầu `XDP_USE_SG`; chương trình `xdp.frags` được attach khi driver hỗ trợ.
-2. BPF vẫn chặn dữ liệu LAN lớn hơn 1500 byte. Mục tiêu giai đoạn này là chứng minh việc đổi plumbing sang jumbo/XDP fragments không làm thay đổi đường dữ liệu 1500 cũ.
-3. Userspace từ chối một packet nhiều descriptor thay vì hiểu nhầm từng fragment là một packet độc lập.
-4. Kiểm tra ping, TCP iperf3 và UDP iperf3 trên một WAN, sau đó hai WAN.
-5. Kiểm tra kernel/XSK counter: `rx_dropped`, `rx_invalid_descs`, `tx_invalid_descs`, ring full và số frame UMEM rảnh.
+1. UMEM dùng chunk 4096 byte và socket yêu cầu `XDP_USE_SG`; chương trình
+   trong section `xdp.frags` được loader gắn cờ `BPF_F_XDP_HAS_FRAGS`.
+2. BPF dùng `bpf_xdp_get_buff_len()` để lấy tổng chiều dài multi-buffer; không
+   dùng `data_end-data` làm tổng chiều dài packet 9K.
+3. `struct ne_packet` chứa tối đa bốn segment. RX gom `XDP_PKT_CONTD` thành
+   đúng một logical packet, và recycle toàn chain khi lỗi.
+4. Crypto worker tuyến tính hóa chain vào buffer 9216 byte; kết quả được ghi
+   lại thành chain trước khi TX.
+5. TX đặt `XDP_PKT_CONTD` trên mọi descriptor trừ descriptor cuối.
+6. TCP SYN được clamp MSS với 29 byte overhead để encrypted TCP vẫn nằm trong
+   giới hạn MTU 9000.
+7. UDP vượt wire MTU được tạo thành hai encrypted wire-packet: fragment đầu
+   lấp đầy ngân sách MTU, fragment sau chứa payload còn lại. Receiver xác thực
+   cả hai và ráp lại, không có reorder/hold buffer.
+8. Kiểm tra ARP/kernel path, ping, TCP iperf3 và UDP iperf3 trên một WAN.
+9. Kiểm tra kernel/XSK counter: `rx_dropped`, `rx_invalid_descs`,
+   `tx_invalid_descs`, ring full và số frame UMEM rảnh.
 
 Điều kiện qua giai đoạn: chạy lâu không treo, không loop, TCP không về 0, không rò UMEM và kết quả 1500 không kém bản core trước.
 
-## Giai đoạn 2 — nhận packet lớn bằng descriptor chain
+## Việc chưa làm
 
-1. Mở guard BPF cho Ethernet frame tới 9018/9022 byte.
-2. Thay `struct ne_packet` một descriptor bằng packet descriptor chứa tối đa bốn segment UMEM.
-3. RX gom chuỗi `XDP_PKT_CONTD` thành đúng một packet; chỉ publish packet sau khi nhận segment cuối.
-4. Khi ring đầy hoặc chain lỗi, recycle toàn bộ segment đúng một lần.
-5. Parser Ethernet/IP/UDP đọc qua segment boundary mà không giả định dữ liệu liên tục.
-
-Với chunk 4096 byte, một frame 9000 cần tối đa ba chunk; giới hạn bốn chunk giữ headroom nhưng không tăng kích thước mỗi chunk vượt giới hạn driver.
-
-## Giai đoạn 3 — mã hóa và TX jumbo
-
-1. AES-GCM xử lý packet dạng scatter/gather hoặc copy có kiểm soát sang packet output chain.
-2. Nếu encrypted frame vừa MTU WAN, TX bằng một logical packet gồm nhiều descriptor với `XDP_PKT_CONTD`.
-3. Nếu không vừa MTU WAN, chỉ UDP được chia thành hai wire packet độc lập, mỗi packet có nonce/tag/sequence riêng.
-4. Receiver xác thực đủ các phần UDP trước khi publish frame gốc sang LAN.
-5. TCP tiếp tục dựa vào MSS; không đưa TCP vào bộ ráp/reorder UDP.
+1. ICMP/OSPF không tách/ráp riêng; nếu cộng overhead mã hóa vượt MTU WAN thì drop.
+2. Chỉ xử lý Ethernet không tag; VLAN/QinQ đi XDP_PASS cho kernel.
+3. Chưa tối ưu crypto scatter/gather trực tiếp; hiện tại dùng buffer tuyến tính
+   riêng theo worker để ưu tiên tính đúng đắn.
 
 ## Ngân sách bộ nhớ hiện tại
 
 - `NE_FRAME = 4096` byte.
 - `NE_N_FRAMES = 524288`.
 - UMEM danh nghĩa: 2 GiB cho một pair.
-- Tối đa bốn segment/logical packet, nhưng 9K dự kiến dùng ba segment.
+- Tối đa bốn segment/logical packet; 9K thông thường dùng ba segment.
+- UDP reassembly table còn 256 entry/worker, chỉ giữ hai fragment đang chờ ráp;
+  đây không phải reorder buffer.
 - FQ chỉ nhận tối đa 75% frame để giữ frame cho TX, mã hóa và burst.
 
 Không tăng UMEM trước khi counter chứng minh thiếu frame. Ưu tiên recycle đúng, batch RX/TX và tránh copy.
@@ -52,9 +58,10 @@ Không tăng UMEM trước khi counter chứng minh thiếu frame. Ưu tiên rec
 ## Thứ tự kiểm thử bắt buộc
 
 1. Build sạch và kiểm tra binary không link thư viện DB/control-plane.
-2. Một LAN ↔ một WAN, payload 1500: ping, TCP, UDP.
-3. Hai WAN chia đều, payload 1500: TCP dài hạn và UDP dài hạn.
-4. Restart/stop nhiều lần để kiểm tra XDP detach, XSK/UMEM cleanup.
-5. Chỉ sau khi bốn bước trên ổn định mới mở RX jumbo 3000, 6000 rồi 9000.
+2. Một LAN ↔ một WAN, payload 1500: ARP/kernel path, ping, TCP, UDP.
+3. Restart/stop nhiều lần để kiểm tra XDP detach, XSK/UMEM cleanup.
+4. Test UDP với IPv4 total_length 1500, 1501, 2000, 4096, 8000, 9000 và
+   sát ngưỡng tách; gói vừa ngân sách mã hóa đi một wire-packet, vượt thì hai.
+5. Test TCP jumbo; xác nhận MSS được clamp và WAN không phát frame vượt MTU.
 
-Mỗi lần mở kích thước mới phải giữ test regression 1500; không gộp thay đổi jumbo RX, crypto chain và TX chain vào một lần triển khai.
+Mọi thay đổi tiếp theo phải giữ regression toàn dải đến 9000.

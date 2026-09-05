@@ -45,26 +45,10 @@ int dp_parse_flow(void *pkt_data, uint32_t pkt_len,
     return 0;
 }
 
-int dp_pkt_is_arp(const uint8_t *pkt, uint32_t len)
-{
-    uint16_t et;
-
-    if (!pkt || len < ETH_HEADER_SIZE)
-        return 0;
-
-    et = ((uint16_t)pkt[12] << 8) | pkt[13];
-    if (et == 0x8100u) {
-        if (len < 18u)
-            return 0;
-        et = ((uint16_t)pkt[16] << 8) | pkt[17];
-    }
-    return et == 0x0806u;
-}
-
 int dp_ring_push(struct forwarder *fwd, struct ne_ring *ring, struct ne_packet *pkt)
 {
-    if (pkt->len > fwd->pair.frame_size || ne_ring_try_push(ring, pkt) != 0) {
-        ne_frame_free(&fwd->pair, pkt->addr);
+    if (pkt->len > NE_JUMBO_FRAME_MAX || ne_ring_try_push(ring, pkt) != 0) {
+        ne_packet_free(&fwd->pair, pkt);
         return -1;
     }
     ne_dp_idle_wake_tx_worker(dp_out_ring_idx());

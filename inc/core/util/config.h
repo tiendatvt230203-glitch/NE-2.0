@@ -5,7 +5,6 @@
 #include <stdint.h>
 
 #define MAX_INTERFACES 16
-#define MAC_LEN 6
 #define AES_KEY_LEN 32
 
 struct local_config { char ifname[IF_NAMESIZE]; };
@@ -21,7 +20,6 @@ struct app_config {
     char bpf_wan_file[256];
     uint16_t fake_ethertype_ipv4;
     uint8_t key[AES_KEY_LEN];
-    uint8_t client_mac[MAX_INTERFACES][MAC_LEN];
 };
 
 #endif
