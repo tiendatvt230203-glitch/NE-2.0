@@ -253,14 +253,18 @@ static struct dp_flow_route dp_flow_route_get(const uint8_t *pkt, uint32_t len,
     struct dp_flow_route route;
     struct dp_route_key key;
     struct dp_route_entry *set;
-    uint32_t hash = dp_pkt_flow_hash(pkt, len);
+    uint32_t hash;
     int empty = -1;
 
-    route.worker_idx = dp_hash_to_n(hash, NE_CRYPTO_WORKERS);
-    route.tx_slot = dp_hash_to_n(hash, dp_active_tx_slots());
-    if (dp_route_key_parse(pkt, len, &key) != 0)
+    if (dp_route_key_parse(pkt, len, &key) != 0) {
+        hash = dp_pkt_flow_hash(pkt, len);
+        route.worker_idx = dp_hash_to_n(hash, NE_CRYPTO_WORKERS);
+        route.tx_slot = dp_hash_to_n(hash, dp_active_tx_slots());
         return route;
+    }
 
+    /* The canonical route key already contains the complete 5-tuple. Hash it
+     * directly instead of parsing the same packet again via dp_pkt_flow_hash. */
     hash = dp_route_key_hash(&key);
     route.worker_idx = dp_hash_to_n(hash, NE_CRYPTO_WORKERS);
     route.tx_slot = dp_hash_to_n(hash, dp_active_tx_slots());

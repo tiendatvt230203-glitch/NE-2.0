@@ -529,6 +529,7 @@ static void *crypto_worker_thread(void *arg)
             crypto_idle_pause(fwd, &idle, ctx->worker_idx);
     }
     dataplane_udp_reorder_reset(fwd, ctx->worker_idx);
+    packet_crypto_worker_cleanup();
     flow_table_thread_cleanup();
     return NULL;
 }

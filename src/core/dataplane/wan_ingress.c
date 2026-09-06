@@ -87,30 +87,19 @@ static int decrypt_l2(struct forwarder *fwd, uint8_t *pkt, uint32_t *len)
 {
     struct packet_crypto_ctx *ctx;
     uint8_t wire_id = 0;
-    uint8_t scratch[NE_FRAME];
-    uint32_t orig_len;
 
     if (!pkt || !len)
         return 0;
-    if (!crypto_eth_l2_has_marker(pkt, *len))
-        return 0;
+    /* Caller has already classified this as encrypted L2 wire. */
     if (crypto_eth_l2_read_policy_id(pkt, *len, &wire_id) != 0)
         return 0;
     ctx = fwd_crypto_ctx_for_wire_id(wire_id);
     if (!ctx)
         return -1;
 
-    orig_len = *len;
-    if (orig_len > NE_FRAME)
-        return -1;
-    memcpy(scratch, pkt, orig_len);
-
     if (crypto_option_decrypt(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_TCP, ctx, pkt, len) == 0 &&
         crypto_pkt_is_ipv4(pkt, *len))
         return 0;
-
-    memcpy(pkt, scratch, orig_len);
-    *len = orig_len;
     return -1;
 }
 
@@ -341,30 +330,6 @@ static int wan_policy_in_ok(struct forwarder *fwd, int profile_pi,
                                src_ip, dst_ip, src_port, dst_port, proto);
 }
 
-static void wan_clamp_tcp_mss(struct forwarder *fwd, uint8_t *pkt, uint32_t len)
-{
-    uint32_t src_ip = 0, dst_ip = 0;
-    uint16_t src_port = 0, dst_port = 0;
-    uint8_t proto = 0;
-    const struct crypto_policy *cp;
-
-    if (!fwd || !pkt || !fwd->cfg || fwd->cfg->profile_count < 1)
-        return;
-    if (!fwd->cfg->profiles[0].enabled)
-        return;
-    if (dp_parse_flow(pkt, len, &src_ip, &dst_ip, &src_port, &dst_port, &proto) != 0)
-        return;
-    if (proto != IPPROTO_TCP)
-        return;
-
-    cp = config_select_crypto_policy(fwd->cfg, 0, src_ip, dst_ip,
-                                     src_port, dst_port, proto);
-    if (!cp || cp->action == POLICY_ACTION_BYPASS)
-        return;
-    (void)crypto_tcp_clamp_mss(pkt, len, crypto_option_get_mtu(),
-                               crypto_option_wire_overhead(CRYPTO_OPT_L2_PQC));
-}
-
 static int wan_profile_pi(struct forwarder *fwd, const uint8_t *pkt, uint32_t len)
 {
     if (!fwd || !pkt || !fwd->cfg)
@@ -538,7 +503,9 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
             if (!wan_policy_in_ok(fwd, profile_pi, pkt, job.len))
                 goto policy_drop;
         }
-        wan_clamp_tcp_mss(fwd, pkt, job.len);
+        /* MSS is clamped once on LAN egress at the endpoint that originated
+         * SYN/SYN-ACK. Repeating policy lookup and clamp after WAN decrypt
+         * only adds work to every TCP data/ACK packet. */
     } else {
         if (!wan_l2_plain_ipv4(pkt, job.len))
             goto drop;

@@ -185,7 +185,11 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     uint32_t src_ip = 0, dst_ip = 0;
     uint16_t src_port = 0, dst_port = 0;
     uint8_t proto = 0;
-    int flow_ok = dp_parse_flow(pkt, job.len, &src_ip, &dst_ip, &src_port, &dst_port, &proto) == 0;
+    uint8_t tcp_flags = 0;
+    int l3_off = -1;
+    int flow_ok = dp_parse_flow_tcp_meta(pkt, job.len, &src_ip, &dst_ip,
+                                         &src_port, &dst_port, &proto,
+                                         &l3_off, &tcp_flags) == 0;
     int li = job.local_idx < fwd->local_count ? (int)job.local_idx : 0;
     int profile_idx;
     const struct crypto_policy *cp;
@@ -220,9 +224,10 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     if (!fwd->cfg->crypto_enabled)
         goto drop;
 
-    if (proto == IPPROTO_TCP) {
-        (void)crypto_tcp_clamp_mss(pkt, job.len, crypto_option_get_mtu(),
-                                   crypto_option_wire_overhead(CRYPTO_OPT_L2_PQC));
+    if (proto == IPPROTO_TCP && (tcp_flags & 0x02u)) {
+        (void)crypto_tcp_clamp_mss_l3(pkt, job.len, l3_off,
+                                      crypto_option_get_mtu(),
+                                      crypto_option_wire_overhead(CRYPTO_OPT_L2_PQC));
     }
 
     pi = (int)(cp - fwd->cfg->policies);

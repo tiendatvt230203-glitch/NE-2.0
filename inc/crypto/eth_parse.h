@@ -42,6 +42,7 @@ int crypto_eth_arp_offset(const uint8_t *pkt, size_t pkt_len);
 int crypto_pkt_is_arp(const uint8_t *pkt, size_t pkt_len);
 void crypto_eth_set_arp_et(uint8_t *pkt, int inner_et_off);
 
-int crypto_tcp_clamp_mss(uint8_t *pkt, uint32_t pkt_len, uint32_t path_mtu, uint32_t wire_overhead);
+int crypto_tcp_clamp_mss_l3(uint8_t *pkt, uint32_t pkt_len, int l3_off,
+                            uint32_t path_mtu, uint32_t wire_overhead);
 
 #endif

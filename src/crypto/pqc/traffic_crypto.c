@@ -8,40 +8,12 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
-#define TAG_SIZE_GCM 16
 #define HKDF_SALT "network_encryptor_xdp_salt_v1"
 #define HKDF_INFO "session_key_expansion"
 
-// External declaration for the underlying symbol is no longer needed
 static int g_pqc_initialized = 0;
 
-static __thread uint8_t tls_pqc_salt[8];
-static __thread uint32_t tls_pqc_counter = 0;
-static __thread int tls_salt_initialized = 0;
-
 static void* get_aligned_library_obj(void* (*new_func)(), void (*free_func)(void*));
-
-int trf_pqc_generate_nonce(byte* out_nonce) {
-    if (!out_nonce) return TRF_PQC_ERR_INIT;
-    
-    // Generate random 8-byte salt ONCE per thread/session
-    if (__builtin_expect(!tls_salt_initialized, 0)) {
-        int ret = scrypt_RandomBytes(tls_pqc_salt, 8);
-        if (__builtin_expect(ret != 0, 0)) {
-            return TRF_PQC_ERR_CRYPTO;
-        }
-        tls_salt_initialized = 1;
-    }
-    
-    // Increment local packet counter
-    uint32_t cnt = ++tls_pqc_counter;
-    
-    // Nonce (12 bytes) = 8-byte Salt + 4-byte Counter
-    memcpy(out_nonce, tls_pqc_salt, 8);
-    memcpy(out_nonce + 8, &cnt, 4);
-    
-    return 0; // Success
-}
 
 const char* trf_pqc_error_string(int err) {
     return scrypt_ErrorString(err);
@@ -172,135 +144,6 @@ int trf_save_key_to_file(const char *filename, const char *data, int mode) {
     return (written > 0) ? 0 : -1;
 }
 
-// =========================================================
-// DATA PLANE: ENCRYPTION
-// =========================================================
-
-// =========================================================
-// DATA PLANE: ENCRYPTION (AES-GCM / AES-CBC)
-// =========================================================
-
-int trf_encrypt_payload_gcm(SCryptCipherCtx* ctx, const byte* key, const byte* nonce, int nonce_len, 
-                            const byte* aad, int aad_len,
-                            byte* data, int len, int* new_len_out) {
-    if (!g_pqc_initialized || !data || len == 0 || !ctx) return TRF_PQC_ERR_CRYPTO;
-
-    int ret;
-    if ((ret = scrypt_CipherInit(ctx, CIPHER_TYPE_AES_256_GCM, key, 32, nonce, nonce_len, SCRYPT_ENCRYPTION)) != 0) {
-        return TRF_PQC_ERR_CRYPTO;
-    }
-
-    // Explicitly set tag size for GCM
-    scrypt_CipherSetTagSize(ctx, TAG_SIZE_GCM);
-
-    // Optional AAD - Must be 64-byte aligned for hardware acceleration to process it
-    // if (aad && aad_len > 0) {
-    //     byte aligned_aad[256] __attribute__((aligned(64)));
-    //     if (aad_len > (int)sizeof(aligned_aad)) return TRF_PQC_ERR_CRYPTO;
-    //     memcpy(aligned_aad, aad, aad_len);
-    //     if ((ret = scrypt_CipherUpdateAAD(ctx, aligned_aad, (word32)aad_len)) != 0) {
-    //         return TRF_PQC_ERR_CRYPTO;
-    //     }
-    // }
-
-    word32 outLen = 0, finalLen = 0;
-    if ((ret = scrypt_CipherUpdate(ctx, data, len, data, &outLen)) != 0) {
-        return TRF_PQC_ERR_CRYPTO;
-    }
-    
-    // GCM Final usually handles authentication tag generation
-    if ((ret = scrypt_CipherFinal(ctx, data + outLen, &finalLen)) != 0) {
-        return TRF_PQC_ERR_CRYPTO;
-    }
-
-    byte tag[TAG_SIZE_GCM];
-    word32 tagLen = TAG_SIZE_GCM;
-    if ((ret = scrypt_CipherGetTag(ctx, tag, &tagLen)) != 0) {
-        return TRF_PQC_ERR_CRYPTO;
-    }
-
-    memcpy(data + outLen + finalLen, tag, TAG_SIZE_GCM);
-    *new_len_out = outLen + finalLen + TAG_SIZE_GCM;
-
-    return TRF_PQC_OK;
-}
-
-int trf_decrypt_payload_gcm(SCryptCipherCtx* ctx, const byte* key, const byte* nonce, int nonce_len, 
-                            const byte* aad, int aad_len,
-                            byte* data, int len, int* orig_len_out) {
-    if (!g_pqc_initialized || !data || len <= TAG_SIZE_GCM || !ctx) return TRF_PQC_ERR_CRYPTO;
-
-    int ret;
-    if ((ret = scrypt_CipherInit(ctx, CIPHER_TYPE_AES_256_GCM, key, 32, nonce, nonce_len, SCRYPT_DECRYPTION)) != 0) {
-        return TRF_PQC_ERR_CRYPTO;
-    }
-
-    // CRITICAL FIX: Explicitly set the expected tag size for the context
-    scrypt_CipherSetTagSize(ctx, TAG_SIZE_GCM);
-
-    int payload_len = len - TAG_SIZE_GCM;
-    byte tag[TAG_SIZE_GCM];
-    memcpy(tag, data + payload_len, TAG_SIZE_GCM);
-
-    // 1. Set tag for verification first
-    if (scrypt_CipherSetTag(ctx, tag, TAG_SIZE_GCM) != 0) return TRF_PQC_ERR_CRYPTO;
-
-    // 1. Process AAD (Network Header) - Align to 64-byte for hardware acceleration
-    // if (aad && aad_len > 0) {
-    //     byte aligned_aad[256] __attribute__((aligned(64)));
-    //     if (aad_len > (int)sizeof(aligned_aad)) return TRF_PQC_ERR_CRYPTO;
-    //     memcpy(aligned_aad, aad, aad_len);
-    //     if (scrypt_CipherUpdateAAD(ctx, aligned_aad, (word32)aad_len) != 0) return TRF_PQC_ERR_CRYPTO;
-    // }
-
-    // 3. Process Ciphertext
-    word32 outLen = 0, finalLen = 0;
-    if (scrypt_CipherUpdate(ctx, data, payload_len, data, &outLen) != 0) return TRF_PQC_ERR_CRYPTO;
-    
-    // 4. Finalize and verify integrity (returns non-zero if AAD or Data was tampered)
-    if (scrypt_CipherFinal(ctx, data + outLen, &finalLen) != 0) return TRF_PQC_ERR_CRYPTO;
-
-    *orig_len_out = outLen + finalLen;
-    return TRF_PQC_OK;
-}
-
-int trf_encrypt_payload_cbc(const byte* key, const byte* iv, int iv_len, byte* data, int len) {
-    if (!g_pqc_initialized || !data || len == 0) return TRF_PQC_ERR_CRYPTO;
-    
-    SCryptCipherCtx* ctx = scrypt_CipherCtxNew();
-    if (!ctx) return TRF_PQC_ERR_CRYPTO;
-
-    if (scrypt_CipherInit(ctx, CIPHER_TYPE_AES_256_CBC, key, 32, iv, iv_len, SCRYPT_ENCRYPTION) != 0) goto err;
-
-    word32 outLen = 0, finalLen = 0;
-    if (scrypt_CipherUpdate(ctx, data, len, data, &outLen) != 0) goto err;
-    if (scrypt_CipherFinal(ctx, data + outLen, &finalLen) != 0) goto err;
-
-    scrypt_CipherCtxFree(ctx);
-    return TRF_PQC_OK;
-err:
-    scrypt_CipherCtxFree(ctx);
-    return TRF_PQC_ERR_CRYPTO;
-}
-
-int trf_decrypt_payload_cbc(const byte* key, const byte* iv, int iv_len, byte* data, int len) {
-    if (!g_pqc_initialized || !data || len == 0) return TRF_PQC_ERR_CRYPTO;
-    
-    SCryptCipherCtx* ctx = scrypt_CipherCtxNew();
-    if (!ctx) return TRF_PQC_ERR_CRYPTO;
-
-    if (scrypt_CipherInit(ctx, CIPHER_TYPE_AES_256_CBC, key, 32, iv, iv_len, SCRYPT_DECRYPTION) != 0) goto err;
-
-    word32 outLen = 0, finalLen = 0;
-    if (scrypt_CipherUpdate(ctx, data, len, data, &outLen) != 0) goto err;
-    if (scrypt_CipherFinal(ctx, data + outLen, &finalLen) != 0) goto err;
-
-    scrypt_CipherCtxFree(ctx);
-    return TRF_PQC_OK;
-err:
-    scrypt_CipherCtxFree(ctx);
-    return TRF_PQC_ERR_CRYPTO;
-}
 
 // =========================================================
 // HASHING & MAC (SHA2 / SHA3 / HMAC)
@@ -612,5 +455,3 @@ int trf_pqc_setup_session(const byte* local_priv_dsa, int local_priv_dsa_sz,
     
     return TRF_PQC_OK;
 }
-
-

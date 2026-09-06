@@ -37,4 +37,14 @@ void packet_crypto_refresh_pqc_keys(struct packet_crypto_ctx *ctx);
 
 const uint8_t *packet_crypto_get_key(struct packet_crypto_ctx *ctx, int slot);
 
+/* Layer-2 AES-256-GCM dataplane, backed only by libscrypt. */
+int packet_crypto_generate_nonce(uint8_t nonce[PACKET_CRYPTO_NONCE_BYTES]);
+int packet_crypto_encrypt(struct packet_crypto_ctx *ctx,
+                          const uint8_t nonce[PACKET_CRYPTO_NONCE_BYTES],
+                          uint8_t *data, int plain_len, int *wire_len);
+int packet_crypto_decrypt(struct packet_crypto_ctx *ctx,
+                          const uint8_t nonce[PACKET_CRYPTO_NONCE_BYTES],
+                          uint8_t *data, int wire_len, int *plain_len);
+void packet_crypto_worker_cleanup(void);
+
 #endif

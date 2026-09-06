@@ -1643,8 +1643,9 @@ static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src, uint32
     if (!reserved)
         return 0;
 
-    while (popped < reserved && ne_ring_try_pop(src, &jobs[popped]) == 0)
-        popped++;
+    /* This ring has exactly one TX consumer. Pop the reserved FIFO batch with
+     * one acquire and one tail publish instead of one atomic pair per frame. */
+    popped = ne_ring_try_pop_batch(src, jobs, reserved);
 
     if (popped < reserved)
         slot->tx.cached_prod -= (reserved - popped);

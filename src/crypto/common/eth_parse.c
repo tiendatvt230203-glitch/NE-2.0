@@ -211,9 +211,9 @@ static void tcp_checksum_replace_word(uint8_t *tcp, uint16_t old_word, uint16_t 
     tcp[17] = (uint8_t)(hc & 0xFF);
 }
 
-int crypto_tcp_clamp_mss(uint8_t *pkt, uint32_t pkt_len, uint32_t path_mtu, uint32_t wire_overhead)
+int crypto_tcp_clamp_mss_l3(uint8_t *pkt, uint32_t pkt_len, int l3_off,
+                            uint32_t path_mtu, uint32_t wire_overhead)
 {
-    int l3_off;
     uint8_t *ip;
     uint8_t *tcp;
     uint32_t ihl;
@@ -227,7 +227,6 @@ int crypto_tcp_clamp_mss(uint8_t *pkt, uint32_t pkt_len, uint32_t path_mtu, uint
     if (!pkt || path_mtu < 576)
         return -1;
 
-    l3_off = crypto_eth_ipv4_offset(pkt, pkt_len);
     if (l3_off < 0)
         return -1;
     if (pkt_len < (uint32_t)(l3_off + 20))

@@ -13,16 +13,9 @@ extern "C" {
 #define TRF_PQC_ERR_CRYPTO -2
 #define TRF_PQC_ERR_SIG -3
 
-typedef struct {
-    SCryptCipherCtx* l2_ctx;
-    SCryptCipherCtx* l3_ctx;
-    SCryptCipherCtx* l4_ctx;
-} TrfPqcContext;
-
 // Initialize the library once in main.c
 int trf_pqc_init_global();
 int trf_pqc_generate_random_key(byte* out, int len);
-int trf_pqc_generate_nonce(byte* out_nonce);
 const char* trf_pqc_error_string(int err);
 
 // Cleanup resources before shutdown
@@ -32,49 +25,6 @@ void trf_base64_encode_obfuscated(const unsigned char *src, size_t len, const ch
 void trf_base64_decode(const char *src, unsigned char *out, size_t *out_len);
 void trf_base64_decode_obfuscated(const char *src, const char *seed, unsigned char *out, size_t *out_len);
 int trf_save_key_to_file(const char *filename, const char *data, int mode);
-// ===========================================
-// DATA PLANE: AEAD IN-PLACE ENCRYPTION (GCM MODE)
-// ===========================================
-
-// Encrypt payload in-place. The 'data' buffer will be overwritten.
-// Requirement (Tailroom): The allocated data_len must have at least (len + 16 bytes) capacity.
-// A 16-byte authentication tag will be appended to the end of the 'data' array.
-// aad: Optional Additional Authenticated Data (e.g. network headers)
-int trf_encrypt_payload_gcm(SCryptCipherCtx* ctx, const byte* key, const byte* nonce, int nonce_len, 
-                            const byte* aad, int aad_len,
-                            byte* data, int len, int* new_len_out);
-
-// Decrypt payload in-place. The 'data' buffer will be overwritten with plaintext.
-// The function automatically extracts the 16-byte Tag at the end for authentication comparison.
-// aad: Must match the AAD provided during encryption for successful authentication.
-int trf_decrypt_payload_gcm(SCryptCipherCtx* ctx, const byte* key, const byte* nonce, int nonce_len, 
-                            const byte* aad, int aad_len,
-                            byte* data, int len, int* orig_len_out);
-
-// ===========================================
-// DATA PLANE: CBC + HMAC (Encrypt-then-MAC)
-// ===========================================
-
-// Low-level CBC encrypt/decrypt (used internally by CBC+HMAC combo)
-int trf_encrypt_payload_cbc(const byte* key, const byte* iv, int iv_len, byte* data, int len);
-int trf_decrypt_payload_cbc(const byte* key, const byte* iv, int iv_len, byte* data, int len);
-
-// Combined CBC+HMAC Encrypt-then-MAC:
-// 1. Encrypt data in-place with AES-256-CBC
-// 2. Calculate HMAC-SHA256 over the ciphertext
-// 3. Append 32-byte MAC tag to the end
-// Requirement (Tailroom): buffer must have capacity for (len + 32 bytes).
-int trf_encrypt_cbc_hmac(const byte* enc_key, const byte* hmac_key,
-                         const byte* iv, int iv_len,
-                         byte* data, int len, int* new_len_out);
-
-// Combined CBC+HMAC Decrypt (MAC-then-Decrypt):
-// 1. Extract and verify 32-byte HMAC tag from the end
-// 2. If MAC valid, decrypt with AES-256-CBC
-// 3. If MAC invalid, return error immediately (prevent padding oracle)
-int trf_decrypt_cbc_hmac(const byte* enc_key, const byte* hmac_key,
-                         const byte* iv, int iv_len,
-                         byte* data, int len, int* orig_len_out);
 
 // ===========================================
 // HASHING & AUTHENTICATION (SHA2 / SHA3 / HMAC)
@@ -129,7 +79,7 @@ int trf_dsa_verify_payload(const byte* pub_key_in, int pub_sz,
 
 
 // =========================================================
-// COMPOSITE PQC API (HANDSHAKE + DATA PLANE)
+// COMPOSITE PQC CONTROL-PLANE API
 // =========================================================
 
 typedef struct {

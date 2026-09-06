@@ -16,7 +16,7 @@ void main_diag_log_config_summary(struct app_config *cfg, int trigger_profile_id
                                   int is_reload, int policy_only);
 void main_diag_log_dataplane_ready(struct forwarder *fwd);
 
-/* [NE-KEY] PQC: traffic key actually passed to GCM (from crypto_pqc_sess_load). */
+/* [NE-KEY] PQC: traffic key provisioned to the Layer-2 AEAD engine. */
 
 void main_diag_log_ne_pqc_match(int profile_id, int policy_id, const uint8_t ne_key[32]);
 void main_diag_ne_pqc_clear(int profile_id, int policy_id);
