@@ -221,7 +221,7 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
         goto drop;
 
     if (proto == IPPROTO_TCP) {
-        (void)crypto_tcp_clamp_mss(pkt, job.len, CRYPTO_OPT_FRAG_MTU_DEFAULT,
+        (void)crypto_tcp_clamp_mss(pkt, job.len, crypto_option_get_mtu(),
                                    crypto_option_wire_overhead(CRYPTO_OPT_L2_PQC));
     }
 

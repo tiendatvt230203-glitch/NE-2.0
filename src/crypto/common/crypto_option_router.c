@@ -134,7 +134,8 @@ uint32_t crypto_option_get_mtu(void)
 uint32_t crypto_option_wire_overhead(crypto_option_id id)
 {
     if (id == CRYPTO_OPT_L2_PQC)
-        return 30u;
+        /* policy ID + worker ID + nonce + GCM tag; EtherType is replaced. */
+        return 1u + 1u + PACKET_CRYPTO_NONCE_BYTES + AES_GCM_TAG_SIZE;
     return 0u;
 }
 

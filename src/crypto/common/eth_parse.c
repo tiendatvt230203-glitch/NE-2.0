@@ -238,6 +238,9 @@ int crypto_tcp_clamp_mss(uint8_t *pkt, uint32_t pkt_len, uint32_t path_mtu, uint
         return -1;
     if (ip[9] != 6) /* IPPROTO_TCP */
         return -1;
+    /* A non-initial IP fragment does not begin with a TCP header. */
+    if ((ip[6] & 0x1fu) || ip[7])
+        return 0;
 
     ihl = (uint32_t)(ip[0] & 0x0F) * 4u;
     if (ihl < 20 || pkt_len < (uint32_t)(l3_off + ihl + 20))

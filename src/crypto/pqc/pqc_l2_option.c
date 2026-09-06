@@ -223,27 +223,38 @@ static int opt_store_second(struct opt_entry *entry, uint32_t epoch,
     return 0;
 }
 
-static int opt_emit_join(struct opt_entry *entry, uint8_t *out_buf, uint32_t *out_len)
+/* The arriving fragment is already authenticated. Copy it directly to output
+ * before writing stored bytes, including when output aliases its RX buffer. */
+static int opt_emit_join(struct opt_entry *entry, uint8_t frag_index,
+                         const uint8_t *eth, uint32_t eth_len,
+                         const uint8_t *data, uint32_t data_len,
+                         uint8_t *out_buf, uint32_t *out_len)
 {
-    int eth_len;
-    int off = 0;
+    uint32_t first_len = frag_index == 0 ? data_len : entry->first_len;
+    uint32_t second_len = frag_index == 1 ? data_len : entry->second_len;
 
-    if (!entry->got_first || !entry->got_second)
+    if ((frag_index == 0 && !entry->got_second) ||
+        (frag_index == 1 && !entry->got_first))
         return 0;
-    eth_len = entry->eth_len ? (int)entry->eth_len : (int)ETH_HEADER_SIZE;
-    if (entry->first_len + entry->second_len + (uint32_t)eth_len > NE_FRAME) {
+    if (frag_index == 1) {
+        eth = entry->eth_hdr;
+        eth_len = entry->eth_len;
+    }
+    if (!eth_len || eth_len > ETH_L2_HDR_MAX ||
+        first_len + second_len + eth_len > NE_FRAME) {
         opt_clear_entry(entry);
         return -1;
     }
-    memcpy(out_buf, entry->eth_hdr, (size_t)eth_len);
-    off += eth_len;
-    memcpy(out_buf + off, entry->first, entry->first_len);
-    off += (int)entry->first_len;
-    if (entry->second_len > 0) {
-        memcpy(out_buf + off, entry->second, entry->second_len);
-        off += (int)entry->second_len;
+    if (frag_index == 0) {
+        memmove(out_buf + eth_len, data, first_len);
+        memmove(out_buf, eth, eth_len);
+        memcpy(out_buf + eth_len + first_len, entry->second, second_len);
+    } else {
+        memmove(out_buf + eth_len + first_len, data, second_len);
+        memcpy(out_buf, eth, eth_len);
+        memcpy(out_buf + eth_len, entry->first, first_len);
     }
-    *out_len = (uint32_t)off;
+    *out_len = eth_len + first_len + second_len;
     if (eth_len >= 2)
         crypto_eth_set_ipv4_et(out_buf, eth_len - 2);
     opt_clear_entry(entry);
@@ -769,16 +780,15 @@ static int l2_reassemble(struct opt_table *ft, const uint8_t *pkt_data, uint32_t
         ip_hdr_len = (inner[0] & 0x0F) * 4;
         if (ip_hdr_len < 20 || inner_len < (uint32_t)ip_hdr_len)
             return -1;
-        if (opt_store_first(entry, epoch, datagram_id, bond_seq,
-                            pkt_data, (uint8_t)wire_eth,
-                            inner, inner_len, now) != 0)
+        if (inner_len > sizeof(entry->first))
             return -1;
-        joined = opt_emit_join(entry, out_buf, out_len);
-        if (joined < 0)
-            return -1;
-        if (joined == 0)
-            return 0;
-        return 1;
+        opt_prepare_entry(entry, epoch, datagram_id, bond_seq, now);
+        joined = opt_emit_join(entry, 0, pkt_data, (uint32_t)wire_eth,
+                                inner, inner_len, out_buf, out_len);
+        if (joined != 0)
+            return joined;
+        return opt_store_first(entry, epoch, datagram_id, bond_seq,
+                                pkt_data, (uint8_t)wire_eth, inner, inner_len, now);
     }
     if (frag_index == 1) {
         int joined;
@@ -787,15 +797,15 @@ static int l2_reassemble(struct opt_table *ft, const uint8_t *pkt_data, uint32_t
             entry->epoch == epoch && entry->datagram_id == datagram_id &&
             (now - entry->timestamp_ns) > OPT_FRAG_TIMEOUT_NS)
             opt_clear_entry(entry);
-        if (opt_store_second(entry, epoch, datagram_id, bond_seq,
-                             inner, inner_len, now) != 0)
+        if (inner_len > sizeof(entry->second))
             return -1;
-        joined = opt_emit_join(entry, out_buf, out_len);
-        if (joined < 0)
-            return -1;
-        if (joined == 0)
-            return 0;
-        return 1;
+        opt_prepare_entry(entry, epoch, datagram_id, bond_seq, now);
+        joined = opt_emit_join(entry, 1, pkt_data, (uint32_t)wire_eth,
+                                inner, inner_len, out_buf, out_len);
+        if (joined != 0)
+            return joined;
+        return opt_store_second(entry, epoch, datagram_id, bond_seq,
+                                 inner, inner_len, now);
     }
     return -1;
 }
