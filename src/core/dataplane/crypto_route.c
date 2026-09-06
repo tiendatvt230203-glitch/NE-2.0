@@ -1,7 +1,9 @@
 #include "../../../inc/core/dataplane/crypto_route.h"
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/dataplane/dataplane_util.h"
+#include "../../../inc/core/forwarder/forwarder_crypto_runtime.h"
 #include "../../../inc/crypto/eth_parse.h"
+#include "../../../inc/crypto/crypto_option.h"
 
 #include <arpa/inet.h>
 #include <stdatomic.h>
@@ -150,15 +152,19 @@ void dp_route_set_active_tx_slots(uint32_t slots)
         slots = NE_TX_SLOTS;
     atomic_store_explicit(&g_active_tx_slots, slots, memory_order_release);
 }
-static int dp_route_key_from_tuple(uint32_t src_ip, uint32_t dst_ip,
-                                   uint16_t src_port, uint16_t dst_port,
-                                   uint8_t protocol, struct dp_route_key *key,
-                                   uint8_t *dir_out)
+static int dp_route_key_parse_direction(const uint8_t *pkt, uint32_t len,
+                                        struct dp_route_key *key, uint8_t *dir_out)
 {
+    uint32_t src_ip = 0, dst_ip = 0;
+    uint16_t src_port = 0, dst_port = 0;
+    uint8_t protocol = 0;
     uint32_t ip_a, ip_b;
     uint16_t port_a, port_b;
 
-    if (!key || (protocol != IPPROTO_TCP && protocol != IPPROTO_UDP))
+    if (!key || dp_parse_flow((void *)pkt, len, &src_ip, &dst_ip,
+                              &src_port, &dst_port, &protocol) != 0)
+        return -1;
+    if (protocol != IPPROTO_TCP && protocol != IPPROTO_UDP)
         return -1;
 
     ip_a = ntohl(src_ip);
@@ -185,20 +191,6 @@ static int dp_route_key_from_tuple(uint32_t src_ip, uint32_t dst_ip,
     key->port_b = port_b;
     key->protocol = protocol;
     return 0;
-}
-
-static int dp_route_key_parse_direction(const uint8_t *pkt, uint32_t len,
-                                        struct dp_route_key *key, uint8_t *dir_out)
-{
-    uint32_t src_ip = 0, dst_ip = 0;
-    uint16_t src_port = 0, dst_port = 0;
-    uint8_t protocol = 0;
-
-    if (dp_parse_flow((void *)pkt, len, &src_ip, &dst_ip,
-                      &src_port, &dst_port, &protocol) != 0)
-        return -1;
-    return dp_route_key_from_tuple(src_ip, dst_ip, src_port, dst_port,
-                                   protocol, key, dir_out);
 }
 
 static int dp_route_key_parse(const uint8_t *pkt, uint32_t len,
@@ -255,14 +247,21 @@ static int dp_route_least_loaded(atomic_uint_fast64_t counts[], int count,
     return best;
 }
 
-static struct dp_flow_route dp_flow_route_get_key(const struct dp_route_key *key,
-                                                   int worker_hint)
+static struct dp_flow_route dp_flow_route_get(const uint8_t *pkt, uint32_t len,
+                                               int worker_hint)
 {
     struct dp_flow_route route;
+    struct dp_route_key key;
     struct dp_route_entry *set;
-    uint32_t hash = dp_route_key_hash(key);
+    uint32_t hash = dp_pkt_flow_hash(pkt, len);
     int empty = -1;
 
+    route.worker_idx = dp_hash_to_n(hash, NE_CRYPTO_WORKERS);
+    route.tx_slot = dp_hash_to_n(hash, dp_active_tx_slots());
+    if (dp_route_key_parse(pkt, len, &key) != 0)
+        return route;
+
+    hash = dp_route_key_hash(&key);
     route.worker_idx = dp_hash_to_n(hash, NE_CRYPTO_WORKERS);
     route.tx_slot = dp_hash_to_n(hash, dp_active_tx_slots());
     set = g_route_table[hash & (DP_ROUTE_SET_COUNT - 1u)];
@@ -270,7 +269,7 @@ static struct dp_flow_route dp_flow_route_get_key(const struct dp_route_key *key
     for (int way = 0; way < (int)DP_ROUTE_WAYS; way++) {
         if (!atomic_load_explicit(&set[way].valid, memory_order_acquire))
             continue;
-        if (dp_route_key_equal(&set[way].key, key)) {
+        if (dp_route_key_equal(&set[way].key, &key)) {
             route.worker_idx = set[way].worker_idx;
             route.tx_slot = set[way].tx_slot;
             return route;
@@ -285,7 +284,7 @@ static struct dp_flow_route dp_flow_route_get_key(const struct dp_route_key *key
                 empty = way;
             continue;
         }
-        if (dp_route_key_equal(&set[way].key, key)) {
+        if (dp_route_key_equal(&set[way].key, &key)) {
             route.worker_idx = set[way].worker_idx;
             route.tx_slot = set[way].tx_slot;
             dp_route_insert_unlock();
@@ -311,7 +310,7 @@ static struct dp_flow_route dp_flow_route_get_key(const struct dp_route_key *key
     route.tx_slot = dp_route_least_loaded(g_tx_connection_count,
                                           (int)dp_active_tx_slots(), &g_tx_rr);
 
-    set[empty].key = *key;
+    set[empty].key = key;
     atomic_store_explicit(&set[empty].udp_tx_seq[0], 0u, memory_order_relaxed);
     atomic_store_explicit(&set[empty].udp_tx_seq[1], 0u, memory_order_relaxed);
     set[empty].worker_idx = (uint8_t)route.worker_idx;
@@ -323,20 +322,6 @@ static struct dp_flow_route dp_flow_route_get_key(const struct dp_route_key *key
     atomic_store_explicit(&set[empty].valid, 1, memory_order_release);
     dp_route_insert_unlock();
     return route;
-}
-
-static struct dp_flow_route dp_flow_route_get(const uint8_t *pkt, uint32_t len,
-                                               int worker_hint)
-{
-    struct dp_flow_route route;
-    struct dp_route_key key;
-    uint32_t hash = dp_pkt_flow_hash(pkt, len);
-
-    route.worker_idx = dp_hash_to_n(hash, NE_CRYPTO_WORKERS);
-    route.tx_slot = dp_hash_to_n(hash, dp_active_tx_slots());
-    if (dp_route_key_parse(pkt, len, &key) != 0)
-        return route;
-    return dp_flow_route_get_key(&key, worker_hint);
 }
 
 int dp_pick_tx_slot(const uint8_t *pkt, uint32_t len)
@@ -362,8 +347,7 @@ int dp_flow_pick_tx_slot(const uint8_t *pkt, uint32_t len, int worker_hint)
     return dp_flow_route_get(pkt, len, worker_hint).tx_slot;
 }
 
-static int dp_next_udp_tx_seq(const uint8_t *pkt, uint32_t len,
-                              uint32_t *seq_out)
+int dp_udp_next_tx_seq(const uint8_t *pkt, uint32_t len, uint32_t *seq_out)
 {
     struct dp_route_key key;
     struct dp_route_entry *set;
@@ -371,7 +355,7 @@ static int dp_next_udp_tx_seq(const uint8_t *pkt, uint32_t len,
     uint8_t direction;
 
     if (!seq_out || dp_route_key_parse_direction(pkt, len, &key, &direction) != 0 ||
-        (key.protocol != IPPROTO_UDP && key.protocol != IPPROTO_ICMP))
+        key.protocol != IPPROTO_UDP)
         return -1;
 
     hash = dp_route_key_hash(&key);
@@ -431,11 +415,6 @@ static int dp_next_udp_tx_seq(const uint8_t *pkt, uint32_t len,
     return 0;
 }
 
-int dp_udp_next_tx_seq(const uint8_t *pkt, uint32_t len, uint32_t *seq_out)
-{
-    return dp_next_udp_tx_seq(pkt, len, seq_out);
-}
-
 int dp_crypto_pick_wan_worker(struct forwarder *fwd, const uint8_t *pkt, uint32_t len)
 {
     uint8_t wire_id = 0;
@@ -444,7 +423,11 @@ int dp_crypto_pick_wan_worker(struct forwarder *fwd, const uint8_t *pkt, uint32_
     if (!fwd || !pkt)
         return 0;
 
-    if (!fwd->cfg || !crypto_eth_l2_has_marker(pkt, len))
+    if (crypto_eth_l2_has_arp_marker(pkt, len) || dp_pkt_is_arp(pkt, len))
+        return dp_crypto_pick_local_worker(pkt, len, NULL);
+
+    /* Encrypt data only. Bypass never calls this. */
+    if (!fwd->cfg || !fwd->cfg->crypto_enabled || !fwd_crypto_has_l2_marker(pkt, len))
         return -1;
 
     if (crypto_eth_l2_read_worker_idx(pkt, len, &wire_id) != 0)
@@ -455,4 +438,14 @@ int dp_crypto_pick_wan_worker(struct forwarder *fwd, const uint8_t *pkt, uint32_
     if (wi < 0)
         return -1;
     return wi;
+}
+
+void dp_route_connection_counts(uint64_t worker_counts[NE_CRYPTO_WORKERS],
+                                uint64_t tx_counts[NE_TX_SLOTS])
+{
+    for (uint32_t i = 0; worker_counts && i < NE_CRYPTO_WORKERS; i++)
+        worker_counts[i] = atomic_load_explicit(&g_worker_connection_count[i],
+                                                 memory_order_relaxed);
+    for (uint32_t i = 0; tx_counts && i < NE_TX_SLOTS; i++)
+        tx_counts[i] = atomic_load_explicit(&g_tx_connection_count[i], memory_order_relaxed);
 }

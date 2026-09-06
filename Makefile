@@ -1,12 +1,9 @@
 CC     = gcc
 CLANG  = clang
 
-CFLAGS = -D_GNU_SOURCE -I. -Iinc -Iinc/core -Iinc/crypto -I./include -Isrc/crypto/pqc/include -Wall -Wextra -O2 -mcmodel=medium
-# The packaged libxdp contains the matching libbpf implementation.  Do not
-# also link the appliance's libbpf.so.0 (0.5.x): mixing both ABIs makes BPF
-# objects created by one implementation crash when used by the other.
-LDFLAGS = -Wl,-rpath,'$$ORIGIN/lib' -lelf -lz -lpthread \
-          ./lib/libxdp.so.1.6.0 ./lib/libscrypt.so
+CFLAGS = -D_GNU_SOURCE -I. -Iinc -Iinc/core -Iinc/crypto -Iinc/db -I./include -Isrc/crypto/pqc/include -Wall -O2 -mcmodel=medium $(shell pg_config --includedir 2>/dev/null | xargs -I{} echo -I{})
+LDFLAGS = -Wl,-rpath,'$$ORIGIN/lib' -lbpf -lelf -lz -lpthread \
+          ./lib/libxdp.so.1.6.0 ./lib/libssl.so.3 ./lib/libcrypto.so.3 ./lib/libpq.so.5.14 ./lib/libscrypt.so
 
 BPF_CFLAGS     = -O2 -target bpf -g
 KERNEL_HEADERS = /usr/include
@@ -14,18 +11,32 @@ KERNEL_HEADERS = /usr/include
 LIB_DIR = lib
 TARGET  = network-encryptor
 
+OPT_SRCS = $(wildcard src/crypto/options/common/*.c)
+
+PQC_SRCS = $(wildcard src/crypto/pqc/*.c)
+
+CORE_SRCS = $(wildcard src/core/forwarder/*.c) \
+            $(wildcard src/core/dataplane/*.c) \
+            $(wildcard src/core/iface/*.c) \
+            $(wildcard src/core/flow/*.c) \
+            $(wildcard src/core/failover/*.c) \
+            $(wildcard src/core/util/*.c)
+
+CRYPTO_COMMON_SRCS = $(wildcard src/crypto/common/*.c)
+
 APP_SRC = main.c \
-          src/core/forwarder/forwarder.c \
-          src/core/dataplane/crypto_route.c \
-          src/core/dataplane/idle.c src/core/dataplane/local_egress.c \
-          src/core/dataplane/packet_util.c \
-          src/core/dataplane/wan_ingress.c src/core/iface/xdp_attach.c \
-          src/core/iface/xdp_interface.c \
-          src/core/util/static_config.c src/core/util/cpu_map.c \
-          src/crypto/common/eth_parse.c \
-          src/crypto/common/packet_crypto.c src/crypto/pqc/pqc_l2_option.c \
-          src/crypto/pqc/traffic_crypto.c
+          $(CORE_SRCS) \
+          $(CRYPTO_COMMON_SRCS) \
+          $(OPT_SRCS) \
+          $(PQC_SRCS)
 APP_OBJ = $(APP_SRC:.c=.o)
+
+DB_SRC = src/db/config.c \
+         src/db/db_config.c \
+         src/db/db_env.c \
+         src/db/db_runtime.c \
+         src/db/vault.c
+DB_OBJ = $(DB_SRC:.c=.o)
 
 BPF_OBJ = $(LIB_DIR)/lan.o \
           $(LIB_DIR)/wan.o
@@ -34,17 +45,18 @@ BPF_OBJ = $(LIB_DIR)/lan.o \
 
 all: dirs $(BPF_OBJ) $(TARGET)
 
-$(TARGET): $(APP_OBJ)
-	$(CC) -o $@ $(APP_OBJ) $(LDFLAGS)
+$(TARGET): $(APP_OBJ) $(DB_OBJ)
+	$(CC) -o $@ $(APP_OBJ) $(DB_OBJ) $(LDFLAGS)
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(APP_OBJ:.o=.d) $(DB_OBJ:.o=.d)
 
 $(LIB_DIR)/%.o: bpf/%.c
 	$(CLANG) $(BPF_CFLAGS) -I$(KERNEL_HEADERS) -I./include -c $< -o $@
 
-
 clean:
 	rm -rf network-encryptor src/*.o src/core/*/*.o src/crypto/common/*.o \
 		src/crypto/options/*.o src/crypto/options/common/*.o \
-		src/crypto/pqc/*.o *.o $(BPF_OBJ)
+		src/crypto/pqc/*.o src/db/*.o *.o $(BPF_OBJ)

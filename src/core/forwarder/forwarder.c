@@ -1,11 +1,20 @@
 #include "../../../inc/core/forwarder/forwarder.h"
-#include "../../../inc/crypto/l2_crypto.h"
+#include "../../../inc/core/forwarder/forwarder_wan.h"
+#include "../../../inc/core/forwarder/forwarder_reload.h"
+#include "../../../inc/core/forwarder/forwarder_crypto_runtime.h"
+#include "../../../inc/core/failover/wan_failover.h"
+#include "../../../inc/crypto/crypto_option.h"
 #include "../../../inc/core/dataplane/dataplane.h"
 #include "../../../inc/core/dataplane/crypto_route.h"
 
+#include "../../../inc/core/util/main_diag.h"
 #include "../../../inc/core/iface/interface.h"
-#include "../../../inc/core/iface/xdp_attach.h"
+#include "../../../inc/core/iface/profile_iface_xdp.h"
+#include "../../../inc/core/flow/mac_learn.h"
+#include "../../../inc/core/flow/flow_table.h"
+#include "../../../inc/core/dataplane/dataplane_stats.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
+#include "../../../inc/crypto/pqc_handshake.h"
 
 #include <net/if.h>
 #include <pthread.h>
@@ -13,21 +22,24 @@
 #include <stdatomic.h>
 #include <string.h>
 #include <stdio.h>
-#include <time.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 static atomic_int running = 1;
+static pthread_mutex_t runtime_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t tx_maint_tick;
 
-
-static uint64_t core_now_ns(void)
+static void dp_maint_tick(struct forwarder *fwd)
 {
-    struct timespec ts;
-
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-        return 0;
-    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+    if (!fwd)
+        return;
+    fwd_crypto_maybe_expire_prev_grace();
+    fwd_crypto_pqc_key_lifetime_tick();
+    fwd_wan_drain_tick(fwd);
+    fwd_wan_weight_blend_tick();
+    mac_learn_tick(fwd);
+    ne_dp_stats_tick(fwd);
 }
-
-
 static void pin_cpu(unsigned int cpu)
 {
     cpu_set_t cpuset;
@@ -41,6 +53,55 @@ static void pin_cpu(unsigned int cpu)
                 cpu, strerror(rc));
         fflush(stderr);
     }
+}
+
+static int dataplane_uses_cpu(int cpu)
+{
+    for (uint32_t i = 0; i < NE_RX_LAN_SLOTS; i++)
+        if ((int)NE_CPU_RX_LAN[i] == cpu)
+            return 1;
+    for (uint32_t i = 0; i < NE_TX_SLOTS; i++)
+        if ((int)NE_CPU_TX[i] == cpu)
+            return 1;
+    for (uint32_t i = 0; i < NE_CRYPTO_WORKERS; i++)
+        if ((int)NE_CPU_CRYPTO[i] == cpu)
+            return 1;
+    for (uint32_t i = 0; i < NE_RX_WAN_SLOTS; i++)
+        if ((int)NE_CPU_RX_WAN[i] == cpu)
+            return 1;
+    return 0;
+}
+
+void forwarder_pin_cpu(void)
+{
+    static atomic_int logged;
+    cpu_set_t allowed;
+
+    CPU_ZERO(&allowed);
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0)
+        return;
+    for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {
+        if (!CPU_ISSET(cpu, &allowed) || dataplane_uses_cpu(cpu))
+            continue;
+        pin_cpu((unsigned int)cpu);
+        if (!atomic_exchange_explicit(&logged, 1, memory_order_relaxed))
+            fprintf(stderr, "[DP-CONF] control/DB threads pinned to spare CPU%d\n", cpu);
+        return;
+    }
+
+    /* Never force control/DB work onto RX_LAN CPU0 when every CPU is reserved. */
+    if (!atomic_exchange_explicit(&logged, 1, memory_order_relaxed))
+        fprintf(stderr, "[DP-CONF] no spare housekeeping CPU; control threads left unpinned\n");
+}
+
+void forwarder_runtime_lock(void)
+{
+    pthread_mutex_lock(&runtime_lock);
+}
+
+void forwarder_runtime_unlock(void)
+{
+    pthread_mutex_unlock(&runtime_lock);
 }
 
 #define DP_TX_BURST_MAX   8
@@ -134,11 +195,10 @@ static int dp_burst_tx_local(struct forwarder *fwd, int local_idx, int tx_slot)
     return total;
 }
 
-static int dp_burst_tx_wan(struct forwarder *fwd, int wan_idx, int tx_slot)
+static int dp_tx_wan_once(struct forwarder *fwd, int wan_idx, int tx_slot)
 {
     struct ne_ring *rings[NE_CRYPTO_WORKERS];
     int nring;
-    int total = 0;
 
     if (!ne_pair_wan_live(&fwd->pair, wan_idx))
         return 0;
@@ -150,13 +210,7 @@ static int dp_burst_tx_wan(struct forwarder *fwd, int wan_idx, int tx_slot)
     if (nring <= 0)
         return 0;
 
-    for (int burst = 0; burst < DP_TX_BURST_MAX; burst++) {
-        int sent = ne_tx_drain_wan_all(&fwd->pair, rings, nring, wan_idx, tx_slot);
-        if (sent <= 0)
-            break;
-        total += sent;
-    }
-    return total;
+    return ne_tx_drain_wan_all(&fwd->pair, rings, nring, wan_idx, tx_slot);
 }
 
 struct dp_tx_slot_ctx {
@@ -179,6 +233,35 @@ static void init_iface_meta(struct fwd_iface *iface, const char *ifname)
     iface->ifname[sizeof(iface->ifname) - 1] = '\0';
 }
 
+static uint32_t resolve_runtime_frag_mtu(const struct app_config *cfg)
+{
+    int sockfd;
+    uint32_t min_mtu = CRYPTO_OPT_FRAG_MTU_DEFAULT;
+
+    if (!cfg)
+        return min_mtu;
+
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0)
+        return min_mtu;
+
+    for (int wi = 0; wi < cfg->wan_count; wi++) {
+        struct ifreq ifr;
+        if (!cfg->wans[wi].dataplane)
+            continue;
+        memset(&ifr, 0, sizeof(ifr));
+        strncpy(ifr.ifr_name, cfg->wans[wi].ifname, IFNAMSIZ - 1);
+        ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+        if (ioctl(sockfd, SIOCGIFMTU, &ifr) != 0)
+            continue;
+        if (ifr.ifr_mtu > 0 && (uint32_t)ifr.ifr_mtu < min_mtu)
+            min_mtu = (uint32_t)ifr.ifr_mtu;
+    }
+
+    close(sockfd);
+    return min_mtu;
+}
+
 static void *local_rx_thread(void *arg)
 {
     struct dp_rx_slot_ctx *ctx = arg;
@@ -187,6 +270,7 @@ static void *local_rx_thread(void *arg)
     struct ne_dp_idle idle = {0};
 
     pin_cpu(ctx->cpu_id);
+    (void)flow_table_thread_init();
 
     while (atomic_load_explicit(&running, memory_order_acquire)) {
         dp_burst_refill_local(fwd, ctx->rx_slot);
@@ -206,6 +290,13 @@ static void *local_rx_thread(void *arg)
         }
         ne_dp_idle_note_work(&idle);
 
+        {
+            uint64_t rx_bytes = 0;
+            for (int i = 0; i < rcvd; i++)
+                rx_bytes += batch[i].len;
+            ne_dp_stats_rx_lan(ctx->rx_slot, (uint32_t)rcvd, rx_bytes);
+        }
+
         for (int i = 0; i < rcvd; i++) {
             const uint8_t *pkt = ne_packet_data(&fwd->pair, batch[i].addr);
             int li = batch[i].local_idx < fwd->local_count ? (int)batch[i].local_idx : 0;
@@ -218,18 +309,21 @@ static void *local_rx_thread(void *arg)
                 if (ne_ring_try_push(&fwd->local_to_mid[wi], &batch[i]) != 0) {
                     ne_dp_warn_rx_drop("LAN", (int)ctx->cpu_id, wi,
                                        ne_ring_count(&fwd->local_to_mid[wi]));
-                    ne_packet_free(&fwd->pair, &batch[i]);
+                    ne_dp_stats_rx_ring_drop_lan(ctx->rx_slot, 1);
+                    ne_dp_stats_crypto_ring_drop(wi, 1);
+                    ne_frame_free(&fwd->pair, batch[i].addr);
                 } else {
                     ne_dp_idle_wake(NE_DP_WAKE_CRYPTO(wi));
                 }
                 continue;
             }
-            /* Direct handling is retained only for an explicit fast drop path. */
+            /* Bypass / ARP: RX → TX slot ring. Crypto cores unused. */
             dp_out_ring_bind(dp_pick_tx_slot(pkt, batch[i].len));
             dataplane_process_local(fwd, batch[i]);
         }
         ne_recv_release_local_slot(&fwd->pair, ctx->rx_slot);
     }
+    flow_table_thread_cleanup();
     return NULL;
 }
 
@@ -238,19 +332,43 @@ static void *tx_thread(void *arg)
     struct dp_tx_slot_ctx *ctx = arg;
     struct forwarder *fwd = ctx->fwd;
     int tx_slot = ctx->tx_slot;
+    uint32_t wan_cursor = (uint32_t)tx_slot;
     struct ne_dp_idle idle = {0};
 
     pin_cpu(ctx->cpu_id);
     while (atomic_load_explicit(&running, memory_order_acquire)) {
         int did_work = 0;
 
+        if (tx_slot == 0 && pthread_mutex_trylock(&runtime_lock) == 0) {
+            (void)fwd_reload_apply_if_pending();
+            if ((++tx_maint_tick & 1023u) == 0)
+                dp_maint_tick(fwd);
+            pthread_mutex_unlock(&runtime_lock);
+        }
+
         /* Each CQ helper already drains its owned queues until empty. */
         ne_drain_cq_local(&fwd->pair, tx_slot);
         ne_drain_cq_wan(&fwd->pair, tx_slot);
         for (int li = 0; li < fwd->local_count; li++)
             did_work += dp_burst_tx_local(fwd, li, tx_slot);
-        for (int wi = 0; wi < fwd->wan_count; wi++) {
-            did_work += dp_burst_tx_wan(fwd, wi, tx_slot);
+        /* Interleave one XSK batch per WAN and rotate the first WAN each
+         * round. The old loop could emit 8*32 frames on WAN0 before touching
+         * WAN1, amplifying cross-path skew even after smooth scheduling. */
+        for (int burst = 0; burst < DP_TX_BURST_MAX && fwd->wan_count > 0; burst++) {
+            int round_work = 0;
+
+            for (int off = 0; off < fwd->wan_count; off++) {
+                int wi = (int)((wan_cursor + (uint32_t)off) %
+                               (uint32_t)fwd->wan_count);
+
+                if (fwd_wan_is_stopped(wi))
+                    continue;
+                round_work += dp_tx_wan_once(fwd, wi, tx_slot);
+            }
+            did_work += round_work;
+            wan_cursor = (wan_cursor + 1u) % (uint32_t)fwd->wan_count;
+            if (round_work == 0)
+                break;
         }
         if (did_work)
             ne_dp_idle_note_work(&idle);
@@ -293,27 +411,41 @@ static void *wan_rx_thread(void *arg)
         }
         ne_dp_idle_note_work(&idle);
 
+        {
+            uint64_t rx_bytes = 0;
+            for (int i = 0; i < rcvd; i++)
+                rx_bytes += batch[i].len;
+            ne_dp_stats_rx_wan(ctx->rx_slot, (uint32_t)rcvd, rx_bytes);
+        }
+
         for (int i = 0; i < rcvd; i++) {
             int wi;
             const uint8_t *pkt;
 
+            if (batch[i].wan_idx < MAX_INTERFACES && fwd_wan_is_stopped(batch[i].wan_idx)) {
+                ne_frame_free(&fwd->pair, batch[i].addr);
+                continue;
+            }
             pkt = ne_packet_data(&fwd->pair, batch[i].addr);
             if (dataplane_wan_needs_mid(fwd, pkt, batch[i].len)) {
                 wi = dp_crypto_pick_wan_worker(fwd, pkt, batch[i].len);
                 if (wi < 0 || wi >= (int)NE_CRYPTO_WORKERS) {
-                    ne_packet_free(&fwd->pair, &batch[i]);
+                    ne_dp_stats_wan_drop(1);
+                    ne_frame_free(&fwd->pair, batch[i].addr);
                     continue;
                 }
                 if (ne_ring_try_push(&fwd->wan_to_mid[wi], &batch[i]) != 0) {
                     ne_dp_warn_rx_drop("WAN", (int)ctx->cpu_id, wi,
                                        ne_ring_count(&fwd->wan_to_mid[wi]));
-                    ne_packet_free(&fwd->pair, &batch[i]);
+                    ne_dp_stats_rx_ring_drop_wan(ctx->rx_slot, 1);
+                    ne_dp_stats_crypto_ring_drop(wi, 1);
+                    ne_frame_free(&fwd->pair, batch[i].addr);
                 } else {
                     ne_dp_idle_wake(NE_DP_WAKE_CRYPTO(wi));
                 }
                 continue;
             }
-            /* Plaintext/unknown WAN frames reach this direct drop path. */
+            /* Bypass / ARP: RX → TX slot ring. Crypto cores unused. */
             dp_out_ring_bind(dp_pick_tx_slot(pkt, batch[i].len));
             dataplane_process_wan(fwd, batch[i]);
         }
@@ -353,24 +485,30 @@ static void *crypto_worker_thread(void *arg)
 
     pin_cpu(ctx->cpu_id);
     dp_crypto_worker_bind(ctx->worker_idx);
-    l2_crypto_bind_worker((uint8_t)ctx->worker_idx);
+    crypto_option_bind_worker_idx((uint8_t)ctx->worker_idx);
+    crypto_l2_pqc_bind_pair(&fwd->pair);
+    (void)flow_table_thread_init();
 
-    /* Encrypt, decrypt and UDP reassembly only. */
+    /* Encrypt / decrypt / reasm only. Bypass never queues here. */
     while (atomic_load_explicit(&running, memory_order_acquire)) {
         int did_work = 0;
+        int crypto_on = fwd->cfg && fwd->cfg->crypto_enabled;
 
-        /* Always dequeue fixed-key L2 traffic. */
+        /* Always dequeue: ARP (fixed-key) + encrypt. Bypass is never queued. */
         if (ne_ring_try_pop(&fwd->wan_to_mid[ctx->worker_idx], &job) == 0) {
             dataplane_process_wan(fwd, job);
+            ne_dp_stats_crypto_wan(ctx->worker_idx, 1);
             did_work = 1;
         }
         if (ne_ring_try_pop(&fwd->local_to_mid[ctx->worker_idx], &job) == 0) {
             dp_out_ring_bind(job.tx_slot);
             dataplane_process_local(fwd, job);
+            ne_dp_stats_crypto_lan(ctx->worker_idx, 1);
             did_work = 1;
         }
-        if (++gc_tick >= 2048) {
-            l2_crypto_frag_gc(ctx->worker_idx, core_now_ns());
+        if (crypto_on && ++gc_tick >= 2048) {
+            fwd_crypto_frag_gc_worker_tick(ctx->worker_idx);
+            dataplane_udp_reorder_gc(fwd, ctx->worker_idx);
             gc_tick = 0;
         }
 
@@ -379,6 +517,8 @@ static void *crypto_worker_thread(void *arg)
         else
             crypto_idle_pause(fwd, &idle, ctx->worker_idx);
     }
+    dataplane_udp_reorder_reset(fwd, ctx->worker_idx);
+    flow_table_thread_cleanup();
     return NULL;
 }
 
@@ -388,36 +528,54 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
         return -1;
     if (forwarder_should_stop())
         return -1;
+    if (config_count_dataplane_wans(cfg) <= 0) {
+        fprintf(stderr,
+                "[FWD] no dataplane WAN — LAN-only until a dataplane WAN is added\n");
+        fflush(stderr);
+    }
+
     memset(fwd, 0, sizeof(*fwd));
+    dataplane_udp_reorder_configure();
     fwd->cfg = cfg;
     fwd->local_count = cfg->local_count;
-    fwd->wan_count = cfg->wan_count;
+    fwd->wan_count = config_count_dataplane_wans(cfg);
     if (fwd->local_count > MAX_INTERFACES)
         fwd->local_count = MAX_INTERFACES;
     if (fwd->wan_count > MAX_INTERFACES)
         fwd->wan_count = MAX_INTERFACES;
-    fprintf(stderr, "[CORE] debug mode: one LAN, one WAN\n");
 
-    fprintf(stderr, "[FRAG] encrypted UDP wire MTU=%u\n", L2_CRYPTO_MTU);
+    crypto_option_set_mtu(resolve_runtime_frag_mtu(cfg));
+    fprintf(stderr, "[FRAG] runtime MTU set to %u\n", crypto_option_get_mtu());
+    ne_dp_stats_init();
     ne_dp_idle_init();
 
     for (int i = 0; i < fwd->local_count; i++)
         init_iface_meta(&fwd->locals[i], cfg->locals[i].ifname);
-    for (int i = 0; i < fwd->wan_count; i++)
-        init_iface_meta(&fwd->wans[i], cfg->wans[i].ifname);
+    for (int di = 0; di < fwd->wan_count; di++) {
+        int ci = config_wan_dp_to_cfg(cfg, di);
+        if (ci < 0)
+            return -1;
+        fwd->wan_cfg_idx[di] = ci;
+        init_iface_meta(&fwd->wans[di], cfg->wans[ci].ifname);
+    }
 
-    xdp_attach_prepare_init(cfg);
+    profile_iface_xdp_prepare_init(cfg);
 
     if (forwarder_should_stop())
         return -1;
 
-    if (packet_crypto_init(&fwd->crypto, cfg->key) != 0)
+    if (fwd_crypto_rebuild(cfg) != 0)
         return -1;
-    if (ne_pair_open(&fwd->pair, cfg) != 0) {
-        ne_dp_idle_shutdown();
+    if (forwarder_should_stop())
         return -1;
-    }
-    if (xdp_attach_all(&fwd->pair, cfg) != 0) {
+
+    fwd_crypto_reset_on_init();
+
+    pqc_handshake_start_all_profiles(cfg);
+
+    if (ne_pair_open(&fwd->pair, cfg) != 0)
+        return -1;
+    if (profile_iface_xdp_attach_init(&fwd->pair, cfg) != 0) {
         forwarder_cleanup(fwd);
         return -1;
     }
@@ -450,6 +608,16 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
         }
     }
 
+    fwd_wan_reset_on_init(fwd);
+    // MAC_LEARN
+    mac_learn_bootstrap(&fwd->mac_table);
+    mac_learn_refresh_iface_macs(fwd);
+    mac_learn_restore(fwd);
+    // MAC_LEARN
+    if (wan_failover_start(fwd) != 0) {
+        fprintf(stderr, "[FWD] wan_failover_start failed\n");
+        fflush(stderr);
+    }
     atomic_store_explicit(&running, 1, memory_order_release);
     return 0;
 }
@@ -458,6 +626,11 @@ void forwarder_cleanup(struct forwarder *fwd)
 {
     if (!fwd)
         return;
+    wan_failover_stop();
+    // MAC_LEARN
+    mac_learn_persist(fwd);
+    mac_learn_shutdown(&fwd->mac_table);
+    // MAC_LEARN
     for (int w = 0; w < (int)NE_CRYPTO_WORKERS; w++) {
         ne_ring_destroy(&fwd->local_to_mid[w]);
         ne_ring_destroy(&fwd->wan_to_mid[w]);
@@ -566,6 +739,8 @@ void forwarder_run(struct forwarder *fwd)
     fwd->threads_started = 1;
     if (fwd->cfg) {
         ne_cpu_map_log();
+        fwd_crypto_sync_pqc_session_keys(fwd->cfg);
+        main_diag_log_dataplane_ready(fwd);
     }
     for (int w = 0; w < local_rx_started; w++)
         pthread_join(fwd->local_rx_threads[w], NULL);
@@ -582,6 +757,16 @@ void forwarder_stop(void)
 {
     atomic_store_explicit(&running, 0, memory_order_release);
     ne_dp_idle_wake_all();
+}
+
+void forwarder_clear_stop(void)
+{
+    atomic_store_explicit(&running, 1, memory_order_release);
+}
+
+void forwarder_shutdown_resources(void)
+{
+    fwd_reload_shutdown();
 }
 
 int forwarder_should_stop(void)

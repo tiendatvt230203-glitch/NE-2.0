@@ -3,7 +3,7 @@
 
 #include "core/iface/interface.h"
 #include "core/dataplane/crypto_route.h"
-#include "crypto/packet_crypto.h"
+#include "core/flow/mac_learn.h"
 
 struct fwd_iface {
     int ifindex;
@@ -17,8 +17,9 @@ struct forwarder {
     int local_count;
     struct fwd_iface wans[MAX_INTERFACES];
     int wan_count;
+    int wan_cfg_idx[MAX_INTERFACES];
+
     struct ne_pair pair;
-    struct packet_crypto_ctx crypto;
     struct ne_ring local_to_mid[NE_CRYPTO_WORKERS];
     struct ne_ring wan_to_mid[NE_CRYPTO_WORKERS];
     struct ne_ring mid_to_wan[MAX_INTERFACES][NE_CRYPTO_WORKERS];
@@ -30,17 +31,34 @@ struct forwarder {
     pthread_t wan_rx_threads[NE_RX_WAN_SLOTS];
     int threads_started;
 
-    __attribute__((aligned(64)))
-    uint8_t crypto_buf[NE_CRYPTO_WORKERS][NE_JUMBO_FRAME_MAX];
-    __attribute__((aligned(64)))
-    uint8_t crypto_aux[NE_CRYPTO_WORKERS][NE_JUMBO_FRAME_MAX];
+    uint64_t split_tail_cache[NE_CRYPTO_WORKERS][64];
+    uint16_t split_tail_count[NE_CRYPTO_WORKERS];
 
+    struct mac_learn_table mac_table;
 };
 
+static inline uint32_t fwd_mid_to_wan_depth(const struct forwarder *fwd, int wan_dp)
+{
+    uint32_t d = 0;
+    if (!fwd || wan_dp < 0)
+        return 0;
+    for (int w = 0; w < (int)NE_CRYPTO_WORKERS; w++)
+        d += ne_ring_count(&fwd->mid_to_wan[wan_dp][w]);
+    return d;
+}
+
+void forwarder_pin_cpu(void);
 int forwarder_init(struct forwarder *fwd, struct app_config *cfg);
+#define FORWARDER_WAN_DRAIN_SEC 5
+
+void forwarder_runtime_lock(void);
+void forwarder_runtime_unlock(void);
+
 void forwarder_cleanup(struct forwarder *fwd);
 void forwarder_run(struct forwarder *fwd);
 void forwarder_stop(void);
+void forwarder_clear_stop(void);
+void forwarder_shutdown_resources(void);
 int forwarder_should_stop(void);
 
 #endif
