@@ -26,7 +26,9 @@ static __thread uint8_t g_udp_tx_valid;
 
 enum l2_crypto_proto l2_crypto_classify(uint8_t ip_proto)
 {
-    return ip_proto == IPPROTO_UDP ? L2_PROTO_UDP : L2_PROTO_DATA;
+    if (ip_proto == IPPROTO_UDP)
+        return L2_PROTO_UDP;
+    return ip_proto == IPPROTO_ICMP ? L2_PROTO_ICMP : L2_PROTO_DATA;
 }
 
 void l2_crypto_bind_worker(uint8_t worker_idx)
@@ -652,7 +654,8 @@ static int l2_split(struct packet_crypto_ctx *ctx, uint8_t *pkt_data, uint32_t p
     ip_proto = ip_hdr[9];
     ip_payload = pkt_data + l3_off + ip_hdr_len;
     ip_payload_len = pkt_len - (uint32_t)l3_off - (uint32_t)ip_hdr_len;
-    if (ip_proto != 17)
+    /* UDP and ICMP both keep their eight-byte header in fragment zero. */
+    if (ip_proto != IPPROTO_UDP && ip_proto != IPPROTO_ICMP)
         return -1;
     if (ip_payload_len < 8)
         return -1;
@@ -893,6 +896,15 @@ static int l2_tcp_decrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt, uint32_t 
 int l2_crypto_need_udp_split(uint32_t packet_len)
 {
     return l2_udp_need_split(packet_len);
+}
+
+int l2_crypto_need_split(enum l2_crypto_proto proto, uint32_t packet_len)
+{
+    if (proto == L2_PROTO_UDP)
+        return l2_crypto_need_udp_split(packet_len);
+    if (proto == L2_PROTO_ICMP)
+        return packet_len > ETH_HEADER_SIZE + L2_CRYPTO_MTU - L2_CRYPTO_DATA_OVERHEAD;
+    return 0;
 }
 
 int l2_crypto_split_udp(struct packet_crypto_ctx *ctx,

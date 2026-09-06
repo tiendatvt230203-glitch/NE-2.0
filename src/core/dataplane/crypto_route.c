@@ -371,7 +371,7 @@ static int dp_next_udp_tx_seq(const uint8_t *pkt, uint32_t len,
     uint8_t direction;
 
     if (!seq_out || dp_route_key_parse_direction(pkt, len, &key, &direction) != 0 ||
-        key.protocol != IPPROTO_UDP)
+        (key.protocol != IPPROTO_UDP && key.protocol != IPPROTO_ICMP))
         return -1;
 
     hash = dp_route_key_hash(&key);

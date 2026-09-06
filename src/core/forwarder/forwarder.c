@@ -17,14 +17,6 @@
 #include <unistd.h>
 static atomic_int running = 1;
 
-static uint64_t core_stats_now_ms(void)
-{
-    struct timespec ts;
-
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-        return 0;
-    return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
-}
 
 static uint64_t core_now_ns(void)
 {
@@ -35,66 +27,6 @@ static uint64_t core_now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
-static void core_stats_tick(struct forwarder *fwd)
-{
-    static uint64_t last_ms;
-    struct ne_xdp_socket_stats lan_xdp;
-    struct ne_xdp_socket_stats wan_xdp;
-    uint64_t tx_no_free_lan = 0, tx_no_free_wan = 0;
-    uint64_t multibuf_lan = 0, multibuf_wan = 0;
-    uint32_t local_to_mid = 0, wan_to_mid = 0;
-    uint32_t mid_to_local = 0, mid_to_wan = 0;
-    uint64_t now;
-
-    if (!fwd || !fwd->cfg)
-        return;
-    now = core_stats_now_ms();
-    if (!now || now - last_ms < 1000u)
-        return;
-    last_ms = now;
-
-    for (int w = 0; w < (int)NE_CRYPTO_WORKERS; w++) {
-        local_to_mid += ne_ring_count(&fwd->local_to_mid[w]);
-        wan_to_mid += ne_ring_count(&fwd->wan_to_mid[w]);
-        for (int i = 0; i < fwd->local_count; i++)
-            mid_to_local += ne_ring_count(&fwd->mid_to_local[i][w]);
-        for (int i = 0; i < fwd->wan_count; i++)
-            mid_to_wan += ne_ring_count(&fwd->mid_to_wan[i][w]);
-    }
-    for (int i = 0; i < fwd->pair.local_count; i++) {
-        tx_no_free_lan += __atomic_load_n(&fwd->pair.locals[i].tx_no_free,
-                                          __ATOMIC_RELAXED);
-        for (int q = 0; q < fwd->pair.locals[i].queue_count; q++)
-            multibuf_lan += __atomic_load_n(
-                &fwd->pair.locals[i].queues[q].rx_chain_dropped,
-                __ATOMIC_RELAXED);
-    }
-    for (int i = 0; i < fwd->pair.wan_count; i++) {
-        tx_no_free_wan += __atomic_load_n(&fwd->pair.wans[i].tx_no_free,
-                                          __ATOMIC_RELAXED);
-        for (int q = 0; q < fwd->pair.wans[i].queue_count; q++)
-            multibuf_wan += __atomic_load_n(
-                &fwd->pair.wans[i].queues[q].rx_chain_dropped,
-                __ATOMIC_RELAXED);
-    }
-    ne_pair_xdp_socket_stats(&fwd->pair, &lan_xdp, &wan_xdp);
-    fprintf(stderr,
-            "[CORE-DIAG-STATS] pool=%u/%u rings=%u/%u/%u/%u "
-            "tx_no_free=%llu/%llu multibuf=%llu/%llu "
-            "xdp_drop=%llu/%llu invalid_rx=%llu/%llu invalid_tx=%llu/%llu\n",
-            ne_pool_free_count(&fwd->pair), fwd->pair.n_frames,
-            local_to_mid, wan_to_mid, mid_to_wan, mid_to_local,
-            (unsigned long long)tx_no_free_wan,
-            (unsigned long long)tx_no_free_lan,
-            (unsigned long long)multibuf_wan,
-            (unsigned long long)multibuf_lan,
-            (unsigned long long)wan_xdp.rx_dropped,
-            (unsigned long long)lan_xdp.rx_dropped,
-            (unsigned long long)wan_xdp.rx_invalid_descs,
-            (unsigned long long)lan_xdp.rx_invalid_descs,
-            (unsigned long long)wan_xdp.tx_invalid_descs,
-            (unsigned long long)lan_xdp.tx_invalid_descs);
-}
 
 static void pin_cpu(unsigned int cpu)
 {
@@ -311,9 +243,6 @@ static void *tx_thread(void *arg)
     pin_cpu(ctx->cpu_id);
     while (atomic_load_explicit(&running, memory_order_acquire)) {
         int did_work = 0;
-
-        if (tx_slot == 0)
-            core_stats_tick(fwd);
 
         /* Each CQ helper already drains its owned queues until empty. */
         ne_drain_cq_local(&fwd->pair, tx_slot);

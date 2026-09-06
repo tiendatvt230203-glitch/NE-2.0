@@ -14,12 +14,15 @@ Core path:
    `src/core/util/static_config.c`.
 4. IPv4 input accepts every valid `total_length` up to `9000`, including
    the full `1501..8999` range. Encrypted non-UDP output must still fit WAN MTU;
-   TCP relies on MSS negotiation, and oversized ICMP/OSPF output is dropped.
+   TCP relies on MSS negotiation, and oversized OSPF output is dropped.
 5. UDP is split only if encrypted length exceeds 9014 bytes (14-byte Ethernet
    header plus WAN MTU 9000); equality stays in one frame. Both fragments are authenticated
    before being reassembled at the receiver. There is no reorder/hold buffer.
 6. TCP SYN MSS is clamped so encrypted TCP remains within WAN MTU 9000.
-7. TCP, ICMP and OSPF are authenticated/decrypted and sent directly.
+7. ICMP uses the normal 31-byte-overhead format while it fits; oversized ICMP
+   uses the same two-fragment authenticated format and reassembly as UDP.
+   Its original IP/ICMP headers and checksums are restored byte-for-byte.
+   TCP and OSPF are authenticated/decrypted and sent directly.
 
 The wire header contains no policy/key ID. It is:
 

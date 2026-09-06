@@ -62,6 +62,7 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
     uint32_t len = job->len;
     uint32_t l1 = 0, l2 = 0;
     uint32_t udp_seq;
+    int split = l2_crypto_need_split(proto, len);
 
     (void)flow_ok;
 
@@ -69,13 +70,13 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
         (void)crypto_tcp_clamp_mss(pkt, len, L2_CRYPTO_MTU,
                                    L2_CRYPTO_DATA_OVERHEAD);
 
-    if (proto == L2_PROTO_UDP) {
+    if (proto == L2_PROTO_UDP || split) {
         if (!flow_ok || dp_udp_next_tx_seq(pkt, len, &udp_seq) != 0)
             return -1;
         l2_crypto_udp_set_tx_seq(udp_seq);
     }
 
-    if (proto == L2_PROTO_UDP && l2_crypto_need_udp_split(len)) {
+    if (split) {
         if (l2_crypto_split_udp(pctx, pkt, len, NE_JUMBO_FRAME_MAX, &l1,
                                 tail_buf, NE_JUMBO_FRAME_MAX, &l2) != 0)
             return -1;

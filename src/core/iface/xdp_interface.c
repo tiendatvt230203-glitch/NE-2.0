@@ -748,6 +748,12 @@ static int open_iface_queues(struct ne_pair *p, struct ne_iface *iface,
     const uint32_t mode = XDP_FLAGS_DRV_MODE;
     int ret = 0;
 
+    if (queue_count <= 0 || queue_count > MAX_QUEUES) {
+        fprintf(stderr, "[DP] XSK %s invalid queue count=%d\n",
+                ifname, queue_count);
+        return -EINVAL;
+    }
+
     iface->ifindex = (int)if_nametoindex(ifname);
     if (!iface->ifindex) {
         fprintf(stderr, "[DP] XSK open failed %s: interface not found\n", ifname);
@@ -784,7 +790,7 @@ static int open_iface_queues(struct ne_pair *p, struct ne_iface *iface,
 
         open_iface_queues_rollback(p, iface, q);
         interface_log_xsk_context(ifname, q, ret);
-        return -1;
+        return ret;
     }
 }
 
@@ -960,8 +966,9 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
     p->umem_fq_q = 0;
 
     for (int i = 0; i < p->local_count; i++) {
+        const int wanted_queues = p->locals[i].queue_count;
         int rc = open_iface_queues(p, &p->locals[i], cfg->locals[i].ifname,
-                                   p->locals[i].queue_count);
+                                   wanted_queues);
         if (rc) {
             /* One scrub+retry — common after rapid delete/recreate. */
             fprintf(stderr,
@@ -971,15 +978,16 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
             xdp_attach_detach_ifname(cfg->locals[i].ifname);
             usleep(150000);
             rc = open_iface_queues(p, &p->locals[i], cfg->locals[i].ifname,
-                                   p->locals[i].queue_count);
+                                   wanted_queues);
         }
         if (rc)
             NE_OPEN_ABORT("LAN-XSK-create", cfg->locals[i].ifname, rc);
     }
     for (int di = 0; di < p->wan_count; di++) {
+        const int wanted_queues = p->wans[di].queue_count;
         int rc;
         rc = open_iface_queues(p, &p->wans[di], cfg->wans[di].ifname,
-                               p->wans[di].queue_count);
+                               wanted_queues);
         if (rc) {
             fprintf(stderr,
                     "[DP] WAN %s XSK bind failed — scrub XDP and retry once\n",
@@ -988,7 +996,7 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
             xdp_attach_detach_ifname(cfg->wans[di].ifname);
             usleep(150000);
             rc = open_iface_queues(p, &p->wans[di], cfg->wans[di].ifname,
-                                   p->wans[di].queue_count);
+                                   wanted_queues);
         }
         if (rc)
             NE_OPEN_ABORT("WAN-XSK-create", cfg->wans[di].ifname, rc);

@@ -25,7 +25,7 @@
 4. Crypto worker tuyến tính hóa chain vào buffer 9216 byte; kết quả được ghi
    lại thành chain trước khi TX.
 5. TX đặt `XDP_PKT_CONTD` trên mọi descriptor trừ descriptor cuối.
-6. TCP SYN được clamp MSS với 29 byte overhead để encrypted TCP vẫn nằm trong
+6. TCP SYN được clamp MSS với 31 byte overhead để encrypted TCP vẫn nằm trong
    giới hạn MTU 9000.
 7. UDP vượt wire MTU được tạo thành hai encrypted wire-packet: fragment đầu
    lấp đầy ngân sách MTU, fragment sau chứa payload còn lại. Receiver xác thực
@@ -38,7 +38,7 @@
 
 ## Việc chưa làm
 
-1. ICMP/OSPF không tách/ráp riêng; nếu cộng overhead mã hóa vượt MTU WAN thì drop.
+1. OSPF chưa tách/ráp; ICMP quá MTU sau mã hóa dùng chung tách/ráp hai mảnh với UDP.
 2. Chỉ xử lý Ethernet không tag; VLAN/QinQ đi XDP_PASS cho kernel.
 3. Chưa tối ưu crypto scatter/gather trực tiếp; hiện tại dùng buffer tuyến tính
    riêng theo worker để ưu tiên tính đúng đắn.
