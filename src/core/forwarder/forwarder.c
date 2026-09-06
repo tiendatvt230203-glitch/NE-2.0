@@ -460,6 +460,8 @@ struct crypto_worker_ctx {
     uint8_t cpu_id;
 };
 
+#define CRYPTO_WORKER_BATCH 16u
+
 static void crypto_idle_pause(struct forwarder *fwd, struct ne_dp_idle *idle, int worker_idx)
 {
     int wake_id = NE_DP_WAKE_CRYPTO(worker_idx);
@@ -479,7 +481,7 @@ static void *crypto_worker_thread(void *arg)
 {
     struct crypto_worker_ctx *ctx = arg;
     struct forwarder *fwd = ctx->fwd;
-    struct ne_packet job;
+    struct ne_packet jobs[CRYPTO_WORKER_BATCH];
     uint32_t gc_tick = 0;
     struct ne_dp_idle idle = {0};
 
@@ -493,17 +495,26 @@ static void *crypto_worker_thread(void *arg)
     while (atomic_load_explicit(&running, memory_order_acquire)) {
         int did_work = 0;
         int crypto_on = fwd->cfg && fwd->cfg->crypto_enabled;
+        uint32_t n;
 
-        /* Always dequeue: ARP (fixed-key) + encrypt. Bypass is never queued. */
-        if (ne_ring_try_pop(&fwd->wan_to_mid[ctx->worker_idx], &job) == 0) {
-            dataplane_process_wan(fwd, job);
-            ne_dp_stats_crypto_wan(ctx->worker_idx, 1);
+        /* Drain small batches to amortize ring atomics and worker-loop
+         * overhead while keeping WAN/LAN fairness and bounded latency. */
+        n = ne_ring_try_pop_batch(&fwd->wan_to_mid[ctx->worker_idx], jobs,
+                                  CRYPTO_WORKER_BATCH);
+        for (uint32_t i = 0; i < n; i++)
+            dataplane_process_wan(fwd, jobs[i]);
+        if (n) {
+            ne_dp_stats_crypto_wan(ctx->worker_idx, n);
             did_work = 1;
         }
-        if (ne_ring_try_pop(&fwd->local_to_mid[ctx->worker_idx], &job) == 0) {
-            dp_out_ring_bind(job.tx_slot);
-            dataplane_process_local(fwd, job);
-            ne_dp_stats_crypto_lan(ctx->worker_idx, 1);
+        n = ne_ring_try_pop_batch(&fwd->local_to_mid[ctx->worker_idx], jobs,
+                                  CRYPTO_WORKER_BATCH);
+        for (uint32_t i = 0; i < n; i++) {
+            dp_out_ring_bind(jobs[i].tx_slot);
+            dataplane_process_local(fwd, jobs[i]);
+        }
+        if (n) {
+            ne_dp_stats_crypto_lan(ctx->worker_idx, n);
             did_work = 1;
         }
         if (crypto_on && ++gc_tick >= 2048) {

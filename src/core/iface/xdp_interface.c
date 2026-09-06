@@ -293,6 +293,29 @@ int ne_ring_try_pop(struct ne_ring *r, struct ne_packet *pkt)
     return 0;
 }
 
+uint32_t ne_ring_try_pop_batch(struct ne_ring *r, struct ne_packet *pkts,
+                               uint32_t max_n)
+{
+    uint32_t tail, head, avail, n;
+
+    if (!r || !pkts || max_n == 0)
+        return 0;
+
+    if (r->mpsc_pop)
+        pthread_spin_lock(&r->pop_lock);
+    tail = __atomic_load_n(&r->tail, __ATOMIC_RELAXED);
+    head = __atomic_load_n(&r->head, __ATOMIC_ACQUIRE);
+    avail = head - tail;
+    n = avail < max_n ? avail : max_n;
+    for (uint32_t i = 0; i < n; i++)
+        pkts[i] = r->buf[(tail + i) & r->mask];
+    if (n)
+        __atomic_store_n(&r->tail, tail + n, __ATOMIC_RELEASE);
+    if (r->mpsc_pop)
+        pthread_spin_unlock(&r->pop_lock);
+    return n;
+}
+
 uint32_t ne_ring_count(const struct ne_ring *r)
 {
     uint32_t head = __atomic_load_n(&r->head, __ATOMIC_ACQUIRE);

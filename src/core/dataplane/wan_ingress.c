@@ -167,12 +167,6 @@ static int wan_try_l2_pqc_udp(struct forwarder *fwd, uint8_t *pkt, uint32_t *len
     return 1;
 }
 
-/* L2 UDP fragment on wire: profile lookup only needs L2 header + policy_id. */
-static int wan_l2_is_frag(const uint8_t *pkt, uint32_t len)
-{
-    return wan_l2_is_udp_tagged(pkt, len);
-}
-
 static int decrypt_wan(struct forwarder *fwd, struct ne_packet *job)
 {
     uint8_t scratch[8192];
@@ -496,8 +490,6 @@ int dataplane_wan_needs_mid(struct forwarder *fwd, const uint8_t *pkt, uint32_t 
 void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
 {
     uint8_t *pkt = ne_packet_data(&fwd->pair, job.addr);
-    uint8_t wire_buf[NE_FRAME];
-    uint32_t wire_len;
     int dec;
     int encrypted;
     int profile_pi;
@@ -505,18 +497,8 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
     if (!fwd || !pkt)
         goto drop;
 
-    wire_len = job.len;
-    if (wire_len < 14u || wire_len > NE_FRAME)
+    if (job.len < 14u || job.len > NE_FRAME)
         goto drop;
-    /* L2 frag pending is freed after decrypt; snapshot header only (policy_id). */
-    if (wan_l2_is_frag(pkt, wire_len)) {
-        uint32_t snap = wire_len < 64u ? wire_len : 64u;
-
-        memcpy(wire_buf, pkt, snap);
-        wire_len = snap;
-    } else {
-        memcpy(wire_buf, pkt, wire_len);
-    }
 
     if (crypto_eth_l2_has_arp_marker(pkt, job.len) || dp_pkt_is_arp(pkt, job.len)) {
         int wan_dp = job.wan_idx < fwd->wan_count ? (int)job.wan_idx : -1;
@@ -532,6 +514,11 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
     }
 
     encrypted = wan_wire_is_encrypted(fwd, pkt, job.len);
+    /* Resolve the wire policy before in-place decrypt overwrites the encrypted
+     * L2 header.  Keeping this integer replaces a full NE_FRAME stack copy. */
+    profile_pi = wan_profile_pi(fwd, pkt, job.len);
+    if (profile_pi < 0)
+        goto drop;
     if (encrypted) {
         crypto_option_udp_clear_rx_meta();
         if (!fwd->cfg->crypto_enabled)
@@ -546,9 +533,6 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
         if (dec != 0)
             goto drop;
         pkt = ne_packet_data(&fwd->pair, job.addr);
-        profile_pi = wan_profile_pi(fwd, wire_buf, wire_len);
-        if (profile_pi < 0)
-            goto drop;
         /* Any/any: không so 5-tuple từng gói. Không any mới wan_policy_in_ok. */
         if (!fwd->cfg->profiles[profile_pi].policy_in_any) {
             if (!wan_policy_in_ok(fwd, profile_pi, pkt, job.len))
@@ -557,10 +541,6 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
         wan_clamp_tcp_mss(fwd, pkt, job.len);
     } else {
         if (!wan_l2_plain_ipv4(pkt, job.len))
-            goto drop;
-        /* Bypass đã AND 5-tuple trong wan_profile_pi_bypass — không quét lại. */
-        profile_pi = wan_profile_pi(fwd, wire_buf, wire_len);
-        if (profile_pi < 0)
             goto drop;
     }
 

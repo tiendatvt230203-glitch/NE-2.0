@@ -53,7 +53,7 @@ static inline int crypto_pqc_sess_load(struct packet_crypto_ctx *ctx, crypto_pqc
         zero_key_logged[ctx->wire_id] = 0;
     sess->key = key;
     sess->aad = HARDCODED_AAD;
-    sess->aad_len = 12;
+    sess->aad_len = (int)sizeof(HARDCODED_AAD);
     return 0;
 }
 
@@ -117,20 +117,20 @@ static inline int crypto_pqc_decrypt_payload_resilient(
 {
     crypto_pqc_sess_t sess;
     const byte *keys[KEY_SLOT_COUNT];
+    const byte *candidates[KEY_SLOT_COUNT];
     const int order[KEY_SLOT_COUNT] = {
         KEY_SLOT_CURRENT, KEY_SLOT_NEXT, KEY_SLOT_PREV
     };
     byte saved[2048];
-    int attempted = 0;
+    int candidate_count = 0;
 
     if (!ctx || !data || len <= 0 || len > (int)sizeof(saved))
         return -1;
-    memcpy(saved, data, (size_t)len);
     for (int i = 0; i < KEY_SLOT_COUNT; i++)
         keys[i] = packet_crypto_get_key(ctx, i);
 
     sess.aad = HARDCODED_AAD;
-    sess.aad_len = 12;
+    sess.aad_len = (int)sizeof(HARDCODED_AAD);
     for (int oi = 0; oi < KEY_SLOT_COUNT; oi++) {
         const byte *candidate = keys[order[oi]];
         int duplicate = 0;
@@ -138,19 +138,34 @@ static inline int crypto_pqc_decrypt_payload_resilient(
         if (!candidate ||
             crypto_pqc_key_is_all_zero(candidate, PQC_TRAFFIC_KEY_SZ))
             continue;
-        for (int pj = 0; pj < oi; pj++) {
-            const byte *prior = keys[order[pj]];
-            if (prior && memcmp(prior, candidate, PQC_TRAFFIC_KEY_SZ) == 0) {
+        for (int pj = 0; pj < candidate_count; pj++) {
+            if (memcmp(candidates[pj], candidate, PQC_TRAFFIC_KEY_SZ) == 0) {
                 duplicate = 1;
                 break;
             }
         }
         if (duplicate)
             continue;
-        if (attempted)
+        candidates[candidate_count++] = candidate;
+    }
+
+    if (candidate_count == 0)
+        return -1;
+
+    /* Normal operation has one unique traffic key (static key, or CURRENT
+     * outside a rotation).  Decrypt it directly and avoid copying the whole
+     * ciphertext into a 2 KiB retry buffer for every packet. */
+    sess.key = candidates[0];
+    if (candidate_count == 1)
+        return crypto_pqc_decrypt_payload(&sess, nonce, data, len, out_len);
+
+    /* During rotation an unsuccessful in-place GCM attempt may modify data,
+     * so retain the original ciphertext only while fallback keys exist. */
+    memcpy(saved, data, (size_t)len);
+    for (int i = 0; i < candidate_count; i++) {
+        if (i)
             memcpy(data, saved, (size_t)len);
-        sess.key = candidate;
-        attempted = 1;
+        sess.key = candidates[i];
         if (crypto_pqc_decrypt_payload(&sess, nonce, data, len, out_len) == 0)
             return 0;
     }
