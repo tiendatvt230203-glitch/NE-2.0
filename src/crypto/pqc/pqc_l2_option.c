@@ -933,6 +933,23 @@ static int l2_ip_encrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt,
     return 0;
 }
 
+int crypto_l2_pqc_encrypt_tcp_l3(struct packet_crypto_ctx *ctx,
+                                 uint8_t *pkt, uint32_t *pkt_len,
+                                 int l3_off)
+{
+    int n;
+
+    if (unlikely(!ctx || !ctx->initialized || !pkt || !pkt_len ||
+                 *pkt_len < MIN_ETH_PKT || l3_off < 0 ||
+                 (uint32_t)l3_off > *pkt_len))
+        return -1;
+    n = l2_do_encrypt(ctx, pkt, *pkt_len, l3_off);
+    if (n < 0)
+        return -1;
+    *pkt_len = (uint32_t)n;
+    return 0;
+}
+
 static int l2_ip_decrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt,
                          uint32_t *pkt_len)
 {

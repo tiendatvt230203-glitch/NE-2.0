@@ -113,8 +113,9 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
         return 1;
     }
 
-    if (crypto_option_encrypt(opt_id, pclass, pctx, pkt, &len) != 0)
+    if (crypto_option_encrypt(opt_id, pclass, pctx, pkt, &len) != 0) {
         return -1;
+    }
     job->len = len;
     return 0;
 }
@@ -236,8 +237,18 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     pctx = fwd_crypto_policy_ctx(pi);
     if (!pctx)
         goto drop;
-    enc = encrypt_to_wan(fwd, &job, cp, wan_dp, pctx,
-                        crypto_proto_classify(proto), flow_ok);
+    if (proto == IPPROTO_TCP) {
+        uint32_t len = job.len;
+
+        /* TCP never uses the UDP splitter. Reuse the offset already parsed
+         * for policy/MSS and call the exact same L2 wire encoder directly. */
+        enc = crypto_l2_pqc_encrypt_tcp_l3(pctx, pkt, &len, l3_off);
+        if (enc == 0)
+            job.len = len;
+    } else {
+        enc = encrypt_to_wan(fwd, &job, cp, wan_dp, pctx,
+                             crypto_proto_classify(proto), flow_ok);
+    }
     if (enc < 0)
         goto drop;
     if (enc > 0)

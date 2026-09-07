@@ -344,6 +344,33 @@ static int wan_profile_pi(struct forwarder *fwd, const uint8_t *pkt, uint32_t le
     return wan_profile_pi_bypass(fwd, pkt, len);
 }
 
+/* In the common one-LAN profile, every valid forwarding result is the bridge
+ * mapping itself. Avoid the global FDB spinlock only when that equivalence is
+ * proven; multi-LAN and incomplete mappings retain the original lookup path. */
+static int profile_single_local_for_wan(struct forwarder *fwd, int profile_pi,
+                                        int ingress_wan_dp)
+{
+    const struct profile_config *prof;
+    int mapped;
+
+    if (!fwd || !fwd->cfg || ingress_wan_dp < 0 || profile_pi < 0 ||
+        profile_pi >= fwd->cfg->profile_count)
+        return -1;
+    prof = &fwd->cfg->profiles[profile_pi];
+    /* Keep the multi-LAN path at its original cost and behavior. */
+    if (!prof->enabled || prof->local_count != 1)
+        return -1;
+    mapped = mac_fwd_local_for_wan_dp(fwd, profile_pi, ingress_wan_dp);
+    if (mapped < 0 || !profile_owns_local(fwd, profile_pi, mapped))
+        return -1;
+
+    for (int i = 0; i < fwd->local_count; i++) {
+        if (i != mapped && profile_owns_local(fwd, profile_pi, i))
+            return -1;
+    }
+    return mapped;
+}
+
 static int forward_wan_to_local(struct forwarder *fwd, struct ne_packet *job,
                                 int profile_pi, int ingress_wan_dp)
 {
@@ -358,10 +385,14 @@ static int forward_wan_to_local(struct forwarder *fwd, struct ne_packet *job,
     if (!eth_dmac_is_unicast(pkt))
         return -1;
 
-    li = mac_lookup(fwd, pkt);
-    if (li < 0 || !profile_owns_local(fwd, profile_pi, li)) {
-        if (ingress_wan_dp >= 0)
-            li = mac_fwd_local_for_wan_dp(fwd, profile_pi, ingress_wan_dp);
+    li = profile_single_local_for_wan(fwd, profile_pi, ingress_wan_dp);
+    if (li < 0) {
+        li = mac_lookup(fwd, pkt);
+        if (li < 0 || !profile_owns_local(fwd, profile_pi, li)) {
+            if (ingress_wan_dp >= 0)
+                li = mac_fwd_local_for_wan_dp(fwd, profile_pi,
+                                              ingress_wan_dp);
+        }
     }
     if (li >= 0 && profile_owns_local(fwd, profile_pi, li)) {
         job->dir = NE_DIR_LOCAL;
