@@ -2,17 +2,22 @@
 
 #include <arpa/inet.h>
 #include <limits.h>
+#include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define FLOW_SWRR_SETS 512u
 #define FLOW_SWRR_WAYS 4u
+#define FLOW_TCP_PACKET_WINDOW 4096u
+#define FLOW_UDP_PACKET_WINDOW 4096u
 
 struct flow_swrr_state {
     struct flow_key key;
     int wans[MAX_INTERFACES];
     int64_t current[MAX_INTERFACES];
     uint64_t stamp;
+    int selected_wan;
+    uint16_t packet_count;
     uint8_t wan_count;
     uint8_t tie_start;
     uint8_t valid;
@@ -20,6 +25,7 @@ struct flow_swrr_state {
 
 static _Thread_local struct flow_swrr_state (*g_flow_swrr)[FLOW_SWRR_WAYS];
 static _Thread_local struct flow_swrr_state g_default_swrr;
+static _Thread_local struct flow_swrr_state *g_pending_udp_state;
 static _Thread_local uint64_t g_flow_swrr_clock;
 
 int flow_table_thread_init(void)
@@ -35,6 +41,7 @@ void flow_table_thread_cleanup(void)
     free(g_flow_swrr);
     g_flow_swrr = NULL;
     memset(&g_default_swrr, 0, sizeof(g_default_swrr));
+    g_pending_udp_state = NULL;
     g_flow_swrr_clock = 0;
 }
 
@@ -143,6 +150,28 @@ static int flow_swrr_pick(struct flow_swrr_state *state,
     return allowed_wans[best];
 }
 
+static int flow_window_wan(struct flow_swrr_state *state,
+                           const int *allowed_wans,
+                           const int *allowed_weights,
+                           int allowed_count)
+{
+    if (state->packet_count == 0)
+        state->selected_wan = flow_swrr_pick(state, allowed_wans,
+                                             allowed_weights,
+                                             allowed_count);
+    return state->selected_wan;
+}
+
+static void flow_window_advance(struct flow_swrr_state *state,
+                                uint16_t packet_window)
+{
+    if (!state)
+        return;
+    state->packet_count++;
+    if (state->packet_count >= packet_window)
+        state->packet_count = 0;
+}
+
 int flow_table_pick_wan_per_packet(const int *allowed_wans,
                                    const int *allowed_weights,
                                    int allowed_count)
@@ -206,5 +235,36 @@ int flow_table_pick_wan_per_flow_packet(uint32_t src_ip, uint32_t dst_ip,
         flow_swrr_reset(state, &key, hash, allowed_wans, allowed_count);
     }
     state->stamp = ++g_flow_swrr_clock;
+
+    g_pending_udp_state = NULL;
+
+    /* TCP consumes one window count for each original packet. */
+    if (protocol == IPPROTO_TCP) {
+        int selected = flow_window_wan(state, allowed_wans, allowed_weights,
+                                       allowed_count);
+
+        flow_window_advance(state, FLOW_TCP_PACKET_WINDOW);
+        return selected;
+    }
+
+    /*
+     * UDP only selects here.  The caller commits one count after either the
+     * full datagram or both fragments have been enqueued successfully.
+     */
+    if (protocol == IPPROTO_UDP) {
+        g_pending_udp_state = state;
+        return flow_window_wan(state, allowed_wans, allowed_weights,
+                               allowed_count);
+    }
+
     return flow_swrr_pick(state, allowed_wans, allowed_weights, allowed_count);
+}
+
+void flow_table_udp_packet_complete(int sent)
+{
+    struct flow_swrr_state *state = g_pending_udp_state;
+
+    g_pending_udp_state = NULL;
+    if (sent)
+        flow_window_advance(state, FLOW_UDP_PACKET_WINDOW);
 }

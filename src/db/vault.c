@@ -71,7 +71,7 @@ static void ne_vault_parse_url(struct ne_vault_cfg *cfg, const char *url)
     if (!cfg || !url || !url[0])
         return;
 
-    strncpy(cfg->addr, url, sizeof(cfg->addr) - 1);
+    snprintf(cfg->addr, sizeof(cfg->addr), "%s", url);
     if (strncmp(p, "http://", 7) == 0)
         p += 7;
     else if (strncmp(p, "https://", 8) == 0)
@@ -81,6 +81,7 @@ static void ne_vault_parse_url(struct ne_vault_cfg *cfg, const char *url)
         char hostport[256];
         char *colon;
         char *slash;
+        size_t host_len;
 
         strncpy(hostport, p, sizeof(hostport) - 1);
         hostport[sizeof(hostport) - 1] = '\0';
@@ -94,7 +95,9 @@ static void ne_vault_parse_url(struct ne_vault_cfg *cfg, const char *url)
         } else {
             cfg->port = 8200;
         }
-        strncpy(cfg->host, hostport, sizeof(cfg->host) - 1);
+        host_len = strnlen(hostport, sizeof(cfg->host) - 1u);
+        memcpy(cfg->host, hostport, host_len);
+        cfg->host[host_len] = '\0';
     }
 
     if (strcmp(cfg->host, "localhost") == 0)

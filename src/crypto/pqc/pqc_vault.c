@@ -39,8 +39,10 @@ static void trim_env_val(char *val) {
 }
 
 static void parse_vault_url(const char *url) {
+    size_t host_len;
+
     if (!url || strlen(url) == 0) return;
-    strncpy(g_vault_addr, url, sizeof(g_vault_addr) - 1);
+    snprintf(g_vault_addr, sizeof(g_vault_addr), "%s", url);
 
     const char *p = url;
     if (strncmp(p, "http://", 7) == 0) {
@@ -59,12 +61,13 @@ static void parse_vault_url(const char *url) {
 
     if (colon && (!slash || colon < slash)) {
         *colon = '\0';
-        strncpy(g_vault_host, hostport, sizeof(g_vault_host) - 1);
         g_vault_port = atoi(colon + 1);
     } else {
-        strncpy(g_vault_host, hostport, sizeof(g_vault_host) - 1);
         g_vault_port = 8200;
     }
+    host_len = strnlen(hostport, sizeof(g_vault_host) - 1u);
+    memcpy(g_vault_host, hostport, host_len);
+    g_vault_host[host_len] = '\0';
 
     if (strcmp(g_vault_host, "localhost") == 0) {
         strcpy(g_vault_host, "127.0.0.1");

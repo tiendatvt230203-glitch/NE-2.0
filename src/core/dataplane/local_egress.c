@@ -11,6 +11,7 @@
 #include "../../../inc/core/dataplane/arp_bridge.h"
 #include "../../../inc/core/dataplane/dataplane_stats.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
+#include "../../../inc/core/flow/flow_table.h"
 
 #include <netinet/in.h>
 #include <string.h>
@@ -25,6 +26,13 @@ static int push_to_wan(struct forwarder *fwd, struct ne_packet *job, int wan_dp)
     job->dir = NE_DIR_WAN;
     job->wan_idx = (uint8_t)wan_dp;
     return dp_ring_push(fwd, &fwd->mid_to_wan[wan_dp][ri], job);
+}
+
+static void complete_udp_window_after_enqueue(uint8_t proto, int enqueue_ok)
+{
+    /* TCP advances when its WAN is selected. UDP waits for TX enqueue. */
+    if (proto == IPPROTO_UDP)
+        flow_table_udp_packet_complete(enqueue_ok);
 }
 
 static int push_split_to_wan(struct forwarder *fwd, struct ne_packet *job,
@@ -218,8 +226,11 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
         goto drop;
 
     if (cp->action == POLICY_ACTION_BYPASS) {
+        int sent;
+
         ne_dp_stats_local_bypass(1);
-        (void)push_to_wan(fwd, &job, wan_dp);
+        sent = push_to_wan(fwd, &job, wan_dp) == 0;
+        complete_udp_window_after_enqueue(proto, sent);
         return;
     }
     if (!fwd->cfg->crypto_enabled)
@@ -251,12 +262,19 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     }
     if (enc < 0)
         goto drop;
-    if (enc > 0)
+    if (enc > 0) {
+        complete_udp_window_after_enqueue(proto, 1);
         return;
-    (void)push_to_wan(fwd, &job, wan_dp);
+    }
+    {
+        int sent = push_to_wan(fwd, &job, wan_dp) == 0;
+
+        complete_udp_window_after_enqueue(proto, sent);
+    }
     return;
 
 drop:
+    complete_udp_window_after_enqueue(proto, 0);
     ne_dp_stats_local_drop(1);
     ne_frame_free(&fwd->pair, job.addr);
 }

@@ -59,7 +59,8 @@ static void profile_iface_xdp_link_off(const char *ifname)
      * is attached (post-crash scrub) or after bpf_object__close already ran. */
     snprintf(cmd, sizeof(cmd), "/sbin/ip link set dev %s xdp off >/dev/null 2>&1",
              ifname);
-    (void)system(cmd);
+    if (system(cmd) == -1)
+        profile_xdp_stop_log("detach command failed", ifname);
     profile_xdp_stop_log("detach done", ifname);
 }
 

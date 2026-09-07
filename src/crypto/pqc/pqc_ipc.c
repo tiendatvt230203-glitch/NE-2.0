@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,23 @@
 #include "core/forwarder/forwarder_crypto_runtime.h"
 
 #define IPC_SOCKET_PATH "/var/run/test_network-encryptor.sock"
+
+static int pqc_ipc_write_all(int fd, const char *buf, size_t len)
+{
+    while (len > 0) {
+        ssize_t n = write(fd, buf, len);
+
+        if (n > 0) {
+            buf += (size_t)n;
+            len -= (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR)
+            continue;
+        return -1;
+    }
+    return 0;
+}
 
 static void *ipc_listener_thread_main(void *arg) {
     (void)arg;
@@ -177,7 +195,11 @@ int sig_pqc_handle_ipc_cli(int argc, char **argv) {
 
         char msg[128];
         snprintf(msg, sizeof(msg), "RETRY %d\n", policy_id);
-        write(client_fd, msg, strlen(msg));
+        if (pqc_ipc_write_all(client_fd, msg, strlen(msg)) != 0) {
+            perror("[PQC-CLI] Failed to send retry request");
+            close(client_fd);
+            return -1;
+        }
 
         char resp[256];
         int n = read(client_fd, resp, sizeof(resp) - 1);

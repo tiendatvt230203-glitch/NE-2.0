@@ -30,6 +30,23 @@
 #define CFM_DOWN_CONFIRM        2
 #define CFM_UP_CONFIRM          3
 
+static int cfm_write_all(int fd, const char *buf, size_t len)
+{
+    while (len > 0) {
+        ssize_t n = write(fd, buf, len);
+
+        if (n > 0) {
+            buf += (size_t)n;
+            len -= (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR)
+            continue;
+        return -1;
+    }
+    return 0;
+}
+
 typedef struct cfm_link {
     pthread_mutex_t lock;
     uint64_t last_recv_time;
@@ -226,10 +243,9 @@ static void *cfm_status_ipc_thread(void *arg)
         if (read(client_fd, req, sizeof(req) - 1) > 0)
             sscanf(req, "GS %15s", name);
         st = cfm_wan_status_by_name(name);
-        if (st < 0)
-            (void)write(client_fd, "", 0);
-        else
-            (void)write(client_fd, st ? "UP\n" : "DOWN\n", st ? 3 : 5);
+        if (st >= 0)
+            (void)cfm_write_all(client_fd, st ? "UP\n" : "DOWN\n",
+                                st ? 3u : 5u);
         close(client_fd);
     }
     return NULL;

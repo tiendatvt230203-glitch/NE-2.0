@@ -424,7 +424,7 @@ static void table_learn(struct forwarder *fwd, struct mac_learn_table *t,
 {
     enum mac_upsert_result r;
     char old_ifname[IF_NAMESIZE];
-    char old_mac[MAC_LEN];
+    uint8_t old_mac[MAC_LEN] = {0};
     int replaced = 0;
 
     if (!t || !ifname || !mac || ifname[0] == '\0')
@@ -751,8 +751,8 @@ static void mac_fdb_persist_save_locked(const struct mac_learn_table *t,
             if (merge_find_mac(merged, merged_count, mac) >= 0)
                 continue;
             memcpy(merged[merged_count].mac, mac, MAC_LEN);
-            strncpy(merged[merged_count].ifname, ifname, IF_NAMESIZE - 1);
-            merged[merged_count].ifname[IF_NAMESIZE - 1] = '\0';
+            snprintf(merged[merged_count].ifname,
+                     sizeof(merged[merged_count].ifname), "%s", ifname);
             merged_count++;
         }
         fclose(fp);
@@ -909,8 +909,8 @@ static int mac_fdb_persist_load_locked(struct mac_learn_table *t,
             break;
         idx = t->count++;
         memcpy(t->list[idx].mac, mac, MAC_LEN);
-        strncpy(t->list[idx].ifname, ifname, IF_NAMESIZE - 1);
-        t->list[idx].ifname[IF_NAMESIZE - 1] = '\0';
+        snprintf(t->list[idx].ifname, sizeof(t->list[idx].ifname), "%s",
+                 ifname);
         loaded++;
     }
     fclose(fp);
