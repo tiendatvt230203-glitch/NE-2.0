@@ -232,6 +232,26 @@ static int cidr_contains(int any_flag, uint32_t ip,
     return any_flag || ((ip & mask) == (net & mask));
 }
 
+static int policy_port_is_any(int from, int to)
+{
+    if (from < 0 || to < 0)
+        return 1;
+    return from <= 0 && to >= 65535;
+}
+
+static int crypto_policy_is_catchall(const struct crypto_policy *cp)
+{
+    if (!cp || !cp->src_any || !cp->dst_any ||
+        cp->protocol != POLICY_PROTO_ANY)
+        return 0;
+#if !CRYPTO_POLICY_MATCH_IP_ONLY
+    if (!policy_port_is_any(cp->src_port_from, cp->src_port_to) ||
+        !policy_port_is_any(cp->dst_port_from, cp->dst_port_to))
+        return 0;
+#endif
+    return 1;
+}
+
 #define POL_IN_SRC_NEG  1u
 #define POL_IN_DST_NEG  2u
 
@@ -248,12 +268,17 @@ struct pol_in_match {
     uint8_t  proto;
     uint8_t  flags;
     uint8_t  wire_id;
-    uint8_t  _pad[5];
+    uint8_t  _pad0;
+    int16_t  next;
+    uint8_t  _pad[2];
 };
 _Static_assert(sizeof(struct pol_in_match) == 32, "pol_in_match packing");
 
 static struct pol_in_match s_pol_in[MAX_PROFILES][MAX_CRYPTO_POLICIES];
 static int s_pol_in_n[MAX_PROFILES];
+static uint8_t s_pol_in_any[MAX_PROFILES][256];
+static int16_t s_pol_in_head[MAX_PROFILES][256];
+static uint8_t s_pol_in_has_negate[MAX_PROFILES][256];
 
 static void pol_in_port_range(int from, int to, uint16_t *lo, uint16_t *hi)
 {
@@ -284,6 +309,7 @@ static void pol_in_port_range(int from, int to, uint16_t *lo, uint16_t *hi)
 static void pol_in_fill(struct pol_in_match *e, const struct crypto_policy *cp)
 {
     memset(e, 0, sizeof(*e));
+    e->next = -1;
     if (cp->dst_any) {
         e->src_net = 0;
         e->src_mask = 0;
@@ -312,6 +338,9 @@ void config_refresh_policy_in_table(struct app_config *cfg)
 {
     memset(s_pol_in, 0, sizeof(s_pol_in));
     memset(s_pol_in_n, 0, sizeof(s_pol_in_n));
+    memset(s_pol_in_any, 0, sizeof(s_pol_in_any));
+    memset(s_pol_in_head, 0xff, sizeof(s_pol_in_head));
+    memset(s_pol_in_has_negate, 0, sizeof(s_pol_in_has_negate));
     if (!cfg)
         return;
     if (cfg->profile_count > 0) {
@@ -325,8 +354,19 @@ void config_refresh_policy_in_table(struct app_config *cfg)
                 continue;
             if (cfg->policies[poli].action != POLICY_ACTION_ENCRYPT_L2)
                 continue;
-            if (n < MAX_CRYPTO_POLICIES)
-                pol_in_fill(&s_pol_in[0][n++], &cfg->policies[poli]);
+            if (crypto_policy_is_catchall(&cfg->policies[poli]))
+                s_pol_in_any[0][(uint8_t)cfg->policies[poli].id] = 1;
+            if (n < MAX_CRYPTO_POLICIES) {
+                uint8_t wire_id = (uint8_t)cfg->policies[poli].id;
+                struct pol_in_match *e = &s_pol_in[0][n];
+
+                pol_in_fill(e, &cfg->policies[poli]);
+                if (e->flags & (POL_IN_SRC_NEG | POL_IN_DST_NEG))
+                    s_pol_in_has_negate[0][wire_id] = 1;
+                e->next = s_pol_in_head[0][wire_id];
+                s_pol_in_head[0][wire_id] = (int16_t)n;
+                n++;
+            }
         }
         s_pol_in_n[0] = n;
         fprintf(stderr,
@@ -356,16 +396,37 @@ int config_policy_in_ok(const struct app_config *cfg, int profile_idx,
     if (!cfg || profile_idx < 0 || profile_idx >= cfg->profile_count ||
         profile_idx >= MAX_PROFILES)
         return 0;
+    if (s_pol_in_any[profile_idx][wire_policy_id])
+        return 1;
 
     n = s_pol_in_n[profile_idx];
     tbl = s_pol_in[profile_idx];
-    for (int i = 0; i < n; i++) {
+    if (!s_pol_in_has_negate[profile_idx][wire_policy_id]) {
+        for (int i = s_pol_in_head[profile_idx][wire_policy_id];
+             i >= 0 && i < n; i = tbl[i].next) {
+            const struct pol_in_match *e = &tbl[i];
+            int entry_proto_ok;
+
+            if (e->proto == POLICY_PROTO_TCP_UDP)
+                entry_proto_ok = protocol == 6 || protocol == 17;
+            else
+                entry_proto_ok = e->proto == POLICY_PROTO_ANY ||
+                    e->proto == protocol;
+            if (entry_proto_ok &&
+                ((src_ip & e->src_mask) == e->src_net) &&
+                ((dst_ip & e->dst_mask) == e->dst_net) &&
+                src_port >= e->sport_lo && src_port <= e->sport_hi &&
+                dst_port >= e->dport_lo && dst_port <= e->dport_hi)
+                return 1;
+        }
+        return 0;
+    }
+    for (int i = s_pol_in_head[profile_idx][wire_policy_id];
+         i >= 0 && i < n; i = tbl[i].next) {
         const struct pol_in_match *e = &tbl[i];
         int src_in;
         int dst_in;
 
-        if (e->wire_id != wire_policy_id)
-            continue;
         if (e->proto == POLICY_PROTO_TCP_UDP) {
             proto_ok |= protocol == 6 || protocol == 17;
         } else {
@@ -427,6 +488,7 @@ static int crypto_policy_group_match(const struct app_config *cfg,
     int sport_ok = 0;
     int dport_ok = 0;
     int proto_ok;
+    int positive_match = 0;
     int j;
 
     if (base->protocol == POLICY_PROTO_TCP_UDP)
@@ -446,6 +508,20 @@ static int crypto_policy_group_match(const struct app_config *cfg,
         cp = &cfg->policies[pi];
         if (cp->db_id != base->db_id)
             break;
+
+        if (!base->src_negate && !base->dst_negate) {
+            if (!positive_match && proto_ok &&
+                cidr_contains(cp->src_any, src_ip,
+                              cp->src_net, cp->src_mask) &&
+                cidr_contains(cp->dst_any, dst_ip,
+                              cp->dst_net, cp->dst_mask) &&
+                policy_port_contains(cp->src_port_from,
+                                     cp->src_port_to, src_port) &&
+                policy_port_contains(cp->dst_port_from,
+                                     cp->dst_port_to, dst_port))
+                positive_match = 1;
+            continue;
+        }
 
         src_in = cidr_contains(cp->src_any, src_ip,
                                cp->src_net, cp->src_mask);
@@ -469,6 +545,8 @@ static int crypto_policy_group_match(const struct app_config *cfg,
                                          cp->dst_port_to, dst_port);
     }
     *next = j;
+    if (!base->src_negate && !base->dst_negate)
+        return positive_match;
     return proto_ok &&
         (!src_positive_seen || src_positive_ok) && src_negative_ok &&
         (!dst_positive_seen || dst_positive_ok) && dst_negative_ok &&
