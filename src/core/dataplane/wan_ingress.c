@@ -315,6 +315,7 @@ static int wan_profile_pi_bypass(struct forwarder *fwd, const uint8_t *pkt, uint
 }
 
 static int wan_policy_in_ok(struct forwarder *fwd, int profile_pi,
+                            uint8_t wire_policy_id,
                             const uint8_t *pkt, uint32_t len)
 {
     uint32_t src_ip = 0, dst_ip = 0;
@@ -326,20 +327,20 @@ static int wan_policy_in_ok(struct forwarder *fwd, int profile_pi,
     if (dp_parse_flow((void *)pkt, len, &src_ip, &dst_ip,
                       &src_port, &dst_port, &proto) != 0)
         return 0;
-    return config_policy_in_ok(fwd->cfg, profile_pi,
+    return config_policy_in_ok(fwd->cfg, profile_pi, wire_policy_id,
                                src_ip, dst_ip, src_port, dst_port, proto);
 }
 
-static int wan_profile_pi(struct forwarder *fwd, const uint8_t *pkt, uint32_t len)
+static int wan_profile_pi(struct forwarder *fwd, const uint8_t *pkt, uint32_t len,
+                          uint8_t *wire_policy_id)
 {
-    if (!fwd || !pkt || !fwd->cfg)
+    if (!fwd || !pkt || !fwd->cfg || !wire_policy_id)
         return -1;
+    *wire_policy_id = 0;
     if (fwd_crypto_has_l2_marker(pkt, len) || crypto_eth_l2_has_marker(pkt, len)) {
-        uint8_t wire_pol = 0;
-
-        if (crypto_eth_l2_read_policy_id(pkt, len, &wire_pol) != 0)
+        if (crypto_eth_l2_read_policy_id(pkt, len, wire_policy_id) != 0)
             return -1;
-        return profile_pi_for_wire_policy(fwd, wire_pol);
+        return profile_pi_for_wire_policy(fwd, *wire_policy_id);
     }
     return wan_profile_pi_bypass(fwd, pkt, len);
 }
@@ -489,6 +490,7 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
     int dec;
     int encrypted;
     int profile_pi;
+    uint8_t wire_policy_id = 0;
 
     if (!fwd || !pkt)
         goto drop;
@@ -512,7 +514,7 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
     encrypted = wan_wire_is_encrypted(fwd, pkt, job.len);
     /* Resolve the wire policy before in-place decrypt overwrites the encrypted
      * L2 header.  Keeping this integer replaces a full NE_FRAME stack copy. */
-    profile_pi = wan_profile_pi(fwd, pkt, job.len);
+    profile_pi = wan_profile_pi(fwd, pkt, job.len, &wire_policy_id);
     if (profile_pi < 0)
         goto drop;
     if (encrypted) {
@@ -529,11 +531,9 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
         if (dec != 0)
             goto drop;
         pkt = ne_packet_data(&fwd->pair, job.addr);
-        /* Any/any: không so 5-tuple từng gói. Không any mới wan_policy_in_ok. */
-        if (!fwd->cfg->profiles[profile_pi].policy_in_any) {
-            if (!wan_policy_in_ok(fwd, profile_pi, pkt, job.len))
-                goto policy_drop;
-        }
+        if (!wan_policy_in_ok(fwd, profile_pi, wire_policy_id,
+                              pkt, job.len))
+            goto policy_drop;
         /* MSS is clamped once on LAN egress at the endpoint that originated
          * SYN/SYN-ACK. Repeating policy lookup and clamp after WAN decrypt
          * only adds work to every TCP data/ACK packet. */

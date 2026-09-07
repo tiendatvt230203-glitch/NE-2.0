@@ -29,6 +29,7 @@ struct opt_entry {
     uint8_t  eth_len;
     uint8_t  got_first;
     uint8_t  got_second;
+    uint8_t  wire_policy_id;
     uint8_t  first[1600];
     uint8_t  second[1600];
 };
@@ -74,6 +75,7 @@ static void opt_clear_entry(struct opt_entry *entry)
     entry->eth_len = 0;
     entry->got_first = 0;
     entry->got_second = 0;
+    entry->wire_policy_id = 0;
 }
 
 static uint64_t opt_time_ns(void)
@@ -132,26 +134,31 @@ static int l2_udp_read_shim(const uint8_t *buf, uint8_t *kind,
     return 0;
 }
 
-static void opt_prepare_entry(struct opt_entry *entry, uint32_t epoch,
+static void opt_prepare_entry(struct opt_entry *entry, uint8_t wire_policy_id,
+                              uint32_t epoch,
                               uint32_t datagram_id, uint32_t bond_seq,
                               uint64_t now)
 {
-    if (entry->epoch != epoch || entry->datagram_id != datagram_id ||
+    if (entry->wire_policy_id != wire_policy_id ||
+        entry->epoch != epoch || entry->datagram_id != datagram_id ||
         entry->bond_seq != bond_seq ||
         ((entry->got_first || entry->got_second) &&
          (now - entry->timestamp_ns) > OPT_FRAG_TIMEOUT_NS))
         opt_clear_entry(entry);
+    entry->wire_policy_id = wire_policy_id;
     entry->epoch = epoch;
     entry->datagram_id = datagram_id;
     entry->bond_seq = bond_seq;
     entry->timestamp_ns = now;
 }
 
-static int opt_pick_slot(struct opt_table *ft, uint32_t epoch, uint32_t datagram_id,
+static int opt_pick_slot(struct opt_table *ft, uint8_t wire_policy_id,
+                         uint32_t epoch, uint32_t datagram_id,
                          uint64_t now)
 {
     const int probe = 8;
-    uint32_t mixed = datagram_id ^ (epoch * 0x9e3779b9u);
+    uint32_t mixed = datagram_id ^ (epoch * 0x9e3779b9u) ^
+        ((uint32_t)wire_policy_id * 0x85ebca6bu);
     int base = (int)(mixed % OPT_FRAG_TABLE_SIZE);
     int empty_idx = -1;
     int oldest_idx = -1;
@@ -171,7 +178,8 @@ static int opt_pick_slot(struct opt_table *ft, uint32_t epoch, uint32_t datagram
                 empty_idx = idx;
             continue;
         }
-        if (e->epoch == epoch && e->datagram_id == datagram_id)
+        if (e->wire_policy_id == wire_policy_id &&
+            e->epoch == epoch && e->datagram_id == datagram_id)
             return idx;
 
         {
@@ -189,7 +197,8 @@ static int opt_pick_slot(struct opt_table *ft, uint32_t epoch, uint32_t datagram
     return base;
 }
 
-static int opt_store_first(struct opt_entry *entry, uint32_t epoch,
+static int opt_store_first(struct opt_entry *entry, uint8_t wire_policy_id,
+                           uint32_t epoch,
                            uint32_t datagram_id, uint32_t bond_seq,
                            const uint8_t *eth, uint8_t eth_len,
                            const uint8_t *data, uint32_t data_len, uint64_t now)
@@ -198,7 +207,7 @@ static int opt_store_first(struct opt_entry *entry, uint32_t epoch,
         return -1;
     if (eth_len == 0 || eth_len > sizeof(entry->eth_hdr))
         return -1;
-    opt_prepare_entry(entry, epoch, datagram_id, bond_seq, now);
+    opt_prepare_entry(entry, wire_policy_id, epoch, datagram_id, bond_seq, now);
     entry->first_len = data_len;
     memcpy(entry->first, data, data_len);
     memcpy(entry->eth_hdr, eth, eth_len);
@@ -207,13 +216,14 @@ static int opt_store_first(struct opt_entry *entry, uint32_t epoch,
     return 0;
 }
 
-static int opt_store_second(struct opt_entry *entry, uint32_t epoch,
+static int opt_store_second(struct opt_entry *entry, uint8_t wire_policy_id,
+                            uint32_t epoch,
                             uint32_t datagram_id, uint32_t bond_seq,
                             const uint8_t *data, uint32_t data_len, uint64_t now)
 {
     if (data_len > sizeof(entry->second))
         return -1;
-    opt_prepare_entry(entry, epoch, datagram_id, bond_seq, now);
+    opt_prepare_entry(entry, wire_policy_id, epoch, datagram_id, bond_seq, now);
     entry->second_len = data_len;
     memcpy(entry->second, data, data_len);
     entry->got_second = 1;
@@ -725,7 +735,8 @@ static int l2_split(struct packet_crypto_ctx *ctx, uint8_t *pkt_data, uint32_t p
     return 0;
 }
 
-static int l2_reassemble(struct opt_table *ft, const uint8_t *pkt_data, uint32_t pkt_len,
+static int l2_reassemble(struct opt_table *ft, uint8_t wire_policy_id,
+                         const uint8_t *pkt_data, uint32_t pkt_len,
                          uint32_t epoch, uint32_t datagram_id, uint32_t bond_seq,
                          uint8_t frag_index,
                          uint8_t *out_buf, uint32_t *out_len)
@@ -744,7 +755,7 @@ static int l2_reassemble(struct opt_table *ft, const uint8_t *pkt_data, uint32_t
     inner = pkt_data + wire_eth;
     inner_len = pkt_len - (uint32_t)wire_eth;
     now = opt_time_ns();
-    idx = opt_pick_slot(ft, epoch, datagram_id, now);
+    idx = opt_pick_slot(ft, wire_policy_id, epoch, datagram_id, now);
     entry = &ft->entries[idx];
     if (frag_index == 0) {
         int ip_hdr_len;
@@ -757,12 +768,12 @@ static int l2_reassemble(struct opt_table *ft, const uint8_t *pkt_data, uint32_t
             return -1;
         if (inner_len > sizeof(entry->first))
             return -1;
-        opt_prepare_entry(entry, epoch, datagram_id, bond_seq, now);
+        opt_prepare_entry(entry, wire_policy_id, epoch, datagram_id, bond_seq, now);
         joined = opt_emit_join(entry, 0, pkt_data, (uint32_t)wire_eth,
                                 inner, inner_len, out_buf, out_len);
         if (joined != 0)
             return joined;
-        return opt_store_first(entry, epoch, datagram_id, bond_seq,
+        return opt_store_first(entry, wire_policy_id, epoch, datagram_id, bond_seq,
                                 pkt_data, (uint8_t)wire_eth, inner, inner_len, now);
     }
     if (frag_index == 1) {
@@ -774,12 +785,12 @@ static int l2_reassemble(struct opt_table *ft, const uint8_t *pkt_data, uint32_t
             opt_clear_entry(entry);
         if (inner_len > sizeof(entry->second))
             return -1;
-        opt_prepare_entry(entry, epoch, datagram_id, bond_seq, now);
+        opt_prepare_entry(entry, wire_policy_id, epoch, datagram_id, bond_seq, now);
         joined = opt_emit_join(entry, 1, pkt_data, (uint32_t)wire_eth,
                                 inner, inner_len, out_buf, out_len);
         if (joined != 0)
             return joined;
-        return opt_store_second(entry, epoch, datagram_id, bond_seq,
+        return opt_store_second(entry, wire_policy_id, epoch, datagram_id, bond_seq,
                                  inner, inner_len, now);
     }
     return -1;
@@ -899,7 +910,7 @@ static int l2_udp_reasm(int profile_slot, int worker_idx, struct packet_crypto_c
     struct opt_table *ft = opt_table(profile_slot, worker_idx, 1);
     if (!ft)
         return -1;
-    rr = l2_reassemble(ft, pkt_data, *pkt_len,
+    rr = l2_reassemble(ft, ctx->wire_id, pkt_data, *pkt_len,
                        epoch, datagram_id, seq, kind, out_buf, out_len);
     if (rr == 1) {
         *pkt_len = *out_len;

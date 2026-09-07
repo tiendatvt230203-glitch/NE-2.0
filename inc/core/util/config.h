@@ -62,7 +62,6 @@ struct profile_config {
     int wan_count;
     int policy_indices[MAX_CRYPTO_POLICIES];
     int policy_count;
-    int policy_in_any;
     char local_identity_fingerprint[16];
     char peer_fingerprint[16];
     int pqc_is_initiator;
@@ -117,8 +116,9 @@ const struct crypto_policy *config_select_crypto_policy(struct app_config *cfg, 
                                                         uint32_t src_ip, uint32_t dst_ip,
                                                         uint16_t src_port, uint16_t dst_port,
                                                         uint8_t protocol);
-void config_refresh_policy_in_any(struct app_config *cfg);
+void config_refresh_policy_in_table(struct app_config *cfg);
 int config_policy_in_ok(const struct app_config *cfg, int profile_idx,
+                        uint8_t wire_policy_id,
                         uint32_t src_ip, uint32_t dst_ip,
                         uint16_t src_port, uint16_t dst_port,
                         uint8_t protocol);

@@ -226,37 +226,10 @@ int config_validate(struct app_config *cfg) {
     return 0;
 }
 
-static int cidr_match_with_negate(int any_flag, int negate,
-                                    uint32_t ip, uint32_t net, uint32_t mask) {
-    if (any_flag)
-        return 1;
-    int in_cidr = ((ip & mask) == (net & mask));
-    return negate ? !in_cidr : in_cidr;
-}
-
-static int policy_port_is_any(int from, int to)
+static int cidr_contains(int any_flag, uint32_t ip,
+                         uint32_t net, uint32_t mask)
 {
-    if (from < 0 || to < 0)
-        return 1;
-    return from <= 0 && to >= 65535;
-}
-
-/* Policy khớp mọi 5-tuple (kể cả sau khi đảo src/dst chiều IN). */
-static int crypto_policy_is_catchall(const struct crypto_policy *cp)
-{
-    if (!cp)
-        return 0;
-    if (!cp->src_any || !cp->dst_any)
-        return 0;
-    if (cp->protocol != POLICY_PROTO_ANY)
-        return 0;
-#if !CRYPTO_POLICY_MATCH_IP_ONLY
-    if (!policy_port_is_any(cp->src_port_from, cp->src_port_to))
-        return 0;
-    if (!policy_port_is_any(cp->dst_port_from, cp->dst_port_to))
-        return 0;
-#endif
-    return 1;
+    return any_flag || ((ip & mask) == (net & mask));
 }
 
 #define POL_IN_SRC_NEG  1u
@@ -274,7 +247,8 @@ struct pol_in_match {
     uint16_t dport_hi;
     uint8_t  proto;
     uint8_t  flags;
-    uint8_t  _pad[6];
+    uint8_t  wire_id;
+    uint8_t  _pad[5];
 };
 _Static_assert(sizeof(struct pol_in_match) == 32, "pol_in_match packing");
 
@@ -331,9 +305,10 @@ static void pol_in_fill(struct pol_in_match *e, const struct crypto_policy *cp)
     pol_in_port_range(cp->dst_port_from, cp->dst_port_to, &e->sport_lo, &e->sport_hi);
     pol_in_port_range(cp->src_port_from, cp->src_port_to, &e->dport_lo, &e->dport_hi);
     e->proto = cp->protocol;
+    e->wire_id = (uint8_t)cp->id;
 }
 
-void config_refresh_policy_in_any(struct app_config *cfg)
+void config_refresh_policy_in_table(struct app_config *cfg)
 {
     memset(s_pol_in, 0, sizeof(s_pol_in));
     memset(s_pol_in_n, 0, sizeof(s_pol_in_n));
@@ -341,7 +316,6 @@ void config_refresh_policy_in_any(struct app_config *cfg)
         return;
     if (cfg->profile_count > 0) {
         struct profile_config *p = &cfg->profiles[0];
-        int skip = 0;
         int n = 0;
 
         for (int i = 0; i < p->policy_count; i++) {
@@ -349,36 +323,35 @@ void config_refresh_policy_in_any(struct app_config *cfg)
 
             if (poli < 0 || poli >= cfg->policy_count)
                 continue;
-            if (crypto_policy_is_catchall(&cfg->policies[poli])) {
-                skip = 1;
-                break;
-            }
-        }
-        p->policy_in_any = skip;
-        if (!skip) {
-            for (int i = 0; i < p->policy_count; i++) {
-                int poli = p->policy_indices[i];
-
-                if (poli < 0 || poli >= cfg->policy_count)
-                    continue;
-                if (n < MAX_CRYPTO_POLICIES)
-                    pol_in_fill(&s_pol_in[0][n++], &cfg->policies[poli]);
-            }
+            if (cfg->policies[poli].action != POLICY_ACTION_ENCRYPT_L2)
+                continue;
+            if (n < MAX_CRYPTO_POLICIES)
+                pol_in_fill(&s_pol_in[0][n++], &cfg->policies[poli]);
         }
         s_pol_in_n[0] = n;
         fprintf(stderr,
                 "[CRYPTO-GUARD] profile %d (%s) WAN IN 5-tuple gate %s (%d compact rules)\n",
-                p->id, p->name, skip ? "OFF (catch-all any/any)" : "ON", n);
+                p->id, p->name, "ON (exact wire policy)", n);
     }
 }
 
 int config_policy_in_ok(const struct app_config *cfg, int profile_idx,
+                        uint8_t wire_policy_id,
                         uint32_t src_ip, uint32_t dst_ip,
                         uint16_t src_port, uint16_t dst_port,
                         uint8_t protocol)
 {
     int n;
     const struct pol_in_match *tbl;
+    int src_positive_seen = 0;
+    int dst_positive_seen = 0;
+    int src_positive_ok = 0;
+    int dst_positive_ok = 0;
+    int src_negative_ok = 1;
+    int dst_negative_ok = 1;
+    int sport_ok = 0;
+    int dport_ok = 0;
+    int proto_ok = 0;
 
     if (!cfg || profile_idx < 0 || profile_idx >= cfg->profile_count ||
         profile_idx >= MAX_PROFILES)
@@ -388,63 +361,118 @@ int config_policy_in_ok(const struct app_config *cfg, int profile_idx,
     tbl = s_pol_in[profile_idx];
     for (int i = 0; i < n; i++) {
         const struct pol_in_match *e = &tbl[i];
-        int src_ok;
-        int dst_ok;
+        int src_in;
+        int dst_in;
 
-        /* Ít loại → nhiều loại: proto (TCP/UDP/ICMP/OSPF) → IP (NAT, ít) → port (nhiều). */
+        if (e->wire_id != wire_policy_id)
+            continue;
         if (e->proto == POLICY_PROTO_TCP_UDP) {
-            if (protocol != 6 && protocol != 17)
-                continue;
-        } else if (e->proto != POLICY_PROTO_ANY && e->proto != protocol) {
-            continue;
+            proto_ok |= protocol == 6 || protocol == 17;
+        } else {
+            proto_ok |= e->proto == POLICY_PROTO_ANY || e->proto == protocol;
         }
-        src_ok = ((src_ip & e->src_mask) == e->src_net);
-        dst_ok = ((dst_ip & e->dst_mask) == e->dst_net);
+
+        src_in = ((src_ip & e->src_mask) == e->src_net);
+        dst_in = ((dst_ip & e->dst_mask) == e->dst_net);
         if (e->flags & POL_IN_SRC_NEG)
-            src_ok = !src_ok;
+            src_negative_ok &= !src_in;
+        else {
+            src_positive_seen = 1;
+            src_positive_ok |= src_in;
+        }
         if (e->flags & POL_IN_DST_NEG)
-            dst_ok = !dst_ok;
-        if (!src_ok || !dst_ok)
-            continue;
-        if (src_port < e->sport_lo || src_port > e->sport_hi)
-            continue;
-        if (dst_port < e->dport_lo || dst_port > e->dport_hi)
-            continue;
-        return 1;
+            dst_negative_ok &= !dst_in;
+        else {
+            dst_positive_seen = 1;
+            dst_positive_ok |= dst_in;
+        }
+        sport_ok |= src_port >= e->sport_lo && src_port <= e->sport_hi;
+        dport_ok |= dst_port >= e->dport_lo && dst_port <= e->dport_hi;
     }
-    return 0;
+    return proto_ok &&
+        (!src_positive_seen || src_positive_ok) && src_negative_ok &&
+        (!dst_positive_seen || dst_positive_ok) && dst_negative_ok &&
+        sport_ok && dport_ok;
 }
 
-static int crypto_policy_match_packet(const struct crypto_policy *cp,
-                                      uint32_t src_ip, uint32_t dst_ip,
-                                      uint16_t src_port, uint16_t dst_port,
-                                      uint8_t protocol) {
-
-    if (cp->protocol == POLICY_PROTO_TCP_UDP) {
-        if (protocol != 6 && protocol != 17)
-            return 0;
-    } 
-    else if (cp->protocol != POLICY_PROTO_ANY && cp->protocol != protocol) {
-        return 0;
-    }
-
-    if (!cidr_match_with_negate(cp->src_any, cp->src_negate, src_ip, cp->src_net, cp->src_mask))
-        return 0;
-    if (!cidr_match_with_negate(cp->dst_any, cp->dst_negate, dst_ip, cp->dst_net, cp->dst_mask))
-        return 0;
-
-#if !CRYPTO_POLICY_MATCH_IP_ONLY
-    if (cp->src_port_from >= 0 && cp->src_port_to >= 0) {
-        if ((int)src_port < cp->src_port_from || (int)src_port > cp->src_port_to)
-            return 0;
-    }
-    if (cp->dst_port_from >= 0 && cp->dst_port_to >= 0) {
-        if ((int)dst_port < cp->dst_port_from || (int)dst_port > cp->dst_port_to)
-            return 0;
-    }
-#endif
-
+static int policy_port_contains(int from, int to, uint16_t port)
+{
+#if CRYPTO_POLICY_MATCH_IP_ONLY
+    (void)from;
+    (void)to;
+    (void)port;
     return 1;
+#else
+    return from < 0 || to < 0 || ((int)port >= from && (int)port <= to);
+#endif
+}
+
+/* All expanded entries with one db_id form one UI policy. Address/port lists
+ * are OR groups; negated address items must all be absent (AND of NOTs). */
+static int crypto_policy_group_match(const struct app_config *cfg,
+                                     const struct profile_config *p,
+                                     int first, int *next,
+                                     uint32_t src_ip, uint32_t dst_ip,
+                                     uint16_t src_port, uint16_t dst_port,
+                                     uint8_t protocol)
+{
+    int first_pi = p->policy_indices[first];
+    const struct crypto_policy *base = &cfg->policies[first_pi];
+    int src_positive_seen = 0;
+    int dst_positive_seen = 0;
+    int src_positive_ok = 0;
+    int dst_positive_ok = 0;
+    int src_negative_ok = 1;
+    int dst_negative_ok = 1;
+    int sport_ok = 0;
+    int dport_ok = 0;
+    int proto_ok;
+    int j;
+
+    if (base->protocol == POLICY_PROTO_TCP_UDP)
+        proto_ok = protocol == 6 || protocol == 17;
+    else
+        proto_ok = base->protocol == POLICY_PROTO_ANY ||
+            base->protocol == protocol;
+
+    for (j = first; j < p->policy_count; j++) {
+        int pi = p->policy_indices[j];
+        const struct crypto_policy *cp;
+        int src_in;
+        int dst_in;
+
+        if (pi < 0 || pi >= cfg->policy_count)
+            break;
+        cp = &cfg->policies[pi];
+        if (cp->db_id != base->db_id)
+            break;
+
+        src_in = cidr_contains(cp->src_any, src_ip,
+                               cp->src_net, cp->src_mask);
+        dst_in = cidr_contains(cp->dst_any, dst_ip,
+                               cp->dst_net, cp->dst_mask);
+        if (cp->src_negate)
+            src_negative_ok &= !src_in;
+        else {
+            src_positive_seen = 1;
+            src_positive_ok |= src_in;
+        }
+        if (cp->dst_negate)
+            dst_negative_ok &= !dst_in;
+        else {
+            dst_positive_seen = 1;
+            dst_positive_ok |= dst_in;
+        }
+        sport_ok |= policy_port_contains(cp->src_port_from,
+                                         cp->src_port_to, src_port);
+        dport_ok |= policy_port_contains(cp->dst_port_from,
+                                         cp->dst_port_to, dst_port);
+    }
+    *next = j;
+    return proto_ok &&
+        (!src_positive_seen || src_positive_ok) && src_negative_ok &&
+        (!dst_positive_seen || dst_positive_ok) && dst_negative_ok &&
+        sport_ok && dport_ok;
 }
 
 const struct crypto_policy *config_select_crypto_policy(struct app_config *cfg, int profile_idx,
@@ -460,14 +488,22 @@ const struct crypto_policy *config_select_crypto_policy(struct app_config *cfg, 
     int best_priority = 0x7fffffff;
     int best_id = 0x7fffffff;
 
-    for (int i = 0; i < p->policy_count; i++) {
+    for (int i = 0; i < p->policy_count;) {
         int pi = p->policy_indices[i];
-        if (pi < 0 || pi >= cfg->policy_count)
+        int next = i + 1;
+
+        if (pi < 0 || pi >= cfg->policy_count) {
+            i++;
             continue;
+        }
 
         const struct crypto_policy *cp = &cfg->policies[pi];
-        if (!crypto_policy_match_packet(cp, src_ip, dst_ip, src_port, dst_port, protocol))
+        if (!crypto_policy_group_match(cfg, p, i, &next,
+                                       src_ip, dst_ip, src_port, dst_port,
+                                       protocol)) {
+            i = next;
             continue;
+        }
 
         if (!best ||
             cp->priority < best_priority ||
@@ -476,6 +512,7 @@ const struct crypto_policy *config_select_crypto_policy(struct app_config *cfg, 
             best_priority = cp->priority;
             best_id = cp->id;
         }
+        i = next;
     }
 
     return best;

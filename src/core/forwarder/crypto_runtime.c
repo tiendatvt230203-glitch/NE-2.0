@@ -406,7 +406,7 @@ int fwd_crypto_rebuild(struct app_config *cfg)
     main_diag_ne_pqc_clear_all();
     
     if (cfg) {
-        config_refresh_policy_in_any(cfg);
+        config_refresh_policy_in_table(cfg);
     }
 
     if (!cfg || !cfg->crypto_enabled) {
