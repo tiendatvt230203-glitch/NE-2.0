@@ -1,5 +1,6 @@
 #include "../../../inc/core/dataplane/arp_bridge.h"
 #include "../../../inc/core/util/config.h"
+#include "../../../inc/core/util/main_diag.h"
 #include "../../../inc/core/dataplane/crypto_route.h"
 #include "../../../inc/core/dataplane/dataplane_util.h"
 #include "../../../inc/core/forwarder/forwarder_crypto_runtime.h"
@@ -193,6 +194,10 @@ void arp_bridge_reload_policies(struct app_config *cfg)
     if (!cfg)
         return;
     arp_crypto_ctx_init(cfg);
+    if (g_arp_crypto_ctx_ready && cfg->profile_count > 0)
+        main_diag_log_arp_key(
+            cfg->profiles[0].id,
+            g_arp_crypto_ctx.keys[KEY_SLOT_CURRENT], 1);
     fprintf(stderr,
             "[ARP] mode=mac-fdb+flood-whohas-only | arp_encrypt=%d (policy-independent) | key=arp-default | opt=L2-PQC/ARP\n",
             ARP_ENCRYPT_ENABLE);

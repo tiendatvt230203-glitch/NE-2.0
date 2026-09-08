@@ -10,17 +10,21 @@
 #include "../../../inc/crypto/pqc_handshake.h"
 
 #define DIAG_KEY_PREFIX_LEN 9
-#define NE_PQC_TBL_SLOTS    64
+#define NE_PQC_TBL_SLOTS    (MAX_CRYPTO_POLICIES + 1)
 
 typedef struct {
     int profile_id;
     int policy_id;
     uint8_t key_prefix[4];
+    int is_arp;
+    int is_static;
+    int key_valid;
     int valid;
 } ne_pqc_tbl_row_t;
 
 static ne_pqc_tbl_row_t ne_pqc_tbl[NE_PQC_TBL_SLOTS];
 static pthread_mutex_t ne_pqc_tbl_lock = PTHREAD_MUTEX_INITIALIZER;
+static int ne_pqc_tbl_publish_enabled;
 
 static int key_prefix_nonzero(const uint8_t *key, size_t len)
 {
@@ -44,10 +48,10 @@ static void key_prefix_hex(char *out, size_t outsz, const uint8_t *key)
 static void ne_pqc_tbl_hline(void)
 {
     fprintf(stderr,
-            "+----------+----------+----------+----------+\n");
+            "+----------+----------+-------------------+-------------------+\n");
 }
 
-/* Caller holds ne_pqc_tbl_lock. Only MATCH rows (HS ok + NE==PQC). */
+/* Caller holds ne_pqc_tbl_lock. Print every configured PQC policy. */
 static void ne_pqc_tbl_print_locked(const char *event)
 {
     int printed = 0;
@@ -55,37 +59,158 @@ static void ne_pqc_tbl_print_locked(const char *event)
     fprintf(stderr, "\n  [ne-key] processing: %s\n", event ? event : "update");
     ne_pqc_tbl_hline();
     fprintf(stderr,
-            "| %-8s | %-8s | %-8s | %-8s |\n",
+            "| %-8s | %-8s | %-17s | %-17s |\n",
             "profile", "policy", "ne", "pqc_hs");
     ne_pqc_tbl_hline();
 
     for (int i = 0; i < NE_PQC_TBL_SLOTS; i++) {
         char px[DIAG_KEY_PREFIX_LEN];
+        char ne_value[24];
+        char hs_value[24];
+        char policy_value[16];
 
         if (!ne_pqc_tbl[i].valid)
             continue;
-        key_prefix_hex(px, sizeof(px), ne_pqc_tbl[i].key_prefix);
-        /* ne == pqc_hs by construction — same prefix both columns for peer compare */
+        if (ne_pqc_tbl[i].key_valid) {
+            key_prefix_hex(px, sizeof(px), ne_pqc_tbl[i].key_prefix);
+            if (ne_pqc_tbl[i].is_static) {
+                snprintf(ne_value, sizeof(ne_value), "%s (static)", px);
+                snprintf(hs_value, sizeof(hs_value), "-");
+            } else {
+                snprintf(ne_value, sizeof(ne_value), "%s", px);
+                snprintf(hs_value, sizeof(hs_value), "%s", px);
+            }
+        } else {
+            snprintf(ne_value, sizeof(ne_value), "-");
+            snprintf(hs_value, sizeof(hs_value), "-");
+        }
+        if (ne_pqc_tbl[i].is_arp)
+            snprintf(policy_value, sizeof(policy_value), "ARP");
+        else
+            snprintf(policy_value, sizeof(policy_value), "%d",
+                     ne_pqc_tbl[i].policy_id);
+
         fprintf(stderr,
-                "| %-8d | %-8d | %-8s | %-8s |\n",
+                "| %-8d | %-8s | %-17s | %-17s |\n",
                 ne_pqc_tbl[i].profile_id,
-                ne_pqc_tbl[i].policy_id,
-                px, px);
+                policy_value, ne_value, hs_value);
         printed++;
     }
 
     if (!printed)
         fprintf(stderr,
-                "| %-8s | %-8s | %-8s | %-8s |\n",
+                "| %-8s | %-8s | %-17s | %-17s |\n",
                 "-", "-", "-", "-");
     ne_pqc_tbl_hline();
     fflush(stderr);
 }
 
+/* Caller holds ne_pqc_tbl_lock. */
+static int ne_pqc_tbl_has_rows_locked(void)
+{
+    for (int i = 0; i < NE_PQC_TBL_SLOTS; i++) {
+        if (ne_pqc_tbl[i].valid)
+            return 1;
+    }
+    return 0;
+}
+
+void main_diag_ne_pqc_configure(const struct app_config *cfg)
+{
+    pthread_mutex_lock(&ne_pqc_tbl_lock);
+    memset(ne_pqc_tbl, 0, sizeof(ne_pqc_tbl));
+    ne_pqc_tbl_publish_enabled = 0;
+
+    if (cfg) {
+        int row = 0;
+
+        for (int pidx = 0; pidx < cfg->profile_count; pidx++) {
+            const struct profile_config *profile = &cfg->profiles[pidx];
+
+            for (int j = 0; j < profile->policy_count; j++) {
+                int policy_idx = profile->policy_indices[j];
+                const struct crypto_policy *policy;
+
+                if (policy_idx < 0 || policy_idx >= cfg->policy_count)
+                    continue;
+                policy = &cfg->policies[policy_idx];
+                if (policy->action != POLICY_ACTION_ENCRYPT_L2)
+                    continue;
+                if (row >= NE_PQC_TBL_SLOTS)
+                    break;
+
+                ne_pqc_tbl[row].profile_id = profile->id;
+                ne_pqc_tbl[row].policy_id = policy->db_id;
+                ne_pqc_tbl[row].valid = 1;
+                row++;
+            }
+        }
+    }
+    pthread_mutex_unlock(&ne_pqc_tbl_lock);
+}
+
+void main_diag_ne_pqc_publish(void)
+{
+    pthread_mutex_lock(&ne_pqc_tbl_lock);
+    ne_pqc_tbl_publish_enabled = 1;
+    if (ne_pqc_tbl_has_rows_locked())
+        ne_pqc_tbl_print_locked("snapshot");
+    pthread_mutex_unlock(&ne_pqc_tbl_lock);
+}
+
+void main_diag_log_arp_key(int profile_id, const uint8_t ne_key[32],
+                           int is_static)
+{
+    int slot = -1;
+    int changed = 0;
+
+    if (profile_id <= 0 || !ne_key || !key_prefix_nonzero(ne_key, 4))
+        return;
+
+    pthread_mutex_lock(&ne_pqc_tbl_lock);
+    for (int i = 0; i < NE_PQC_TBL_SLOTS; i++) {
+        if (ne_pqc_tbl[i].valid && ne_pqc_tbl[i].is_arp &&
+            ne_pqc_tbl[i].profile_id == profile_id) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        for (int i = 0; i < NE_PQC_TBL_SLOTS; i++) {
+            if (!ne_pqc_tbl[i].valid) {
+                slot = i;
+                break;
+            }
+        }
+    }
+    if (slot < 0) {
+        pthread_mutex_unlock(&ne_pqc_tbl_lock);
+        return;
+    }
+
+    if (!ne_pqc_tbl[slot].valid || !ne_pqc_tbl[slot].key_valid ||
+        ne_pqc_tbl[slot].profile_id != profile_id ||
+        ne_pqc_tbl[slot].is_static != !!is_static ||
+        memcmp(ne_pqc_tbl[slot].key_prefix, ne_key, 4) != 0)
+        changed = 1;
+
+    ne_pqc_tbl[slot].profile_id = profile_id;
+    ne_pqc_tbl[slot].policy_id = 0;
+    memcpy(ne_pqc_tbl[slot].key_prefix, ne_key, 4);
+    ne_pqc_tbl[slot].is_arp = 1;
+    ne_pqc_tbl[slot].is_static = !!is_static;
+    ne_pqc_tbl[slot].key_valid = 1;
+    ne_pqc_tbl[slot].valid = 1;
+
+    if (changed && ne_pqc_tbl_publish_enabled)
+        ne_pqc_tbl_print_locked("snapshot");
+    pthread_mutex_unlock(&ne_pqc_tbl_lock);
+}
+
 /*
- * Upsert MATCH row and reprint table (like MAC table updates).
+ * Update one MATCH row. Every emitted table still contains the complete set of
+ * encrypted policies in the active profile; policies waiting for a key show '-'.
  * Only when diversify ok (peers share PQC) and local NE == PQC.
- * Only the running profile stays in the table — drop other profiles.
  */
 void main_diag_log_ne_pqc_match(int profile_id, int policy_id,
                                 const uint8_t ne_key[32])
@@ -111,12 +236,8 @@ void main_diag_log_ne_pqc_match(int profile_id, int policy_id,
     for (int i = 0; i < NE_PQC_TBL_SLOTS; i++) {
         if (!ne_pqc_tbl[i].valid)
             continue;
-        if (ne_pqc_tbl[i].profile_id != profile_id) {
-            ne_pqc_tbl[i].valid = 0;
-            changed = 1;
-            continue;
-        }
-        if (ne_pqc_tbl[i].policy_id == policy_id)
+        if (ne_pqc_tbl[i].profile_id == profile_id &&
+            ne_pqc_tbl[i].policy_id == policy_id)
             slot = i;
     }
     if (slot < 0) {
@@ -133,16 +254,18 @@ void main_diag_log_ne_pqc_match(int profile_id, int policy_id,
     if (!ne_pqc_tbl[slot].valid ||
         ne_pqc_tbl[slot].profile_id != profile_id ||
         ne_pqc_tbl[slot].policy_id != policy_id ||
+        !ne_pqc_tbl[slot].key_valid ||
         memcmp(ne_pqc_tbl[slot].key_prefix, ne_key, 4) != 0)
         changed = 1;
 
     ne_pqc_tbl[slot].profile_id = profile_id;
     ne_pqc_tbl[slot].policy_id = policy_id;
     memcpy(ne_pqc_tbl[slot].key_prefix, ne_key, 4);
+    ne_pqc_tbl[slot].key_valid = 1;
     ne_pqc_tbl[slot].valid = 1;
 
-    if (changed)
-        ne_pqc_tbl_print_locked("match");
+    if (changed && ne_pqc_tbl_publish_enabled)
+        ne_pqc_tbl_print_locked("snapshot");
 
     pthread_mutex_unlock(&ne_pqc_tbl_lock);
 }
@@ -160,28 +283,22 @@ void main_diag_ne_pqc_clear(int profile_id, int policy_id)
             continue;
         if (ne_pqc_tbl[i].profile_id == profile_id &&
             ne_pqc_tbl[i].policy_id == policy_id) {
-            ne_pqc_tbl[i].valid = 0;
+            memset(ne_pqc_tbl[i].key_prefix, 0,
+                   sizeof(ne_pqc_tbl[i].key_prefix));
+            ne_pqc_tbl[i].key_valid = 0;
             removed = 1;
         }
     }
-    if (removed)
-        ne_pqc_tbl_print_locked("clear");
+    if (removed && ne_pqc_tbl_publish_enabled)
+        ne_pqc_tbl_print_locked("snapshot");
     pthread_mutex_unlock(&ne_pqc_tbl_lock);
 }
 
 void main_diag_ne_pqc_clear_all(void)
 {
-    int removed = 0;
-
     pthread_mutex_lock(&ne_pqc_tbl_lock);
-    for (int i = 0; i < NE_PQC_TBL_SLOTS; i++) {
-        if (!ne_pqc_tbl[i].valid)
-            continue;
-        ne_pqc_tbl[i].valid = 0;
-        removed = 1;
-    }
-    if (removed)
-        ne_pqc_tbl_print_locked("clear");
+    memset(ne_pqc_tbl, 0, sizeof(ne_pqc_tbl));
+    ne_pqc_tbl_publish_enabled = 0;
     pthread_mutex_unlock(&ne_pqc_tbl_lock);
 }
 

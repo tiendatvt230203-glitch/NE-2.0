@@ -402,9 +402,10 @@ int fwd_crypto_rebuild(struct app_config *cfg)
     active_policy_count = 0;
     crypto_runtime_reset_indexes();
     memset(policy_profile_id_by_wire_id, -1, sizeof(policy_profile_id_by_wire_id));
-    /* Drop key rows from deleted/previous profiles before rebuilding. */
-    main_diag_ne_pqc_clear_all();
-    
+    /* Register the complete encrypted-policy set before individual keys are
+     * refreshed. Diagnostics publish only after this snapshot is complete. */
+    main_diag_ne_pqc_configure(cfg);
+
     if (cfg) {
         config_refresh_policy_in_table(cfg);
     }
@@ -412,6 +413,7 @@ int fwd_crypto_rebuild(struct app_config *cfg)
     if (!cfg || !cfg->crypto_enabled) {
         policy_crypto_publish_unlock();
         arp_bridge_reload_policies(cfg);
+        main_diag_ne_pqc_publish();
         return 0;
     }
 
@@ -488,8 +490,20 @@ int fwd_crypto_rebuild(struct app_config *cfg)
         }
     }
 
+    for (int i = 0; i < active_policy_count; i++) {
+        if (!policy_crypto_ready[i] ||
+            !policy_crypto_ctx[i].pqc_from_handshake ||
+            !ne_key_nonzero(policy_crypto_ctx[i].keys[KEY_SLOT_CURRENT],
+                            PQC_TRAFFIC_KEY_SZ))
+            continue;
+        main_diag_log_ne_pqc_match(
+            policy_crypto_ctx[i].profile_id,
+            policy_crypto_ctx[i].policy_id,
+            policy_crypto_ctx[i].keys[KEY_SLOT_CURRENT]);
+    }
     policy_crypto_publish_unlock();
     arp_bridge_reload_policies(cfg);
+    main_diag_ne_pqc_publish();
     return 0;
 }
 
