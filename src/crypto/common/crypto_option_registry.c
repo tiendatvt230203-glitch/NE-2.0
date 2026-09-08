@@ -18,7 +18,7 @@ static void crypto_option_registry_init(void)
     g_l2_pqc_ops[CRYPTO_PROTO_UDP] = crypto_opt_l2_pqc_udp_ops();
     g_l2_pqc_ops[CRYPTO_PROTO_ICMP] = crypto_opt_l2_pqc_icmp_ops();
     g_l2_pqc_ops[CRYPTO_PROTO_OSPF] = crypto_opt_l2_pqc_ospf_ops();
-    g_l2_pqc_ops[CRYPTO_PROTO_OTHER] = crypto_opt_l2_pqc_icmp_ops();
+    g_l2_pqc_ops[CRYPTO_PROTO_OTHER] = crypto_opt_l2_pqc_tcp_ops();
     g_l2_pqc_ops[CRYPTO_PROTO_ARP] = crypto_opt_l2_pqc_arp_ops();
 }
 

@@ -8,6 +8,8 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdatomic.h>
+#include <netinet/in.h>
 #include <time.h>
 
 #define MIN_ETH_PKT             (ETH_HEADER_SIZE + 8)
@@ -333,6 +335,7 @@ static void l2_udp_marker_write(uint8_t *packet, int off)
 {
     memcpy(packet + off, l2_udp_marker, L2_UDP_MARKER_SIZE);
 }
+
 #define L2_NONCE_SIZE           CRYPTO_PQC_NONCE_BYTES
 static int l2_policy_off(const uint8_t *packet, size_t pkt_len)
 {
@@ -925,6 +928,7 @@ static void l2_udp_frag_gc(int profile_slot, int worker_idx, uint64_t now_ns)
     if (ft)
         opt_frag_gc_table(ft, now_ns);
 }
+
 static int l2_ip_encrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt,
                          uint32_t *pkt_len)
 {
@@ -976,11 +980,14 @@ static int l2_ip_decrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt,
     *pkt_len = (uint32_t)n;
     return 0;
 }
-static int l2_arp_encrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt, uint32_t *pkt_len)
+
+static int l2_arp_encrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt,
+                          uint32_t *pkt_len)
 {
     int n;
 
-    if (unlikely(!ctx || !ctx->initialized || !pkt || *pkt_len < MIN_ETH_PKT))
+    if (unlikely(!ctx || !ctx->initialized || !pkt ||
+                 *pkt_len < MIN_ETH_PKT))
         return -1;
     if (!crypto_pkt_is_arp(pkt, *pkt_len))
         return 0;
@@ -991,13 +998,13 @@ static int l2_arp_encrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt, uint32_t 
     return 0;
 }
 
-static int l2_arp_decrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt, uint32_t *pkt_len)
+static int l2_arp_decrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt,
+                          uint32_t *pkt_len)
 {
     int n;
 
     if (unlikely(!ctx || !ctx->initialized || !pkt))
         return -1;
-    /* 0x823E = encrypted ARP */
     if (!crypto_eth_l2_has_arp_marker(pkt, *pkt_len))
         return 0;
     n = l2_do_decrypt_arp(ctx, pkt, *pkt_len);
@@ -1008,7 +1015,6 @@ static int l2_arp_decrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt, uint32_t 
 }
 
 CRYPTO_OPS_PLAIN(crypto_opt_l2_pqc_tcp_ops, l2_ip_encrypt, l2_ip_decrypt)
-CRYPTO_OPS_PLAIN(crypto_opt_l2_pqc_icmp_ops, l2_ip_encrypt, l2_ip_decrypt)
 CRYPTO_OPS_PLAIN(crypto_opt_l2_pqc_ospf_ops, l2_ip_encrypt, l2_ip_decrypt)
 CRYPTO_OPS_PLAIN(crypto_opt_l2_pqc_arp_ops, l2_arp_encrypt, l2_arp_decrypt)
 
@@ -1023,5 +1029,294 @@ const struct crypto_option_ops *crypto_opt_l2_pqc_udp_ops(void)
         .reasm = l2_udp_reasm,
         .frag_gc = l2_udp_frag_gc,
     };
+
+    return &ops;
+}
+
+/* ===================== ICMP fragmentation/reassembly ===================== */
+
+#define L2_ICMP_MARKER_SIZE 4u
+#define L2_ICMP_SHIM_SIZE   L2_UDP_SHIM_SIZE
+
+enum l2_icmp_kind {
+    L2_ICMP_KIND_FRAG0 = 0,
+    L2_ICMP_KIND_FRAG1 = 1,
+};
+
+static const uint8_t l2_icmp_marker[L2_ICMP_MARKER_SIZE] = {
+    0x5Bu, 0x49u, 0x43u, 0x01u
+};
+static struct opt_table *g_icmp_tables[MAX_PROFILES][NE_CRYPTO_WORKERS];
+static atomic_uint_fast64_t g_icmp_datagram_clock = ATOMIC_VAR_INIT(1u);
+
+static struct opt_table *icmp_opt_table(int profile_slot, int worker_idx,
+                                        int create)
+{
+    struct opt_table *t;
+
+    if (profile_slot < 0 || profile_slot >= MAX_PROFILES)
+        profile_slot = 0;
+    if (worker_idx < 0 || worker_idx >= (int)NE_CRYPTO_WORKERS)
+        worker_idx = 0;
+    t = g_icmp_tables[profile_slot][worker_idx];
+    if (!t && create) {
+        t = calloc(1, sizeof(*t));
+        if (!t)
+            return NULL;
+        g_icmp_tables[profile_slot][worker_idx] = t;
+    }
+    return t;
+}
+
+static int l2_icmp_marker_match(const uint8_t *packet, size_t pkt_len, int off)
+{
+    return packet && off >= 0 &&
+        pkt_len >= (size_t)off + L2_ICMP_MARKER_SIZE &&
+        memcmp(packet + off, l2_icmp_marker, L2_ICMP_MARKER_SIZE) == 0;
+}
+
+static void l2_icmp_marker_write(uint8_t *packet, int off)
+{
+    memcpy(packet + off, l2_icmp_marker, L2_ICMP_MARKER_SIZE);
+}
+
+static void l2_icmp_write_shim(uint8_t *buf, uint8_t kind,
+                               uint32_t epoch, uint32_t datagram_id)
+{
+    l2_udp_write_shim(buf, kind, epoch, 0, datagram_id);
+}
+
+static int l2_icmp_read_shim(const uint8_t *buf, uint8_t *kind,
+                             uint32_t *epoch, uint32_t *datagram_id)
+{
+    uint32_t unused_seq;
+
+    return l2_udp_read_shim(buf, kind, epoch, &unused_seq, datagram_id);
+}
+
+static void l2_icmp_next_meta(uint32_t *epoch, uint32_t *datagram_id)
+{
+    uint64_t value = atomic_fetch_add_explicit(&g_icmp_datagram_clock, 1u,
+                                                memory_order_relaxed);
+
+    *epoch = (uint32_t)(value >> 32);
+    *datagram_id = (uint32_t)value;
+}
+
+static int l2_encrypt_icmp_fragment(struct packet_crypto_ctx *ctx,
+                                    const uint8_t *eth_hdr, int et_off,
+                                    const uint8_t *plain, uint32_t plain_len,
+                                    uint8_t kind, uint32_t epoch,
+                                    uint32_t datagram_id,
+                                    uint8_t *out, size_t out_max,
+                                    uint32_t *out_len)
+{
+    uint8_t nonce[CRYPTO_PQC_NONCE_BYTES];
+    int magic_off = et_off + 2 + L2_POLICY_LEN + L2_CORE_ID_LEN + L2_NONCE_SIZE;
+    int enc_off = magic_off + (int)L2_ICMP_MARKER_SIZE;
+    size_t encrypted_plain_len = L2_ICMP_SHIM_SIZE + plain_len;
+    size_t need = (size_t)enc_off + encrypted_plain_len + AES_GCM_TAG_SIZE;
+    int new_len = 0;
+
+    if (!ctx || !eth_hdr || !plain || !out || !out_len || et_off < 0 ||
+        need > out_max)
+        return -1;
+    memcpy(out, eth_hdr, (size_t)et_off);
+    memmove(out + enc_off + L2_ICMP_SHIM_SIZE, plain, plain_len);
+    l2_icmp_write_shim(out + enc_off, kind, epoch, datagram_id);
+    if (packet_crypto_generate_nonce(nonce) != 0)
+        return -1;
+    l2_write_wire_header_et(out, et_off, NE_L2_FAKE_ETHERTYPE_UDP,
+                            ctx->wire_id, nonce, L2_NONCE_SIZE);
+    l2_icmp_marker_write(out, magic_off);
+    if (packet_crypto_encrypt(ctx, nonce, out + enc_off,
+                              (int)encrypted_plain_len, &new_len) != 0)
+        return -1;
+    *out_len = (uint32_t)(enc_off + new_len);
+    return 0;
+}
+
+static int l2_encrypt_icmp_fragment0(struct packet_crypto_ctx *ctx,
+                                     uint8_t *packet, int et_off, int l3_off,
+                                     uint32_t plain_len, uint32_t epoch,
+                                     uint32_t datagram_id, size_t out_max,
+                                     uint32_t *out_len)
+{
+    uint8_t nonce[CRYPTO_PQC_NONCE_BYTES];
+    int magic_off = et_off + 2 + L2_POLICY_LEN + L2_CORE_ID_LEN + L2_NONCE_SIZE;
+    int enc_off = magic_off + (int)L2_ICMP_MARKER_SIZE;
+    size_t encrypted_plain_len = L2_ICMP_SHIM_SIZE + plain_len;
+    size_t need = (size_t)enc_off + encrypted_plain_len + AES_GCM_TAG_SIZE;
+    int new_len = 0;
+
+    if (!ctx || !packet || !out_len || et_off < 0 || l3_off < 0 ||
+        need > out_max)
+        return -1;
+    memmove(packet + enc_off + L2_ICMP_SHIM_SIZE,
+            packet + l3_off, plain_len);
+    l2_icmp_write_shim(packet + enc_off, L2_ICMP_KIND_FRAG0,
+                       epoch, datagram_id);
+    if (packet_crypto_generate_nonce(nonce) != 0)
+        return -1;
+    l2_write_wire_header_et(packet, et_off, NE_L2_FAKE_ETHERTYPE_UDP,
+                            ctx->wire_id, nonce, L2_NONCE_SIZE);
+    l2_icmp_marker_write(packet, magic_off);
+    if (packet_crypto_encrypt(ctx, nonce, packet + enc_off,
+                              (int)encrypted_plain_len, &new_len) != 0)
+        return -1;
+    *out_len = (uint32_t)(enc_off + new_len);
+    return 0;
+}
+
+static int l2_icmp_need_split(uint32_t pkt_len)
+{
+    return pkt_len + crypto_option_wire_overhead(CRYPTO_OPT_L2_PQC) >
+        crypto_option_get_mtu();
+}
+
+static int l2_icmp_split(struct packet_crypto_ctx *ctx,
+                         uint8_t *pkt_data, uint32_t pkt_len,
+                         size_t frag0_max, uint32_t *frag0_len,
+                         uint8_t *frag1, size_t frag1_max,
+                         uint32_t *frag1_len)
+{
+    uint32_t frag_mtu = crypto_option_get_mtu();
+    int et_off = crypto_eth_l2_prefix_len(pkt_data, pkt_len);
+    int l3_off = crypto_eth_ipv4_offset(pkt_data, pkt_len);
+    const uint8_t *ip;
+    uint32_t ip_len;
+    uint32_t ihl;
+    uint32_t first_len;
+    uint32_t second_len;
+    uint32_t max_first;
+    uint32_t epoch;
+    uint32_t datagram_id;
+
+    if (!ctx || !pkt_data || !frag0_len || !frag1 || !frag1_len ||
+        et_off < 0 || l3_off < 0 || pkt_len <= (uint32_t)l3_off)
+        return -1;
+    ip = pkt_data + l3_off;
+    ip_len = pkt_len - (uint32_t)l3_off;
+    ihl = (uint32_t)(ip[0] & 0x0fu) * 4u;
+    if ((ip[0] >> 4) != 4 || ip[9] != IPPROTO_ICMP || ihl < 20u ||
+        ip_len <= ihl || frag_mtu <= (uint32_t)l3_off + OPT_FRAG_META_LEN)
+        return -1;
+
+    max_first = frag_mtu - (uint32_t)l3_off - OPT_FRAG_META_LEN;
+    if (max_first <= ihl || max_first >= ip_len)
+        return -1;
+    first_len = max_first;
+    second_len = ip_len - first_len;
+    l2_icmp_next_meta(&epoch, &datagram_id);
+
+    if (l2_encrypt_icmp_fragment(ctx, pkt_data, et_off,
+                                 ip + first_len, second_len,
+                                 L2_ICMP_KIND_FRAG1, epoch, datagram_id,
+                                 frag1, frag1_max, frag1_len) != 0)
+        return -1;
+    return l2_encrypt_icmp_fragment0(ctx, pkt_data, et_off, l3_off,
+                                     first_len, epoch, datagram_id,
+                                     frag0_max, frag0_len);
+}
+
+static int l2_icmp_is_fragment(const struct app_config *cfg,
+                               const uint8_t *pkt_data, uint32_t pkt_len,
+                               uint16_t *pkt_id, uint8_t *frag_index)
+{
+    int marker_off;
+    uint8_t wire_policy_id;
+
+    if (!cfg || !pkt_data || !pkt_id || !frag_index ||
+        !crypto_eth_l2_has_marker(pkt_data, pkt_len))
+        return 0;
+    marker_off = l2_frag_magic_off(pkt_data, pkt_len);
+    if (!l2_icmp_marker_match(pkt_data, pkt_len, marker_off) ||
+        crypto_eth_l2_read_policy_id(pkt_data, pkt_len,
+                                     &wire_policy_id) != 0 ||
+        !opt_policy_match(cfg, POLICY_ACTION_ENCRYPT_L2, wire_policy_id))
+        return 0;
+    *pkt_id = 0;
+    *frag_index = 0;
+    return 1;
+}
+
+static int l2_icmp_reasm(int profile_slot, int worker_idx,
+                         struct packet_crypto_ctx *ctx,
+                         uint8_t *pkt_data, uint32_t *pkt_len,
+                         uint8_t *out_buf, uint32_t *out_len)
+{
+    uint8_t nonce[CRYPTO_PQC_NONCE_BYTES];
+    uint32_t epoch = 0;
+    uint32_t datagram_id = 0;
+    uint8_t kind = 0;
+    int marker_off;
+    int enc_off;
+    int dec_len = 0;
+    int l3_off;
+    int rr;
+    struct opt_table *ft;
+
+    if (!ctx || !pkt_data || !pkt_len || !out_buf || !out_len)
+        return -1;
+    marker_off = l2_frag_magic_off(pkt_data, *pkt_len);
+    if (!l2_icmp_marker_match(pkt_data, *pkt_len, marker_off))
+        return -1;
+    enc_off = marker_off + (int)L2_ICMP_MARKER_SIZE;
+    if (*pkt_len < (uint32_t)enc_off + L2_ICMP_SHIM_SIZE + AES_GCM_TAG_SIZE)
+        return -1;
+    memcpy(nonce, pkt_data + l2_nonce_off(pkt_data, *pkt_len), L2_NONCE_SIZE);
+    if (packet_crypto_decrypt(ctx, nonce, pkt_data + enc_off,
+                              (int)(*pkt_len - (uint32_t)enc_off),
+                              &dec_len) != 0 ||
+        dec_len < (int)L2_ICMP_SHIM_SIZE ||
+        l2_icmp_read_shim(pkt_data + enc_off, &kind, &epoch,
+                          &datagram_id) != 0 ||
+        kind > L2_ICMP_KIND_FRAG1)
+        return -1;
+    l3_off = crypto_eth_l2_prefix_len(pkt_data, *pkt_len);
+    if (l3_off < 0)
+        return -1;
+    l3_off += 2;
+    memmove(pkt_data + l3_off, pkt_data + enc_off + L2_ICMP_SHIM_SIZE,
+            (size_t)dec_len - L2_ICMP_SHIM_SIZE);
+    *pkt_len = (uint32_t)l3_off + (uint32_t)dec_len - L2_ICMP_SHIM_SIZE;
+
+    ft = icmp_opt_table(profile_slot, worker_idx, 1);
+    if (!ft)
+        return -1;
+    rr = l2_reassemble(ft, ctx->wire_id, pkt_data, *pkt_len,
+                       epoch, datagram_id, 0, kind, out_buf, out_len);
+    if (rr == 1) {
+        int ip_off = crypto_eth_ipv4_offset(out_buf, *out_len);
+
+        *pkt_len = *out_len;
+        if (ip_off < 0 || *out_len < (uint32_t)ip_off + 20u ||
+            out_buf[ip_off + 9] != IPPROTO_ICMP)
+            return -1;
+    }
+    return rr;
+}
+
+static void l2_icmp_frag_gc(int profile_slot, int worker_idx,
+                            uint64_t now_ns)
+{
+    struct opt_table *ft = icmp_opt_table(profile_slot, worker_idx, 0);
+
+    if (ft)
+        opt_frag_gc_table(ft, now_ns);
+}
+
+const struct crypto_option_ops *crypto_opt_l2_pqc_icmp_ops(void)
+{
+    static const struct crypto_option_ops ops = {
+        .need_split = l2_icmp_need_split,
+        .split = l2_icmp_split,
+        .encrypt = l2_ip_encrypt,
+        .decrypt = l2_ip_decrypt,
+        .is_fragment = l2_icmp_is_fragment,
+        .reasm = l2_icmp_reasm,
+        .frag_gc = l2_icmp_frag_gc,
+    };
+
     return &ops;
 }

@@ -216,4 +216,6 @@ void crypto_option_frag_gc_all(int profile_slot, int worker_idx, uint64_t now_ns
 {
     crypto_option_frag_gc(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_UDP,
                           profile_slot, worker_idx, now_ns);
+    crypto_option_frag_gc(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_ICMP,
+                          profile_slot, worker_idx, now_ns);
 }

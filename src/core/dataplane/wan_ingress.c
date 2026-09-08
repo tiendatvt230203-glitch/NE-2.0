@@ -46,6 +46,9 @@ static int wan_l2_is_udp_tagged(const uint8_t *pkt, uint32_t len)
                   WAN_L2_UDP_MARKER_LEN) == 0;
 }
 
+static int wan_try_l2_pqc_icmp(struct forwarder *fwd, uint8_t *pkt,
+                               uint32_t *len, uint64_t addr, int *pending);
+
 static const struct crypto_policy *fwd_policy_by_wire_id(struct forwarder *fwd, uint8_t wire_id)
 {
     if (!fwd || !fwd->cfg)
@@ -175,7 +178,12 @@ static int decrypt_wan(struct forwarder *fwd, struct ne_packet *job)
     is_l2 = fwd_crypto_has_l2_marker(pkt, len) || wan_l2_is_udp_tagged(pkt, len);
 
     {
-        int l2_fast = wan_try_l2_pqc_udp(fwd, pkt, &len, job->addr, &pending);
+        int l2_fast = wan_try_l2_pqc_icmp(fwd, pkt, &len, job->addr,
+                                          &pending);
+
+        if (l2_fast == 0)
+            l2_fast = wan_try_l2_pqc_udp(fwd, pkt, &len, job->addr,
+                                         &pending);
 
         if (l2_fast < 0)
             return -1;
@@ -600,4 +608,81 @@ policy_drop:
 drop:
     ne_dp_stats_wan_drop(1);
     ne_frame_free(&fwd->pair, job.addr);
+}
+
+/* ===================== ICMP fragmentation/reassembly ===================== */
+
+#define WAN_L2_ICMP_MARKER_LEN 4u
+#define WAN_L2_ICMP_SHIM_LEN   13u
+#define WAN_L2_ICMP_TAG_LEN    16u
+
+static const uint8_t wan_l2_icmp_marker[WAN_L2_ICMP_MARKER_LEN] = {
+    0x5Bu, 0x49u, 0x43u, 0x01u
+};
+
+static int wan_l2_is_icmp_fragment(const uint8_t *pkt, uint32_t len)
+{
+    int marker_off;
+
+    if (!pkt || !crypto_eth_l2_has_marker(pkt, len))
+        return 0;
+    marker_off = crypto_eth_l2_frag_magic_off(pkt, len,
+                                              PACKET_CRYPTO_NONCE_BYTES);
+    if (marker_off < 0 ||
+        len < (uint32_t)marker_off + WAN_L2_ICMP_MARKER_LEN +
+            WAN_L2_ICMP_SHIM_LEN + WAN_L2_ICMP_TAG_LEN)
+        return 0;
+    return memcmp(pkt + marker_off, wan_l2_icmp_marker,
+                  WAN_L2_ICMP_MARKER_LEN) == 0;
+}
+
+static int wan_reassemble_l2_icmp(struct forwarder *fwd, uint8_t *pkt,
+                                  uint32_t *len, uint8_t policy_id,
+                                  uint64_t addr, int *pending)
+{
+    struct packet_crypto_ctx *ctx;
+    uint32_t joined_len = 0;
+    int profile_slot;
+    int result;
+
+    ctx = fwd_crypto_ctx_for_wire_id(policy_id);
+    if (!ctx)
+        return -1;
+    profile_slot = fwd_crypto_profile_slot_for_id(
+        fwd_crypto_profile_id_for_wire_id(policy_id));
+    if (profile_slot < 0)
+        return -1;
+
+    crypto_l2_pqc_reasm_set_addr(addr);
+    result = crypto_option_reassemble(
+        CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_ICMP, profile_slot,
+        dp_crypto_current_worker_idx(), ctx, pkt, len, pkt, &joined_len);
+    if (result == 0) {
+        *pending = crypto_l2_pqc_reasm_held() ? 2 : 1;
+        return 0;
+    }
+    if (result != 1)
+        return -1;
+    *len = joined_len;
+    return 0;
+}
+
+static int wan_try_l2_pqc_icmp(struct forwarder *fwd, uint8_t *pkt,
+                               uint32_t *len, uint64_t addr, int *pending)
+{
+    uint8_t wire_policy_id = 0;
+
+    if (!wan_l2_is_icmp_fragment(pkt, *len))
+        return 0;
+    if (crypto_eth_l2_read_policy_id(pkt, *len, &wire_policy_id) != 0 ||
+        !fwd_policy_by_wire_id(fwd, wire_policy_id) ||
+        !fwd_crypto_ctx_for_wire_id(wire_policy_id))
+        return 0;
+    if (wan_reassemble_l2_icmp(fwd, pkt, len, wire_policy_id, addr,
+                               pending) != 0) {
+        if (pending)
+            *pending = 0;
+        return -1;
+    }
+    return 1;
 }
