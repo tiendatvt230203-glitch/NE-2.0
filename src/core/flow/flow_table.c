@@ -9,7 +9,7 @@
 #define FLOW_SWRR_SETS 512u
 #define FLOW_SWRR_WAYS 4u
 #define FLOW_TCP_PACKET_WINDOW 4096u
-#define FLOW_UDP_PACKET_WINDOW 4096u
+#define FLOW_UDP_PACKET_WINDOW 16384u
 
 struct flow_swrr_state {
     struct flow_key key;
@@ -238,7 +238,6 @@ int flow_table_pick_wan_per_flow_packet(uint32_t src_ip, uint32_t dst_ip,
 
     g_pending_udp_state = NULL;
 
-    /* TCP consumes one window count for each original packet. */
     if (protocol == IPPROTO_TCP) {
         int selected = flow_window_wan(state, allowed_wans, allowed_weights,
                                        allowed_count);
@@ -247,10 +246,6 @@ int flow_table_pick_wan_per_flow_packet(uint32_t src_ip, uint32_t dst_ip,
         return selected;
     }
 
-    /*
-     * UDP only selects here.  The caller commits one count after either the
-     * full datagram or both fragments have been enqueued successfully.
-     */
     if (protocol == IPPROTO_UDP) {
         g_pending_udp_state = state;
         return flow_window_wan(state, allowed_wans, allowed_weights,

@@ -68,8 +68,7 @@ const struct crypto_option_ops *crypto_option_ops(crypto_option_id id, crypto_pr
 
 uint32_t crypto_option_wire_overhead(crypto_option_id id);
 
-/* TCP fast path: the dataplane already parsed the IPv4 offset while choosing
- * policy/worker. Reuse it and keep the exact L2-PQC wire encoder. */
+
 int crypto_l2_pqc_encrypt_tcp_l3(struct packet_crypto_ctx *ctx,
                                  uint8_t *pkt, uint32_t *pkt_len,
                                  int l3_off);

@@ -32,12 +32,5 @@ int flow_table_pick_wan_per_flow_packet(uint32_t src_ip, uint32_t dst_ip,
                                         const int *allowed_weights,
                                         int allowed_count);
 
-/*
- * Complete the UDP decision most recently returned on this worker thread.
- * sent=1 advances the UDP connection window once, after either one full
- * datagram or an atomic fragment pair was enqueued successfully.  sent=0
- * cancels the pending decision without consuming a window packet.
- */
 void flow_table_udp_packet_complete(int sent);
-
 #endif

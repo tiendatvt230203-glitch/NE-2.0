@@ -16,7 +16,8 @@
 #define UDP_REORDER_HELD_CAP          8192u
 #define UDP_REORDER_GC_SLICE          16u
 #define UDP_REORDER_FLOW_IDLE_NS      (60ULL * 1000000000ULL)
-#define UDP_REORDER_DEFAULT_HOLD_NS   (2ULL * 1000000ULL)
+// #define UDP_REORDER_DEFAULT_HOLD_NS   (1ULL * 1000000ULL)
+#define UDP_REORDER_DEFAULT_HOLD_NS   (100ULL * 1000ULL)
 
 struct udp_reorder_slot {
     struct dp_udp_reorder_item item;
