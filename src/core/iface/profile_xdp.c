@@ -16,6 +16,14 @@
 #include <time.h>
 #include <unistd.h>
 
+/* The bundled libbpf header predates these APIs, while current libbpf exports
+ * them. Weak declarations keep the binary diagnosable on an older appliance
+ * instead of turning a missing symbol into a loader failure. */
+extern __u32 bpf_program__flags(const struct bpf_program *prog)
+    __attribute__((weak));
+extern int bpf_program__set_flags(struct bpf_program *prog, __u32 flags)
+    __attribute__((weak));
+
 static void profile_xdp_stop_log(const char *step, const char *ifname)
 {
     struct timespec ts;
@@ -209,6 +217,10 @@ static int open_bpf_object(const char *path, struct bpf_object **obj_out,
     char resolved_path[PATH_MAX];
     const char *open_path;
     struct bpf_object *obj;
+    struct bpf_program *prog;
+    struct bpf_map *map;
+    __u32 prog_flags;
+    int rc;
 
     open_path = resolve_bpf_object_path(path, resolved_path);
 
@@ -218,15 +230,37 @@ static int open_bpf_object(const char *path, struct bpf_object **obj_out,
         fprintf(stderr, "[PROFILE-XDP] bpf open failed: %s\n", open_path);
         return -1;
     }
-    if (bpf_object__load(obj) != 0) {
-        fprintf(stderr, "[PROFILE-XDP] bpf load failed: %s\n", open_path);
+
+    prog = bpf_object__find_program_by_name(obj, prog_name);
+    map = bpf_object__find_map_by_name(obj, map_name);
+    if (!prog || !map) {
+        fprintf(stderr, "[PROFILE-XDP] bpf object %s missing prog/map\n", open_path);
         bpf_object__close(obj);
         return -1;
     }
-    struct bpf_program *prog = bpf_object__find_program_by_name(obj, prog_name);
-    struct bpf_map *map = bpf_object__find_map_by_name(obj, map_name);
-    if (!prog || !map) {
-        fprintf(stderr, "[PROFILE-XDP] bpf object %s missing prog/map\n", open_path);
+
+    /* Do not rely on the installed libbpf version to infer this load flag
+     * from SEC("xdp.frags"). i40e checks the flag recorded by BPF_PROG_LOAD
+     * before it permits native XDP on an interface whose MTU needs frags. */
+    if (!bpf_program__flags || !bpf_program__set_flags) {
+        fprintf(stderr,
+                "[PROFILE-XDP] installed libbpf cannot enable XDP fragments for %s\n",
+                open_path);
+        bpf_object__close(obj);
+        return -1;
+    }
+    prog_flags = bpf_program__flags(prog);
+    rc = bpf_program__set_flags(prog, prog_flags | BPF_F_XDP_HAS_FRAGS);
+    if (rc != 0) {
+        fprintf(stderr,
+                "[PROFILE-XDP] cannot enable fragment support for %s: %s\n",
+                open_path, strerror(rc < 0 ? -rc : rc));
+        bpf_object__close(obj);
+        return -1;
+    }
+
+    if (bpf_object__load(obj) != 0) {
+        fprintf(stderr, "[PROFILE-XDP] bpf load failed: %s\n", open_path);
         bpf_object__close(obj);
         return -1;
     }
