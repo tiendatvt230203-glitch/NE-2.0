@@ -118,17 +118,22 @@ void crypto_option_set_mtu(uint32_t mtu)
 {
     if (mtu < 512)
         mtu = 512;
-    if (mtu > CRYPTO_OPT_FRAG_MTU_DEFAULT)
-        mtu = CRYPTO_OPT_FRAG_MTU_DEFAULT;
+    if (mtu > CRYPTO_OPT_FRAG_MTU_MAX)
+        mtu = CRYPTO_OPT_FRAG_MTU_MAX;
     atomic_store(&g_opt_frag_mtu, mtu);
 }
 
 uint32_t crypto_option_get_mtu(void)
 {
     uint32_t mtu = (uint32_t)atomic_load(&g_opt_frag_mtu);
-    if (mtu < 512 || mtu > CRYPTO_OPT_FRAG_MTU_DEFAULT)
+    if (mtu < 512 || mtu > CRYPTO_OPT_FRAG_MTU_MAX)
         return CRYPTO_OPT_FRAG_MTU_DEFAULT;
     return mtu;
+}
+
+int crypto_option_is_jumbo_mode(void)
+{
+    return crypto_option_get_mtu() > CRYPTO_OPT_FRAG_MTU_DEFAULT;
 }
 
 uint32_t crypto_option_wire_overhead(crypto_option_id id)
@@ -214,6 +219,8 @@ void crypto_option_frag_gc(crypto_option_id id, crypto_proto_class proto,
 
 void crypto_option_frag_gc_all(int profile_slot, int worker_idx, uint64_t now_ns)
 {
+    if (crypto_option_is_jumbo_mode())
+        return;
     crypto_option_frag_gc(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_UDP,
                           profile_slot, worker_idx, now_ns);
     crypto_option_frag_gc(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_ICMP,

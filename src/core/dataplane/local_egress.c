@@ -107,7 +107,8 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
         crypto_option_udp_set_tx_seq(udp_seq);
     }
 
-    if (crypto_option_need_split(opt_id, pclass, len)) {
+    if (!crypto_option_is_jumbo_mode() &&
+        crypto_option_need_split(opt_id, pclass, len)) {
         if (split_tail_take(fwd, worker_idx, &tail.addr) != 0)
             return -1;
         tail_buf = ne_packet_data(&fwd->pair, tail.addr);
@@ -236,7 +237,8 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     if (!fwd->cfg->crypto_enabled)
         goto drop;
 
-    if (proto == IPPROTO_TCP && (tcp_flags & 0x02u)) {
+    if (!crypto_option_is_jumbo_mode() && proto == IPPROTO_TCP &&
+        (tcp_flags & 0x02u)) {
         (void)crypto_tcp_clamp_mss_l3(pkt, job.len, l3_off,
                                       crypto_option_get_mtu(),
                                       crypto_option_wire_overhead(CRYPTO_OPT_L2_PQC));

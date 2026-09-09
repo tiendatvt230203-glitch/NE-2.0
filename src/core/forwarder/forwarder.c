@@ -233,33 +233,62 @@ static void init_iface_meta(struct fwd_iface *iface, const char *ifname)
     iface->ifname[sizeof(iface->ifname) - 1] = '\0';
 }
 
+static int read_iface_mtu(int sockfd, const char *ifname, uint32_t *mtu_out)
+{
+    struct ifreq ifr;
+
+    if (sockfd < 0 || !ifname || !ifname[0] || !mtu_out)
+        return -1;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+    if (ioctl(sockfd, SIOCGIFMTU, &ifr) != 0 || ifr.ifr_mtu <= 0)
+        return -1;
+    *mtu_out = (uint32_t)ifr.ifr_mtu;
+    return 0;
+}
+
 static uint32_t resolve_runtime_frag_mtu(const struct app_config *cfg)
 {
     int sockfd;
-    uint32_t min_mtu = CRYPTO_OPT_FRAG_MTU_DEFAULT;
+    uint32_t min_mtu = CRYPTO_OPT_FRAG_MTU_MAX;
+    int seen = 0;
 
     if (!cfg)
-        return min_mtu;
+        return CRYPTO_OPT_FRAG_MTU_DEFAULT;
 
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0)
-        return min_mtu;
+        return CRYPTO_OPT_FRAG_MTU_DEFAULT;
+
+    for (int li = 0; li < cfg->local_count; li++) {
+        uint32_t mtu;
+
+        if (read_iface_mtu(sockfd, cfg->locals[li].ifname, &mtu) != 0) {
+            close(sockfd);
+            return CRYPTO_OPT_FRAG_MTU_DEFAULT;
+        }
+        if (mtu < min_mtu)
+            min_mtu = mtu;
+        seen = 1;
+    }
 
     for (int wi = 0; wi < cfg->wan_count; wi++) {
-        struct ifreq ifr;
+        uint32_t mtu;
+
         if (!cfg->wans[wi].dataplane)
             continue;
-        memset(&ifr, 0, sizeof(ifr));
-        strncpy(ifr.ifr_name, cfg->wans[wi].ifname, IFNAMSIZ - 1);
-        ifr.ifr_name[IFNAMSIZ - 1] = '\0';
-        if (ioctl(sockfd, SIOCGIFMTU, &ifr) != 0)
-            continue;
-        if (ifr.ifr_mtu > 0 && (uint32_t)ifr.ifr_mtu < min_mtu)
-            min_mtu = (uint32_t)ifr.ifr_mtu;
+        if (read_iface_mtu(sockfd, cfg->wans[wi].ifname, &mtu) != 0) {
+            close(sockfd);
+            return CRYPTO_OPT_FRAG_MTU_DEFAULT;
+        }
+        if (mtu < min_mtu)
+            min_mtu = mtu;
+        seen = 1;
     }
 
     close(sockfd);
-    return min_mtu;
+    return seen ? min_mtu : CRYPTO_OPT_FRAG_MTU_DEFAULT;
 }
 
 static void *local_rx_thread(void *arg)
@@ -557,7 +586,9 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
         fwd->wan_count = MAX_INTERFACES;
 
     crypto_option_set_mtu(resolve_runtime_frag_mtu(cfg));
-    fprintf(stderr, "[FRAG] runtime MTU set to %u\n", crypto_option_get_mtu());
+    fprintf(stderr, "[FRAG] runtime MTU set to %u (%s mode)\n",
+            crypto_option_get_mtu(),
+            crypto_option_is_jumbo_mode() ? "jumbo" : "standard");
     ne_dp_stats_init();
     ne_dp_idle_init();
 

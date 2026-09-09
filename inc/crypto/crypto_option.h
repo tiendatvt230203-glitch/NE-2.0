@@ -8,6 +8,7 @@
 #include "packet_crypto.h"
 
 #define CRYPTO_OPT_FRAG_MTU_DEFAULT  1500u
+#define CRYPTO_OPT_FRAG_MTU_MAX      9000u
 #define OPT_FRAG_TABLE_SIZE          4096
 #define OPT_FRAG_TIMEOUT_NS          (200ULL * 1000000ULL)
 
@@ -32,6 +33,7 @@ void crypto_option_udp_set_rx_meta(uint32_t epoch, uint32_t seq);
 int crypto_option_udp_take_rx_meta(uint32_t *epoch, uint32_t *seq);
 void crypto_option_set_mtu(uint32_t mtu);
 uint32_t crypto_option_get_mtu(void);
+int crypto_option_is_jumbo_mode(void);
 
 typedef enum {
     CRYPTO_OPT_L2_PQC = 0,
