@@ -24,6 +24,10 @@ extern __u32 bpf_program__flags(const struct bpf_program *prog)
 extern int bpf_program__set_flags(struct bpf_program *prog, __u32 flags)
     __attribute__((weak));
 
+#ifndef BPF_F_XDP_HAS_FRAGS
+#define BPF_F_XDP_HAS_FRAGS (1U << 5)
+#endif
+
 static void profile_xdp_stop_log(const char *step, const char *ifname)
 {
     struct timespec ts;

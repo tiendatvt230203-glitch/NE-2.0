@@ -2,7 +2,7 @@ CC     = gcc
 CLANG  = clang
 
 CFLAGS = -D_GNU_SOURCE -I. -Iinc -Iinc/core -Iinc/crypto -Iinc/db -I./include -Isrc/crypto/pqc/include -Wall -O2 -mcmodel=medium $(shell pg_config --includedir 2>/dev/null | xargs -I{} echo -I{})
-LDFLAGS = -Wl,-rpath,'$$ORIGIN/lib' -lbpf -lelf -lz -lpthread \
+LDFLAGS = -Wl,-rpath,'$$ORIGIN/lib' -lelf -lz -lpthread \
           ./lib/libxdp.so.1 ./lib/libpq.so.5.14 ./lib/libscrypt.so
 
 BPF_CFLAGS     = -O2 -target bpf -g
