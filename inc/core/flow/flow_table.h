@@ -30,7 +30,9 @@ int flow_table_pick_wan_per_flow_packet(uint32_t src_ip, uint32_t dst_ip,
                                         uint8_t protocol,
                                         const int *allowed_wans,
                                         const int *allowed_weights,
-                                        int allowed_count);
+                                        int allowed_count,
+                                        int jumbo_packet);
 
 void flow_table_udp_packet_complete(int sent);
+void flow_table_jumbo_packet_complete(int sent);
 #endif

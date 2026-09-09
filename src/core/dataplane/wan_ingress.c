@@ -10,7 +10,7 @@
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/flow/mac_learn.h"
 #include "../../../inc/core/dataplane/arp_bridge.h"
-#include "../../../inc/core/dataplane/dataplane_stats.h"
+#include "../../../inc/core/dataplane/jumbo_l2.h"
 #include "../../../inc/core/dataplane/udp_reorder.h"
 
 #include <netinet/in.h>
@@ -77,8 +77,13 @@ static int wan_l2_plain_ok(const uint8_t *pkt, uint32_t len)
 /* Encrypted NE wire: L2 PQC marker / UDP frag — not plain bypass. */
 static int wan_wire_is_encrypted(struct forwarder *fwd, const uint8_t *pkt, uint32_t len)
 {
+    int jumbo_kind;
+
     if (!pkt || !fwd || !fwd->cfg)
         return 0;
+    jumbo_kind = dp_jumbo_wire_kind(pkt, len);
+    if (jumbo_kind != 0)
+        return jumbo_kind == 2;
     if (fwd_crypto_has_l2_marker(pkt, len) || crypto_eth_l2_has_marker(pkt, len))
         return 1;
     if (wan_l2_is_udp_tagged(pkt, len))
@@ -282,6 +287,30 @@ static int profile_pi_for_wire_policy(struct forwarder *fwd, uint8_t wire_id)
     return -1;
 }
 
+static int profile_pi_for_bypass_wire_policy(struct forwarder *fwd,
+                                             uint8_t wire_id)
+{
+    const struct profile_config *profile;
+
+    if (!fwd || !fwd->cfg || fwd->cfg->profile_count < 1)
+        return -1;
+    profile = &fwd->cfg->profiles[0];
+    if (!profile->enabled)
+        return -1;
+    for (int i = 0; i < profile->policy_count; i++) {
+        int pi = profile->policy_indices[i];
+        const struct crypto_policy *policy;
+
+        if (pi < 0 || pi >= fwd->cfg->policy_count)
+            continue;
+        policy = &fwd->cfg->policies[pi];
+        if (policy->action == POLICY_ACTION_BYPASS &&
+            (uint8_t)policy->id == wire_id)
+            return 0;
+    }
+    return -1;
+}
+
 static int profile_owns_local(struct forwarder *fwd, int profile_pi, int fwd_local_idx)
 {
     const struct profile_config *prof;
@@ -419,11 +448,17 @@ static int forward_wan_to_local(struct forwarder *fwd, struct ne_packet *job,
         }
     }
     if (li >= 0 && profile_owns_local(fwd, profile_pi, li)) {
+        if (job->segment_count > 1) {
+            if (dp_jumbo_push_local(
+                    fwd, &fwd->mid_to_local[li][dp_out_ring_idx()],
+                    job, li) != 0)
+                return -1;
+            return 0;
+        }
         job->dir = NE_DIR_LOCAL;
         job->local_idx = (uint8_t)li;
         if (dp_ring_push(fwd, &fwd->mid_to_local[li][dp_out_ring_idx()], job) != 0) {
             /* dp_ring_push already returned the UMEM frame to the pool. */
-            ne_dp_stats_wan_drop(1);
             return 1;
         }
         return 0;
@@ -451,7 +486,6 @@ static int udp_reorder_emit(void *ctx, struct dp_udp_reorder_item *item)
         return -1;
     if (rc > 0)
         return 0;
-    ne_dp_stats_wan_fwd(1);
     return 0;
 }
 
@@ -461,7 +495,6 @@ static void udp_reorder_drop(void *ctx, struct dp_udp_reorder_item *item)
 
     if (!fwd || !item)
         return;
-    ne_dp_stats_wan_drop(1);
     ne_frame_free(&fwd->pair, item->packet.addr);
 }
 
@@ -502,6 +535,8 @@ int dataplane_wan_needs_mid(struct forwarder *fwd, const uint8_t *pkt, uint32_t 
     /* ARP (plain or NE arp-marker) stays on crypto workers. */
     if (crypto_eth_l2_has_arp_marker(pkt, len) || dp_pkt_is_arp(pkt, len))
         return 1;
+    if (dp_jumbo_wire_kind(pkt, len) != 0)
+        return 1;
     if (!fwd->cfg->crypto_enabled)
         return 0;
     return wan_wire_is_encrypted(fwd, pkt, len);
@@ -532,6 +567,69 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
         if (bridged == 0)
             return;
         goto drop;
+    }
+
+    {
+        int jumbo_kind = dp_jumbo_wire_kind(pkt, job.len);
+
+        if (jumbo_kind != 0) {
+            struct ne_packet plain;
+            struct packet_crypto_ctx *ctx = NULL;
+            uint8_t jumbo_policy = 0;
+            int jumbo_encrypted = 0;
+            int rr;
+
+            if (dp_jumbo_wire_policy(pkt, job.len, &jumbo_policy) != 0)
+                goto drop;
+            if (jumbo_kind == 2) {
+                if (!fwd->cfg->crypto_enabled)
+                    goto drop;
+                ctx = fwd_crypto_ctx_for_wire_id(jumbo_policy);
+                profile_pi = profile_pi_for_wire_policy(fwd, jumbo_policy);
+                if (!ctx || profile_pi < 0)
+                    goto drop;
+            } else {
+                profile_pi = profile_pi_for_bypass_wire_policy(fwd,
+                                                                 jumbo_policy);
+                if (profile_pi < 0)
+                    goto drop;
+            }
+            rr = dp_jumbo_receive(fwd, dp_crypto_current_worker_idx(), &job,
+                                  ctx, &plain, &jumbo_policy,
+                                  &jumbo_encrypted);
+            if (rr == DP_JUMBO_RX_HELD)
+                return;
+            if (rr != DP_JUMBO_RX_COMPLETE)
+                goto drop;
+
+            job = plain;
+            pkt = ne_packet_data(&fwd->pair, job.addr);
+            if (!pkt)
+                goto drop;
+            if (jumbo_encrypted) {
+                if (!wan_policy_in_ok(fwd, profile_pi, jumbo_policy,
+                                      pkt, job.len))
+                    goto policy_drop;
+                dp_out_ring_bind(dp_flow_pick_tx_slot(
+                    pkt, job.len, dp_crypto_current_worker_idx()));
+            } else {
+                profile_pi = wan_profile_pi_bypass(fwd, pkt, job.len);
+                if (profile_pi < 0)
+                    goto policy_drop;
+                dp_out_ring_bind(dp_pick_tx_slot(pkt, job.len));
+            }
+            {
+                int rc = forward_wan_to_local(
+                    fwd, &job, profile_pi,
+                    job.wan_idx < fwd->wan_count ? (int)job.wan_idx : -1);
+
+                if (rc < 0)
+                    goto drop;
+                if (rc > 0)
+                    return;
+            }
+            return;
+        }
     }
 
     encrypted = wan_wire_is_encrypted(fwd, pkt, job.len);
@@ -569,7 +667,10 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
         uint32_t epoch;
         uint32_t seq;
 
-        if (crypto_option_udp_take_rx_meta(&epoch, &seq) == 0) {
+        /* Jumbo mode carries each UDP datagram as one encrypted wire frame.
+         * Consume its metadata but forward directly without reorder buffering. */
+        if (crypto_option_udp_take_rx_meta(&epoch, &seq) == 0 &&
+            !crypto_option_is_jumbo_mode()) {
             struct dp_udp_reorder_key key;
             struct dp_udp_reorder_item item;
             struct dp_udp_reorder_ops ops = udp_reorder_ops(fwd);
@@ -611,18 +712,14 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
         if (rc > 0)
             return;
     }
-    ne_dp_stats_wan_fwd(1);
     return;
 
 policy_drop:
-    ne_dp_stats_wan_policy_drop(1);
-    ne_dp_stats_wan_drop(1);
-    ne_frame_free(&fwd->pair, job.addr);
+    ne_packet_free(&fwd->pair, &job);
     return;
 
 drop:
-    ne_dp_stats_wan_drop(1);
-    ne_frame_free(&fwd->pair, job.addr);
+    ne_packet_free(&fwd->pair, &job);
 }
 
 /* ===================== ICMP fragmentation/reassembly ===================== */

@@ -25,6 +25,8 @@ struct {
 #define IPPROTO_OSPF_VAL 89
 #define ETH_P_NE_ARP_ENC 0x1048
 #define ETH_P_NE_UDP_ENC 0x104B
+#define ETH_P_NE_JUMBO_ENC 0x104C
+#define ETH_P_NE_JUMBO_BYPASS 0x104D
 #define ETH_P_CFM        0x8902
 
 SEC("xdp.frags")
@@ -52,6 +54,11 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
     }
 
     if (proto == __constant_htons(ETH_P_NE_UDP_ENC)) {
+        goto redirect;
+    }
+
+    if (proto == __constant_htons(ETH_P_NE_JUMBO_ENC) ||
+        proto == __constant_htons(ETH_P_NE_JUMBO_BYPASS)) {
         goto redirect;
     }
 

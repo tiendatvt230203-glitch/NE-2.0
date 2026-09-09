@@ -5,6 +5,7 @@
 #include "../../../inc/core/failover/wan_failover.h"
 #include "../../../inc/crypto/crypto_option.h"
 #include "../../../inc/core/dataplane/dataplane.h"
+#include "../../../inc/core/dataplane/jumbo_l2.h"
 #include "../../../inc/core/dataplane/crypto_route.h"
 
 #include "../../../inc/core/util/main_diag.h"
@@ -12,7 +13,6 @@
 #include "../../../inc/core/iface/profile_iface_xdp.h"
 #include "../../../inc/core/flow/mac_learn.h"
 #include "../../../inc/core/flow/flow_table.h"
-#include "../../../inc/core/dataplane/dataplane_stats.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
 #include "../../../inc/crypto/pqc_handshake.h"
 
@@ -38,7 +38,6 @@ static void dp_maint_tick(struct forwarder *fwd)
     fwd_wan_drain_tick(fwd);
     fwd_wan_weight_blend_tick();
     mac_learn_tick(fwd);
-    ne_dp_stats_tick(fwd);
 }
 static void pin_cpu(unsigned int cpu)
 {
@@ -179,8 +178,6 @@ static int dp_burst_tx_local(struct forwarder *fwd, int local_idx, int tx_slot)
     if (!ne_pair_local_live(&fwd->pair, local_idx))
         return 0;
 
-    ne_dp_tx_ctx("LAN", tx_slot);
-
     nring = tx_collect_worker_rings(rings, fwd->mid_to_local[local_idx], tx_slot,
                                     (int)NE_TX_SLOTS);
     if (nring <= 0)
@@ -202,8 +199,6 @@ static int dp_tx_wan_once(struct forwarder *fwd, int wan_idx, int tx_slot)
 
     if (!ne_pair_wan_live(&fwd->pair, wan_idx))
         return 0;
-
-    ne_dp_tx_ctx("WAN", tx_slot);
 
     nring = tx_collect_worker_rings(rings, fwd->mid_to_wan[wan_idx], tx_slot,
                                     (int)NE_TX_SLOTS);
@@ -319,28 +314,24 @@ static void *local_rx_thread(void *arg)
         }
         ne_dp_idle_note_work(&idle);
 
-        {
-            uint64_t rx_bytes = 0;
-            for (int i = 0; i < rcvd; i++)
-                rx_bytes += batch[i].len;
-            ne_dp_stats_rx_lan(ctx->rx_slot, (uint32_t)rcvd, rx_bytes);
-        }
-
         for (int i = 0; i < rcvd; i++) {
             const uint8_t *pkt = ne_packet_data(&fwd->pair, batch[i].addr);
             int li = batch[i].local_idx < fwd->local_count ? (int)batch[i].local_idx : 0;
 
-            if (dataplane_local_needs_mid(fwd, pkt, batch[i].len, li)) {
+            if (batch[i].segment_count > 1 ||
+                dataplane_local_needs_mid(fwd, pkt, batch[i].len, li)) {
                 int tx_slot;
                 int wi = dp_crypto_pick_local_worker(pkt, batch[i].len, &tx_slot);
 
+                if (wi < 0 || wi >= (int)NE_CRYPTO_WORKERS) {
+                    ne_packet_free(&fwd->pair, &batch[i]);
+                    continue;
+                }
                 batch[i].tx_slot = (uint8_t)tx_slot;
                 if (ne_ring_try_push(&fwd->local_to_mid[wi], &batch[i]) != 0) {
                     ne_dp_warn_rx_drop("LAN", (int)ctx->cpu_id, wi,
                                        ne_ring_count(&fwd->local_to_mid[wi]));
-                    ne_dp_stats_rx_ring_drop_lan(ctx->rx_slot, 1);
-                    ne_dp_stats_crypto_ring_drop(wi, 1);
-                    ne_frame_free(&fwd->pair, batch[i].addr);
+                    ne_packet_free(&fwd->pair, &batch[i]);
                 } else {
                     ne_dp_idle_wake(NE_DP_WAKE_CRYPTO(wi));
                 }
@@ -440,35 +431,25 @@ static void *wan_rx_thread(void *arg)
         }
         ne_dp_idle_note_work(&idle);
 
-        {
-            uint64_t rx_bytes = 0;
-            for (int i = 0; i < rcvd; i++)
-                rx_bytes += batch[i].len;
-            ne_dp_stats_rx_wan(ctx->rx_slot, (uint32_t)rcvd, rx_bytes);
-        }
-
         for (int i = 0; i < rcvd; i++) {
             int wi;
             const uint8_t *pkt;
 
             if (batch[i].wan_idx < MAX_INTERFACES && fwd_wan_is_stopped(batch[i].wan_idx)) {
-                ne_frame_free(&fwd->pair, batch[i].addr);
+                ne_packet_free(&fwd->pair, &batch[i]);
                 continue;
             }
             pkt = ne_packet_data(&fwd->pair, batch[i].addr);
             if (dataplane_wan_needs_mid(fwd, pkt, batch[i].len)) {
                 wi = dp_crypto_pick_wan_worker(fwd, pkt, batch[i].len);
                 if (wi < 0 || wi >= (int)NE_CRYPTO_WORKERS) {
-                    ne_dp_stats_wan_drop(1);
-                    ne_frame_free(&fwd->pair, batch[i].addr);
+                    ne_packet_free(&fwd->pair, &batch[i]);
                     continue;
                 }
                 if (ne_ring_try_push(&fwd->wan_to_mid[wi], &batch[i]) != 0) {
                     ne_dp_warn_rx_drop("WAN", (int)ctx->cpu_id, wi,
                                        ne_ring_count(&fwd->wan_to_mid[wi]));
-                    ne_dp_stats_rx_ring_drop_wan(ctx->rx_slot, 1);
-                    ne_dp_stats_crypto_ring_drop(wi, 1);
-                    ne_frame_free(&fwd->pair, batch[i].addr);
+                    ne_packet_free(&fwd->pair, &batch[i]);
                 } else {
                     ne_dp_idle_wake(NE_DP_WAKE_CRYPTO(wi));
                 }
@@ -533,7 +514,6 @@ static void *crypto_worker_thread(void *arg)
         for (uint32_t i = 0; i < n; i++)
             dataplane_process_wan(fwd, jobs[i]);
         if (n) {
-            ne_dp_stats_crypto_wan(ctx->worker_idx, n);
             did_work = 1;
         }
         n = ne_ring_try_pop_batch(&fwd->local_to_mid[ctx->worker_idx], jobs,
@@ -543,12 +523,15 @@ static void *crypto_worker_thread(void *arg)
             dataplane_process_local(fwd, jobs[i]);
         }
         if (n) {
-            ne_dp_stats_crypto_lan(ctx->worker_idx, n);
             did_work = 1;
         }
-        if (crypto_on && ++gc_tick >= 2048) {
-            fwd_crypto_frag_gc_worker_tick(ctx->worker_idx);
-            dataplane_udp_reorder_gc(fwd, ctx->worker_idx);
+        if (++gc_tick >= 2048) {
+            if (crypto_on)
+                fwd_crypto_frag_gc_worker_tick(ctx->worker_idx);
+            if (crypto_option_is_jumbo_mode())
+                dp_jumbo_gc(fwd, ctx->worker_idx);
+            else
+                dataplane_udp_reorder_gc(fwd, ctx->worker_idx);
             gc_tick = 0;
         }
 
@@ -557,7 +540,10 @@ static void *crypto_worker_thread(void *arg)
         else
             crypto_idle_pause(fwd, &idle, ctx->worker_idx);
     }
-    dataplane_udp_reorder_reset(fwd, ctx->worker_idx);
+    if (!crypto_option_is_jumbo_mode())
+        dataplane_udp_reorder_reset(fwd, ctx->worker_idx);
+    else
+        dp_jumbo_reset(fwd, ctx->worker_idx);
     packet_crypto_worker_cleanup();
     flow_table_thread_cleanup();
     return NULL;
@@ -589,7 +575,6 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
     fprintf(stderr, "[FRAG] runtime MTU set to %u (%s mode)\n",
             crypto_option_get_mtu(),
             crypto_option_is_jumbo_mode() ? "jumbo" : "standard");
-    ne_dp_stats_init();
     ne_dp_idle_init();
 
     for (int i = 0; i < fwd->local_count; i++)

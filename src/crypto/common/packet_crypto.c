@@ -18,7 +18,7 @@ static int key_nonzero(const uint8_t *key, size_t len)
     return 0;
 }
 
-#define PACKET_CRYPTO_MAX_WIRE 2048u
+#define PACKET_CRYPTO_MAX_WIRE 4096u
 #define PACKET_CRYPTO_WIRE_IDS 256u
 
 _Static_assert(PACKET_CRYPTO_NONCE_BYTES == 12,

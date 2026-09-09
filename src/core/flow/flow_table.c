@@ -10,6 +10,7 @@
 #define FLOW_SWRR_WAYS 4u
 #define FLOW_TCP_PACKET_WINDOW 4096u
 #define FLOW_UDP_PACKET_WINDOW 16384u
+#define FLOW_JUMBO_PACKET_WINDOW 1024u
 
 struct flow_swrr_state {
     struct flow_key key;
@@ -26,6 +27,7 @@ struct flow_swrr_state {
 static _Thread_local struct flow_swrr_state (*g_flow_swrr)[FLOW_SWRR_WAYS];
 static _Thread_local struct flow_swrr_state g_default_swrr;
 static _Thread_local struct flow_swrr_state *g_pending_udp_state;
+static _Thread_local struct flow_swrr_state *g_pending_jumbo_state;
 static _Thread_local uint64_t g_flow_swrr_clock;
 
 int flow_table_thread_init(void)
@@ -42,6 +44,7 @@ void flow_table_thread_cleanup(void)
     g_flow_swrr = NULL;
     memset(&g_default_swrr, 0, sizeof(g_default_swrr));
     g_pending_udp_state = NULL;
+    g_pending_jumbo_state = NULL;
     g_flow_swrr_clock = 0;
 }
 
@@ -190,7 +193,8 @@ int flow_table_pick_wan_per_flow_packet(uint32_t src_ip, uint32_t dst_ip,
                                         uint8_t protocol,
                                         const int *allowed_wans,
                                         const int *allowed_weights,
-                                        int allowed_count)
+                                        int allowed_count,
+                                        int jumbo_packet)
 {
     struct flow_key key;
     struct flow_swrr_state *set;
@@ -237,6 +241,13 @@ int flow_table_pick_wan_per_flow_packet(uint32_t src_ip, uint32_t dst_ip,
     state->stamp = ++g_flow_swrr_clock;
 
     g_pending_udp_state = NULL;
+    g_pending_jumbo_state = NULL;
+
+    if (jumbo_packet) {
+        g_pending_jumbo_state = state;
+        return flow_window_wan(state, allowed_wans, allowed_weights,
+                               allowed_count);
+    }
 
     if (protocol == IPPROTO_TCP) {
         int selected = flow_window_wan(state, allowed_wans, allowed_weights,
@@ -262,4 +273,13 @@ void flow_table_udp_packet_complete(int sent)
     g_pending_udp_state = NULL;
     if (sent)
         flow_window_advance(state, FLOW_UDP_PACKET_WINDOW);
+}
+
+void flow_table_jumbo_packet_complete(int sent)
+{
+    struct flow_swrr_state *state = g_pending_jumbo_state;
+
+    g_pending_jumbo_state = NULL;
+    if (sent)
+        flow_window_advance(state, FLOW_JUMBO_PACKET_WINDOW);
 }

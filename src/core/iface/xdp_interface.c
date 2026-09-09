@@ -1,6 +1,5 @@
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/iface/profile_iface_xdp.h"
-#include "../../../inc/core/dataplane/dataplane_stats.h"
 #include <bpf/libbpf.h>
 #include <linux/if_link.h>
 #include <linux/if_xdp.h>
@@ -17,15 +16,6 @@
 #include <dirent.h>
 #include <stdlib.h>
 #include <unistd.h>
-
-static __thread const char *tls_dp_tx_dir;
-static __thread int tls_dp_tx_slot = -1;
-
-void ne_dp_tx_ctx(const char *dir, int tx_slot)
-{
-    tls_dp_tx_dir = dir;
-    tls_dp_tx_slot = tx_slot;
-}
 
 void ne_dp_warn_rx(const char *dir, int cpu, int batch_rcvd)
 {
@@ -269,6 +259,29 @@ int ne_ring_try_push_pair(struct ne_ring *r, const struct ne_packet *first,
     return 0;
 }
 
+int ne_ring_try_push_batch_atomic(struct ne_ring *r,
+                                  const struct ne_packet *packets,
+                                  uint32_t count)
+{
+    uint32_t head, tail;
+
+    if (!r || !packets || count == 0 || count > r->cap)
+        return -1;
+
+    pthread_spin_lock(&r->push_lock);
+    head = __atomic_load_n(&r->head, __ATOMIC_RELAXED);
+    tail = __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE);
+    if ((uint32_t)(head - tail) > r->cap - count) {
+        pthread_spin_unlock(&r->push_lock);
+        return -1;
+    }
+    for (uint32_t i = 0; i < count; i++)
+        r->buf[(head + i) & r->mask] = packets[i];
+    __atomic_store_n(&r->head, head + count, __ATOMIC_RELEASE);
+    pthread_spin_unlock(&r->push_lock);
+    return 0;
+}
+
 // Pop gói tin đi ra khỏi ring
 int ne_ring_try_pop(struct ne_ring *r, struct ne_packet *pkt)
 {
@@ -394,6 +407,23 @@ void ne_frame_free(struct ne_pair *p, uint64_t addr)
 {
     if (p)
         (void)pool_push(&p->pool, &addr, 1);
+}
+
+void ne_packet_free(struct ne_pair *p, const struct ne_packet *pkt)
+{
+    uint32_t segments;
+
+    if (!p || !pkt)
+        return;
+    segments = pkt->segment_count;
+    if (segments == 0)
+        segments = 1;
+    if (segments > NE_PACKET_MAX_SEGMENTS)
+        segments = NE_PACKET_MAX_SEGMENTS;
+
+    ne_frame_free(p, pkt->addr);
+    for (uint32_t i = 1; i < segments; i++)
+        ne_frame_free(p, pkt->continuation_addr[i - 1u]);
 }
 
 uint32_t ne_pool_free_count(struct ne_pair *p)
@@ -782,8 +812,9 @@ static int xsk_create_queue(struct ne_pair *p, struct ne_iface *iface, const cha
         .tx_size = NE_RING,
         .libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
         .xdp_flags = xdp_flags,
-        /* i40e: native XDP + AF_XDP copy. Keep XDP_COPY (not zero-copy). */
-        .bind_flags = XDP_COPY | XDP_USE_NEED_WAKEUP,
+        /* XDP_USE_SG exposes one MTU-9000 packet as a descriptor chain.
+         * XDP_COPY remains intentional for the current i40e deployment. */
+        .bind_flags = XDP_COPY | XDP_USE_NEED_WAKEUP | XDP_USE_SG,
     };
 
     zero_queue_rings(slot, preserve);
@@ -1269,18 +1300,68 @@ static int recv_queue(struct ne_xsk_queue *slot, struct ne_packet *out, uint32_t
                       uint8_t dir, uint8_t wan_idx, uint8_t local_idx)
 {
     uint32_t idx = 0;
-    uint32_t n = xsk_ring_cons__peek(&slot->rx, max, &idx);
-    for (uint32_t i = 0; i < n; i++) {
-        const struct xdp_desc *d = xsk_ring_cons__rx_desc(&slot->rx, idx + i);
-        out[i].addr = d->addr;
-        out[i].len = d->len;
-        out[i].dir = dir;
-        out[i].wan_idx = wan_idx;
-        out[i].local_idx = local_idx;
-        out[i].tx_slot = 0;
+    uint32_t desc_max;
+    uint32_t desc_count;
+    uint32_t consumed = 0;
+    uint32_t packet_count = 0;
+
+    if (!slot || !out || max == 0)
+        return 0;
+
+    /* max is the number of logical packets the caller can accept. A jumbo
+     * packet may consume up to three RX descriptors. */
+    desc_max = max * NE_PACKET_MAX_SEGMENTS;
+    desc_count = xsk_ring_cons__peek(&slot->rx, desc_max, &idx);
+
+    while (consumed < desc_count && packet_count < max) {
+        struct ne_packet *pkt = &out[packet_count];
+        uint32_t packet_start = consumed;
+        uint32_t total_len = 0;
+        uint32_t segments = 0;
+        int complete = 0;
+
+        memset(pkt, 0, sizeof(*pkt));
+        while (consumed < desc_count && segments < NE_PACKET_MAX_SEGMENTS) {
+            const struct xdp_desc *d =
+                xsk_ring_cons__rx_desc(&slot->rx, idx + consumed);
+
+            if (segments == 0) {
+                pkt->addr = d->addr;
+                pkt->len = d->len;
+            } else {
+                pkt->continuation_addr[segments - 1u] = d->addr;
+                pkt->continuation_len[segments - 1u] = d->len;
+            }
+            total_len += d->len;
+            segments++;
+            consumed++;
+
+            if ((d->options & XDP_PKT_CONTD) == 0) {
+                complete = 1;
+                break;
+            }
+        }
+
+        /* Do not expose half a packet if peek stopped in the middle of an SG
+         * chain. Cancel it so the complete chain is read on the next call. */
+        if (!complete) {
+            consumed = packet_start;
+            break;
+        }
+
+        pkt->total_len = total_len;
+        pkt->segment_count = (uint8_t)segments;
+        pkt->dir = dir;
+        pkt->wan_idx = wan_idx;
+        pkt->local_idx = local_idx;
+        pkt->tx_slot = 0;
+        packet_count++;
     }
-    slot->rx_pending = n;
-    return (int)n;
+
+    if (desc_count > consumed)
+        xsk_ring_cons__cancel(&slot->rx, desc_count - consumed);
+    slot->rx_pending = consumed;
+    return (int)packet_count;
 }
 
 static int xsk_queue_for_rx_slot(int q, int rx_slot, int nq, int rx_slots)
@@ -1603,15 +1684,18 @@ int ne_rx_wan_fds(struct ne_pair *p, int rx_slot, int *fds, int max)
 
 // TX
 #define NE_XSK_COPY_TX_BATCH 32u
+#define NE_XSK_COPY_TX_RESERVE \
+    (NE_XSK_COPY_TX_BATCH + NE_PACKET_MAX_CONTINUATIONS)
 
-static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src, uint32_t max_frame,
-                          uint64_t *tx_no_free)
+static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src,
+                          uint32_t max_frame)
 {
-    struct ne_packet jobs[NE_XSK_COPY_TX_BATCH];
+    struct ne_packet jobs[NE_XSK_COPY_TX_RESERVE];
     uint32_t queued = ne_ring_count(src);
     uint32_t want;
     uint32_t free_slots;
     uint32_t idx = 0;
+    uint32_t reserve_want;
     uint32_t reserved;
     uint32_t popped = 0;
 
@@ -1619,17 +1703,11 @@ static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src, uint32
         return 0;
 
     want = queued > NE_XSK_COPY_TX_BATCH ? NE_XSK_COPY_TX_BATCH : queued;
-    free_slots = xsk_prod_nb_free(&slot->tx, want);
+    reserve_want = queued > NE_XSK_COPY_TX_RESERVE
+        ? NE_XSK_COPY_TX_RESERVE : queued;
+    free_slots = xsk_prod_nb_free(&slot->tx, reserve_want);
 
     if (!free_slots) {
-        if (tx_no_free)
-            (*tx_no_free)++;
-        if (tls_dp_tx_dir && tls_dp_tx_slot >= 0) {
-            if (tls_dp_tx_dir[0] == 'L' || tls_dp_tx_dir[0] == 'l')
-                ne_dp_stats_tx_full_lan(tls_dp_tx_slot, 1);
-            else
-                ne_dp_stats_tx_full_wan(tls_dp_tx_slot, 1);
-        }
         if (xsk_ring_prod__needs_wakeup(&slot->tx)) {
             (void)sendto(xsk_socket__fd(slot->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
         }
@@ -1637,15 +1715,35 @@ static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src, uint32
     }
 
 
-    if (want > free_slots)
-        want = free_slots;
-    reserved = xsk_ring_prod__reserve(&slot->tx, want, &idx);
+    if (free_slots < reserve_want) {
+        if (free_slots <= NE_PACKET_MAX_CONTINUATIONS)
+            return 0;
+        want = free_slots - NE_PACKET_MAX_CONTINUATIONS;
+        if (want > NE_XSK_COPY_TX_BATCH)
+            want = NE_XSK_COPY_TX_BATCH;
+        if (want > queued)
+            want = queued;
+        reserve_want = want + NE_PACKET_MAX_CONTINUATIONS;
+        if (reserve_want > queued)
+            reserve_want = queued;
+    }
+    reserved = xsk_ring_prod__reserve(&slot->tx, reserve_want, &idx);
     if (!reserved)
         return 0;
 
     /* This ring has exactly one TX consumer. Pop the reserved FIFO batch with
      * one acquire and one tail publish instead of one atomic pair per frame. */
-    popped = ne_ring_try_pop_batch(src, jobs, reserved);
+    popped = ne_ring_try_pop_batch(src, jobs, want);
+
+    /* Never submit only the head of an XDP multi-buffer packet. Jumbo LAN
+     * descriptors were published atomically, so all continuations are
+     * already adjacent in the source ring. */
+    while (popped > 0 && (jobs[popped - 1u].xdp_options & XDP_PKT_CONTD) &&
+           popped < reserved) {
+        if (ne_ring_try_pop(src, &jobs[popped]) != 0)
+            break;
+        popped++;
+    }
 
     if (popped < reserved)
         slot->tx.cached_prod -= (reserved - popped);
@@ -1656,20 +1754,12 @@ static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src, uint32
         struct xdp_desc *d = xsk_ring_prod__tx_desc(&slot->tx, idx + i);
         d->addr = jobs[i].addr;
         d->len = jobs[i].len > max_frame ? max_frame : jobs[i].len;
+        d->options = jobs[i].xdp_options;
     }
 
     xsk_ring_prod__submit(&slot->tx, popped);
     if (xsk_ring_prod__needs_wakeup(&slot->tx)) {
         (void)sendto(xsk_socket__fd(slot->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
-    }
-    if (tls_dp_tx_dir && tls_dp_tx_slot >= 0) {
-        uint64_t tx_bytes = 0;
-        for (uint32_t i = 0; i < popped; i++)
-            tx_bytes += jobs[i].len;
-        if (tls_dp_tx_dir[0] == 'L' || tls_dp_tx_dir[0] == 'l')
-            ne_dp_stats_tx_lan(tls_dp_tx_slot, popped, tx_bytes);
-        else
-            ne_dp_stats_tx_wan(tls_dp_tx_slot, popped, tx_bytes);
     }
     return (int)popped;
 }
@@ -1689,7 +1779,7 @@ static int tx_drain_iface_ring(struct ne_iface *iface, struct ne_ring *src, uint
     }
     if (primary < 0)
         return 0;
-    return tx_drain_queue(&iface->queues[primary], src, max_frame, &iface->tx_no_free);
+    return tx_drain_queue(&iface->queues[primary], src, max_frame);
 }
 
 static __thread uint32_t tls_tx_drain_rr;

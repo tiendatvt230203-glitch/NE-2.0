@@ -17,6 +17,12 @@
 #define NE_N_FRAMES    524288u
 #define NE_BATCH_SIZE   64u
 
+/* An MTU-9000 Ethernet packet occupies at most three 4 KiB AF_XDP
+ * descriptors. segment_count 0/1 both mean a normal single-frame packet and
+ * use only addr/len, so existing MTU-1500 producers remain compatible. */
+#define NE_PACKET_MAX_SEGMENTS 3u
+#define NE_PACKET_MAX_CONTINUATIONS (NE_PACKET_MAX_SEGMENTS - 1u)
+
 #define NE_QUEUE_OVERRIDE 0
 
 #define NE_FQ_PREFILL   16384u
@@ -26,6 +32,12 @@
 #endif
 #ifndef XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD
 #define XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD (1U << 0)
+#endif
+#ifndef XDP_USE_SG
+#define XDP_USE_SG (1U << 4)
+#endif
+#ifndef XDP_PKT_CONTD
+#define XDP_PKT_CONTD (1U << 0)
 #endif
 
 #include "core/util/cpu_map.h"
@@ -38,8 +50,17 @@ enum ne_packet_dir {
 };
 
 struct ne_packet {
+    /* First (or only) AF_XDP descriptor. */
     uint64_t addr;
     uint32_t len;
+
+    /* Continuation descriptors belonging to the same original L2 packet. */
+    uint64_t continuation_addr[NE_PACKET_MAX_CONTINUATIONS];
+    uint32_t continuation_len[NE_PACKET_MAX_CONTINUATIONS];
+    uint32_t total_len;
+    uint8_t segment_count;
+    uint8_t xdp_options;
+
     uint8_t dir;
     uint8_t wan_idx;
     uint8_t local_idx;
@@ -80,7 +101,6 @@ struct ne_iface {
     char ifname[IF_NAMESIZE];
     int queue_count;
     struct ne_xsk_queue queues[MAX_QUEUES];
-    uint64_t tx_no_free;
     uint32_t xdp_flags;
 };
 
@@ -124,6 +144,9 @@ void ne_ring_destroy(struct ne_ring *r);
 int ne_ring_try_push(struct ne_ring *r, const struct ne_packet *pkt);
 int ne_ring_try_push_pair(struct ne_ring *r, const struct ne_packet *first,
                           const struct ne_packet *second);
+int ne_ring_try_push_batch_atomic(struct ne_ring *r,
+                                  const struct ne_packet *packets,
+                                  uint32_t count);
 int ne_ring_try_pop(struct ne_ring *r, struct ne_packet *pkt);
 uint32_t ne_ring_try_pop_batch(struct ne_ring *r, struct ne_packet *pkts,
                                uint32_t max_n);
@@ -143,7 +166,6 @@ void ne_drain_cq_local(struct ne_pair *p, int tx_slot);
 void ne_drain_cq_wan(struct ne_pair *p, int tx_slot);
 void ne_refill_fq_local_slot(struct ne_pair *p, int rx_slot);
 void ne_refill_fq_wan_slot(struct ne_pair *p, int rx_slot);
-void ne_dp_tx_ctx(const char *dir, int tx_slot);
 void ne_dp_warn_rx(const char *dir, int cpu, int batch_rcvd);
 void ne_dp_warn_rx_drop(const char *dir, int cpu, int worker, uint32_t q_depth);
 void ne_dp_warn_crypto(int cpu, int worker, uint32_t lan_q, uint32_t wan_q);
@@ -156,6 +178,7 @@ void *ne_packet_data(struct ne_pair *p, uint64_t addr);
 int ne_frame_alloc(struct ne_pair *p, uint64_t *addr_out);
 uint32_t ne_frame_alloc_batch(struct ne_pair *p, uint64_t *addrs_out, uint32_t max_n);
 void ne_frame_free(struct ne_pair *p, uint64_t addr);
+void ne_packet_free(struct ne_pair *p, const struct ne_packet *pkt);
 /* Frames currently idle in the shared UMEM pool (leak watchdog metric). */
 uint32_t ne_pool_free_count(struct ne_pair *p);
 
