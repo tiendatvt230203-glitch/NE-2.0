@@ -15,7 +15,7 @@
 typedef struct {
     int profile_id;
     int policy_id;
-    uint8_t key_prefix[4];
+    uint8_t key[32];
     int is_arp;
     int is_static;
     int key_valid;
@@ -26,7 +26,7 @@ static ne_pqc_tbl_row_t ne_pqc_tbl[NE_PQC_TBL_SLOTS];
 static pthread_mutex_t ne_pqc_tbl_lock = PTHREAD_MUTEX_INITIALIZER;
 static int ne_pqc_tbl_publish_enabled;
 
-static int key_prefix_nonzero(const uint8_t *key, size_t len)
+static int key_nonzero(const uint8_t *key, size_t len)
 {
     for (size_t i = 0; i < len; i++) {
         if (key[i])
@@ -72,7 +72,7 @@ static void ne_pqc_tbl_print_locked(const char *event)
         if (!ne_pqc_tbl[i].valid)
             continue;
         if (ne_pqc_tbl[i].key_valid) {
-            key_prefix_hex(px, sizeof(px), ne_pqc_tbl[i].key_prefix);
+            key_prefix_hex(px, sizeof(px), ne_pqc_tbl[i].key);
             if (ne_pqc_tbl[i].is_static) {
                 snprintf(ne_value, sizeof(ne_value), "%s (static)", px);
                 snprintf(hs_value, sizeof(hs_value), "-");
@@ -136,6 +136,20 @@ void main_diag_ne_pqc_configure(const struct app_config *cfg)
                 policy = &cfg->policies[policy_idx];
                 if (policy->action != POLICY_ACTION_ENCRYPT_L2)
                     continue;
+                {
+                    int duplicate = 0;
+
+                    for (int i = 0; i < row; i++) {
+                        if (!ne_pqc_tbl[i].is_arp &&
+                            ne_pqc_tbl[i].profile_id == profile->id &&
+                            ne_pqc_tbl[i].policy_id == policy->db_id) {
+                            duplicate = 1;
+                            break;
+                        }
+                    }
+                    if (duplicate)
+                        continue;
+                }
                 if (row >= NE_PQC_TBL_SLOTS)
                     break;
 
@@ -164,7 +178,7 @@ void main_diag_log_arp_key(int profile_id, const uint8_t ne_key[32],
     int slot = -1;
     int changed = 0;
 
-    if (profile_id <= 0 || !ne_key || !key_prefix_nonzero(ne_key, 4))
+    if (profile_id <= 0 || !ne_key || !key_nonzero(ne_key, 32))
         return;
 
     pthread_mutex_lock(&ne_pqc_tbl_lock);
@@ -191,12 +205,12 @@ void main_diag_log_arp_key(int profile_id, const uint8_t ne_key[32],
     if (!ne_pqc_tbl[slot].valid || !ne_pqc_tbl[slot].key_valid ||
         ne_pqc_tbl[slot].profile_id != profile_id ||
         ne_pqc_tbl[slot].is_static != !!is_static ||
-        memcmp(ne_pqc_tbl[slot].key_prefix, ne_key, 4) != 0)
+        memcmp(ne_pqc_tbl[slot].key, ne_key, 32) != 0)
         changed = 1;
 
     ne_pqc_tbl[slot].profile_id = profile_id;
     ne_pqc_tbl[slot].policy_id = 0;
-    memcpy(ne_pqc_tbl[slot].key_prefix, ne_key, 4);
+    memcpy(ne_pqc_tbl[slot].key, ne_key, 32);
     ne_pqc_tbl[slot].is_arp = 1;
     ne_pqc_tbl[slot].is_static = !!is_static;
     ne_pqc_tbl[slot].key_valid = 1;
@@ -221,7 +235,7 @@ void main_diag_log_ne_pqc_match(int profile_id, int policy_id,
     int slot = -1;
     int changed = 0;
 
-    if (!ne_key || !key_prefix_nonzero(ne_key, 4))
+    if (!ne_key || !key_nonzero(ne_key, 32))
         return;
     if (profile_id <= 0 || policy_id <= 0)
         return;
@@ -237,8 +251,10 @@ void main_diag_log_ne_pqc_match(int profile_id, int policy_id,
         if (!ne_pqc_tbl[i].valid)
             continue;
         if (ne_pqc_tbl[i].profile_id == profile_id &&
-            ne_pqc_tbl[i].policy_id == policy_id)
+            ne_pqc_tbl[i].policy_id == policy_id) {
             slot = i;
+            break;
+        }
     }
     if (slot < 0) {
         for (int i = 0; i < NE_PQC_TBL_SLOTS; i++) {
@@ -255,12 +271,14 @@ void main_diag_log_ne_pqc_match(int profile_id, int policy_id,
         ne_pqc_tbl[slot].profile_id != profile_id ||
         ne_pqc_tbl[slot].policy_id != policy_id ||
         !ne_pqc_tbl[slot].key_valid ||
-        memcmp(ne_pqc_tbl[slot].key_prefix, ne_key, 4) != 0)
+        memcmp(ne_pqc_tbl[slot].key, ne_key, 32) != 0)
         changed = 1;
 
     ne_pqc_tbl[slot].profile_id = profile_id;
     ne_pqc_tbl[slot].policy_id = policy_id;
-    memcpy(ne_pqc_tbl[slot].key_prefix, ne_key, 4);
+    memcpy(ne_pqc_tbl[slot].key, ne_key, 32);
+    ne_pqc_tbl[slot].is_arp = 0;
+    ne_pqc_tbl[slot].is_static = 0;
     ne_pqc_tbl[slot].key_valid = 1;
     ne_pqc_tbl[slot].valid = 1;
 
@@ -283,8 +301,8 @@ void main_diag_ne_pqc_clear(int profile_id, int policy_id)
             continue;
         if (ne_pqc_tbl[i].profile_id == profile_id &&
             ne_pqc_tbl[i].policy_id == policy_id) {
-            memset(ne_pqc_tbl[i].key_prefix, 0,
-                   sizeof(ne_pqc_tbl[i].key_prefix));
+            memset(ne_pqc_tbl[i].key, 0,
+                   sizeof(ne_pqc_tbl[i].key));
             ne_pqc_tbl[i].key_valid = 0;
             removed = 1;
         }

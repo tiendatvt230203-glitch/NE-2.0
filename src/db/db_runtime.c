@@ -44,6 +44,10 @@ int load_profile_config(struct app_config *out_cfg, int profile_id)
     sig_pqc_prepare_reload();
     if (config_load_from_db(out_cfg, profile_id, NULL) != 0)
         return -1;
+    /* ARP owns a PQC session outside the policy table. Failure to prepare that
+     * session must not reject the profile: arp_bridge will retain the static
+     * fallback until an ARP PQC key becomes available. */
+    (void)sig_pqc_arp_reconcile_profile(profile_id);
     sig_pqc_finalize_reload();
     return 0;
 }

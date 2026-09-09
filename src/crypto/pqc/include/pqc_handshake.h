@@ -19,6 +19,10 @@
 #define PQC_HS_MSG_READY   5
 #define PQC_HS_MSG_COMMIT  6
 
+/* Dedicated wire namespace for the single active profile's ARP session. It is
+ * never a DB policy ID and never participates in policy reconciliation. */
+#define PQC_ARP_HS_WIRE_ID UINT32_C(0xfffffffe)
+
 #define PQC_KEM_PK_SIZE    1184 // ML-KEM-768 PK size
 #define PQC_KEM_CT_SIZE    1088 // ML-KEM-768 CT size
 #define PQC_AUTH_TAG_SZ    32
@@ -223,6 +227,19 @@ int sig_pqc_trigger_retry_with_info(int policy_id, char *out_info, size_t out_ma
 /* NE owns key lifetime. When the in-use key expires, NE calls this so PQC
  * only starts a new handshake and loads the new key into RAM. */
 int sig_pqc_request_new_session(int policy_id);
+
+/* Profile ARP key exchange. The ARP session owns independent PREV/CURRENT/NEXT
+ * slots and only borrows identity/peer transport settings from an encrypted
+ * policy in the profile. Interface-only reloads update transport without
+ * discarding the ARP keys already held in RAM. */
+int sig_pqc_arp_reconcile_profile(int profile_id);
+int sig_pqc_arp_get_keys(
+    uint8_t keys[KEY_SLOT_COUNT][PQC_TRAFFIC_KEY_SZ],
+    uint8_t key_ids[KEY_SLOT_COUNT],
+    bool key_slots_valid[KEY_SLOT_COUNT]);
+int sig_pqc_arp_request_new_session(void);
+void sig_pqc_arp_discard_prev_key(void);
+void sig_pqc_arp_clear(void);
 
 void sig_pqc_prepare_reload(void);
 void sig_pqc_finalize_reload(void);

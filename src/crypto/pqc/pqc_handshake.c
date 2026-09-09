@@ -42,6 +42,10 @@
 #define PQC_HS_STATE_READY 1
 #define PQC_HS_STATE_FAILED 2
 #define PQC_HS_STATE_HANDSHAKING 3
+#define PQC_ARP_INTERNAL_ID (-2)
+
+_Static_assert((uint32_t)PQC_ARP_INTERNAL_ID == PQC_ARP_HS_WIRE_ID,
+               "ARP internal and wire handshake IDs must match");
 
 typedef struct {
     uint8_t state;
@@ -81,6 +85,12 @@ static policy_key_binding_t g_policy_bindings[MAX_POLICY_BINDINGS];
 static int g_policy_bindings_count = 0;
 static bool g_policy_bindings_active[MAX_POLICY_BINDINGS] = {false};
 
+/* ARP owns one binding outside the policy array. It therefore cannot be
+ * removed, reused or have its keys cleared by policy reconciliation. */
+static policy_key_binding_t g_arp_binding;
+static bool g_arp_binding_initialized;
+static bool g_arp_binding_active;
+
 /* g_dispatcher_running is the lifetime request shared by tunnel workers.
  * The remaining flags describe the UDP listener itself, so a failed bind
  * cannot leave the system believing that receive dispatch is still alive. */
@@ -92,6 +102,20 @@ static uint64_t g_udp_dispatcher_next_retry_time = 0;
 static int pqc_policy_rx_recv(policy_key_binding_t *b, uint8_t *buf, int buf_sz, pqc_rx_pkt_info_t *info, int timeout_ms);
 static void* pqc_policy_handshake_worker_run(void *arg);
 static int pqc_ensure_udp_dispatcher_running(void);
+
+static bool pqc_binding_is_arp(const policy_key_binding_t *b)
+{
+    return b == &g_arp_binding;
+}
+
+static void pqc_binding_write_log(const policy_key_binding_t *b,
+                                  const char *level, const char *status,
+                                  const char *message)
+{
+    if (!b || pqc_binding_is_arp(b))
+        return;
+    sig_pqc_write_log(b->policy_id, b->key_id, level, status, message);
+}
 
 /* g_key_mutex must be held.  Starting one policy never waits for another
  * policy, which keeps the policy state machines independent. */
@@ -130,6 +154,9 @@ static void pqc_supervise_l3_workers(void) {
             continue;
         pqc_start_policy_worker_locked(b);
     }
+    if (g_arp_binding_active && g_arp_binding.is_tunnel &&
+        !g_arp_binding.thread_started && !g_arp_binding.thread_exit_sig)
+        pqc_start_policy_worker_locked(&g_arp_binding);
     pthread_mutex_unlock(&g_key_mutex);
 }
 
@@ -561,14 +588,11 @@ static void handle_handshake_success(policy_key_binding_t *b, const uint8_t *der
     int policy_id;
     int profile_id;
     int promoted_key_id;
-    char key_id[sizeof(b->key_id)];
 
     pthread_mutex_lock(&g_key_mutex);
     was_ready = b->key_ready;
     policy_id = b->policy_id;
     profile_id = b->profile_id;
-    strncpy(key_id, b->key_id, sizeof(key_id) - 1);
-    key_id[sizeof(key_id) - 1] = '\0';
 
     memcpy(b->keys[KEY_SLOT_PREV], b->keys[KEY_SLOT_CURRENT], PQC_TRAFFIC_KEY_SZ);
     b->key_ids[KEY_SLOT_PREV] = b->key_ids[KEY_SLOT_CURRENT];
@@ -604,14 +628,14 @@ static void handle_handshake_success(policy_key_binding_t *b, const uint8_t *der
     promoted_key_id = b->key_ids[KEY_SLOT_CURRENT];
     pthread_mutex_unlock(&g_key_mutex);
 
-    sig_pqc_write_log(policy_id, key_id, PQC_LOG_LEVEL_INFO,
-                      PQC_LOG_STATUS_SUCCESS,
-                      was_ready ? "Session key updated."
-                                : "Secure session established.");
+    pqc_binding_write_log(b, PQC_LOG_LEVEL_INFO, PQC_LOG_STATUS_SUCCESS,
+                          was_ready ? "Session key updated."
+                                    : "Secure session established.");
     fprintf(stderr, "[PQC-HS] %s Handshake SUCCESS for Policy %d. Promoted new key ID: %d to CURRENT. Key prefix: %02X%02X%02X%02X...\n",
             role, policy_id, promoted_key_id,
             derived_master[0], derived_master[1], derived_master[2], derived_master[3]);
-    forwarder_pre_diversify_pqc_keys(profile_id);
+    if (!pqc_binding_is_arp(b))
+        forwarder_pre_diversify_pqc_keys(profile_id);
 }
 
 static int pqc_hs_stage_next_key(policy_key_binding_t *b,
@@ -641,7 +665,8 @@ static int pqc_hs_stage_next_key(policy_key_binding_t *b,
     fprintf(stderr,
             "[PQC-HS-L3] %s staged NEXT key for Policy %d; CURRENT remains active until READY/COMMIT.\n",
             role, policy_id);
-    forwarder_pre_diversify_pqc_keys(profile_id);
+    if (!pqc_binding_is_arp(b))
+        forwarder_pre_diversify_pqc_keys(profile_id);
     return 0;
 }
 
@@ -871,9 +896,9 @@ static int pqc_hs_handle_l3_responder_hello(policy_key_binding_t *b,
         fprintf(stderr,
                 "[PQC-HS-L3] HELLO signature verification failed for Policy %d, session %u.\n",
                 b->policy_id, msg->session_id);
-        sig_pqc_write_log(b->policy_id, b->key_id, PQC_LOG_LEVEL_ERROR,
-                          PQC_LOG_STATUS_FAILED,
-                          "Handshake signature verification failed. Mismatched authentication keys.");
+        pqc_binding_write_log(
+            b, PQC_LOG_LEVEL_ERROR, PQC_LOG_STATUS_FAILED,
+            "Handshake signature verification failed. Mismatched authentication keys.");
         return -1;
     }
 
@@ -1181,9 +1206,18 @@ void sig_pqc_feed_rx_packet(const uint8_t *payload, int len, const uint8_t *src_
 
     uint32_t policy_id = msg->policy_id;
     pthread_mutex_lock(&g_key_mutex);
-    for (int i = 0; i < g_policy_bindings_count; i++) {
-        if (g_policy_bindings[i].policy_id == (int)policy_id) {
-            policy_key_binding_t *b = &g_policy_bindings[i];
+    for (int i = -1; i < g_policy_bindings_count; i++) {
+        policy_key_binding_t *candidate;
+
+        if (i < 0) {
+            if (!g_arp_binding_active)
+                continue;
+            candidate = &g_arp_binding;
+        } else {
+            candidate = &g_policy_bindings[i];
+        }
+        if ((uint32_t)candidate->policy_id == policy_id) {
+            policy_key_binding_t *b = candidate;
             if (msg->msg_type == PQC_HS_MSG_KEEPALIVE && b->is_tunnel) {
                 const struct pqc_hs_msg *validated_msg = NULL;
                 pqc_hs_keepalive_status_t peer_status;
@@ -1724,7 +1758,10 @@ static void* pqc_policy_handshake_worker_run(void *arg) {
                     "[PQC-HS-L3] Policy %d peer confirmed CURRENT; deleting PREV after %llu ms grace.\n",
                     policy_id,
                     (unsigned long long)PQC_HS_PREV_KEY_GRACE_MS);
-            fwd_crypto_discard_pqc_prev_key(policy_id);
+            if (pqc_binding_is_arp(b))
+                sig_pqc_arp_discard_prev_key();
+            else
+                fwd_crypto_discard_pqc_prev_key(policy_id);
         }
         if (flush_l3_queue)
             pqc_flush_l3_rx_queue(b);
@@ -1873,7 +1910,9 @@ static void* pqc_policy_handshake_worker_run(void *arg) {
                     if (get_time_ms_hs() - b->handshake_start_time > PQC_HS_GIVEUP_TIMEOUT_MS) {
                         fprintf(stderr, "[PQC-HS-L3] Handshake timed out after %d seconds. Giving up on Policy %d.\n",
                                 PQC_HS_GIVEUP_TIMEOUT_MS / 1000, policy_id);
-                        sig_pqc_write_log(policy_id, b->key_id, PQC_LOG_LEVEL_ERROR, PQC_LOG_STATUS_FAILED, "Peer connection timeout.");
+                        pqc_binding_write_log(
+                            b, PQC_LOG_LEVEL_ERROR, PQC_LOG_STATUS_FAILED,
+                            "Peer connection timeout.");
                         b->handshake_give_up = true;
                         break;
                     }
@@ -1930,7 +1969,9 @@ static void* pqc_policy_handshake_worker_run(void *arg) {
                     if (now - b->handshake_start_time > PQC_HS_GIVEUP_TIMEOUT_MS) {
                         if (!b->giveup_logged) {
                             fprintf(stderr, "[PQC-HS-L3] Responder timed out waiting for HELLO on Policy %d.\n", policy_id);
-                            sig_pqc_write_log(policy_id, b->key_id, PQC_LOG_LEVEL_ERROR, PQC_LOG_STATUS_FAILED, "Handshake timeout. No HELLO received from Peer.");
+                            pqc_binding_write_log(
+                                b, PQC_LOG_LEVEL_ERROR, PQC_LOG_STATUS_FAILED,
+                                "Handshake timeout. No HELLO received from Peer.");
                             b->giveup_logged = true;
                         }
                         b->handshake_give_up = true;
@@ -1988,10 +2029,9 @@ static void* pqc_policy_handshake_worker_run(void *arg) {
                 if (need_rekey) {
                     if (b->rotation_start_time == 0) {
                         b->rotation_start_time = get_time_ms_hs();
-                        sig_pqc_write_log(policy_id, b->key_id,
-                                          PQC_LOG_LEVEL_INFO,
-                                          PQC_LOG_STATUS_SUCCESS,
-                                          "Starting handshake for a new session key.");
+                        pqc_binding_write_log(
+                            b, PQC_LOG_LEVEL_INFO, PQC_LOG_STATUS_SUCCESS,
+                            "Starting handshake for a new session key.");
                     }
                     initiate_l3_key_rotation(b, sockfd, &peeraddr,
                                             my_priv, peer_pub,
@@ -1999,10 +2039,10 @@ static void* pqc_policy_handshake_worker_run(void *arg) {
                     pthread_mutex_lock(&g_key_mutex);
                     if (b->rekey_requested) {
                         b->rotation_start_time = 0;
-                        sig_pqc_write_log(policy_id, b->key_id,
-                                          PQC_LOG_LEVEL_ERROR,
-                                          PQC_LOG_STATUS_ROTATION_FAILED,
-                                          "Session key handshake failed.");
+                        pqc_binding_write_log(
+                            b, PQC_LOG_LEVEL_ERROR,
+                            PQC_LOG_STATUS_ROTATION_FAILED,
+                            "Session key handshake failed.");
                     }
                     pthread_mutex_unlock(&g_key_mutex);
                 }
@@ -2059,13 +2099,19 @@ static void* pqc_policy_handshake_worker_run(void *arg) {
     free(peer_pub);
     pthread_mutex_lock(&g_key_mutex);
     b->thread_started = false;
-    int binding_idx = (int)(b - g_policy_bindings);
-    if (binding_idx >= 0 && binding_idx < MAX_POLICY_BINDINGS &&
-        g_policy_bindings_active[binding_idx]) {
+    if (pqc_binding_is_arp(b)) {
+        if (g_arp_binding_active)
+            b->thread_exit_sig = false;
+    } else {
+        int binding_idx = (int)(b - g_policy_bindings);
+
+        if (binding_idx >= 0 && binding_idx < MAX_POLICY_BINDINGS &&
+            g_policy_bindings_active[binding_idx]) {
         /* A timed-out reload preserves the previous active binding.  Once its
          * old worker finally exits, allow the supervisor to restart it rather
          * than leaving this one policy permanently stopped. */
-        b->thread_exit_sig = false;
+            b->thread_exit_sig = false;
+        }
     }
     pthread_mutex_unlock(&g_key_mutex);
     return NULL;
@@ -2092,6 +2138,19 @@ int sig_pqc_handshake_start(int profile_id, const char *wan_ifname, const char *
             }
             pqc_start_policy_worker_locked(&g_policy_bindings[i]);
         }
+    }
+    if (g_arp_binding_active && g_arp_binding.profile_id == profile_id) {
+        if (wan_ifname && wan_ifname[0] != '\0') {
+            strncpy(g_arp_binding.wan_ifname, wan_ifname,
+                    sizeof(g_arp_binding.wan_ifname) - 1);
+            g_arp_binding.wan_ifname[sizeof(g_arp_binding.wan_ifname) - 1] = '\0';
+        }
+        if (peer_ip && peer_ip[0] != '\0') {
+            strncpy(g_arp_binding.peer_ip, peer_ip,
+                    sizeof(g_arp_binding.peer_ip) - 1);
+            g_arp_binding.peer_ip[sizeof(g_arp_binding.peer_ip) - 1] = '\0';
+        }
+        pqc_start_policy_worker_locked(&g_arp_binding);
     }
     pthread_mutex_unlock(&g_key_mutex);
 
@@ -2398,6 +2457,248 @@ void sig_pqc_bind_policy(int policy_id, int profile_id, int role_mode,
             g_policy_bindings_active[idx] = true;
         }
     }
+    pthread_mutex_unlock(&g_key_mutex);
+}
+
+static void pqc_arp_binding_init_locked(void)
+{
+    if (g_arp_binding_initialized)
+        return;
+
+    memset(&g_arp_binding, 0, sizeof(g_arp_binding));
+    g_arp_binding.policy_id = PQC_ARP_INTERNAL_ID;
+    g_arp_binding.is_tunnel = true;
+    strncpy(g_arp_binding.key_id, "ARP", sizeof(g_arp_binding.key_id) - 1);
+    pthread_mutex_init(&g_arp_binding.rx_mutex, NULL);
+    pthread_cond_init(&g_arp_binding.rx_cond, NULL);
+    g_arp_binding_initialized = true;
+}
+
+/* Stop only the ARP transport worker. CURRENT/PREV/NEXT remain untouched. */
+static int pqc_arp_stop_worker(void)
+{
+    uint64_t started;
+
+    pthread_mutex_lock(&g_key_mutex);
+    if (!g_arp_binding_initialized || !g_arp_binding.thread_started) {
+        pthread_mutex_unlock(&g_key_mutex);
+        return 0;
+    }
+    g_arp_binding.thread_exit_sig = true;
+    started = get_time_ms_hs();
+    while (g_arp_binding.thread_started &&
+           get_time_ms_hs() - started < PQC_HS_WORKER_STOP_TIMEOUT_MS) {
+        pthread_mutex_unlock(&g_key_mutex);
+        usleep(1000);
+        pthread_mutex_lock(&g_key_mutex);
+    }
+    if (g_arp_binding.thread_started) {
+        pthread_mutex_unlock(&g_key_mutex);
+        return -ETIMEDOUT;
+    }
+    g_arp_binding.thread_exit_sig = false;
+    pthread_mutex_unlock(&g_key_mutex);
+    return 0;
+}
+
+static void pqc_arp_wipe_keys_locked(void)
+{
+    memset(g_arp_binding.encrypt_key, 0, sizeof(g_arp_binding.encrypt_key));
+    memset(g_arp_binding.decrypt_key, 0, sizeof(g_arp_binding.decrypt_key));
+    for (int slot = 0; slot < KEY_SLOT_COUNT; slot++)
+        pqc_hs_wipe_slot_locked(&g_arp_binding, slot);
+    g_arp_binding.key_ready = false;
+    g_arp_binding.rekey_requested = false;
+    g_arp_binding.handshake_start_time = 0;
+    g_arp_binding.handshake_give_up = false;
+    g_arp_binding.rotation_start_time = 0;
+    g_arp_binding.rotation_give_up = false;
+    g_arp_binding.prev_discard_after_ms = 0;
+    pqc_hs_clear_cache_locked(&g_arp_binding);
+}
+
+int sig_pqc_arp_reconcile_profile(int profile_id)
+{
+    policy_key_binding_t *source = NULL;
+    bool source_found = false;
+    char *local_priv = NULL;
+    char *local_pub = NULL;
+    char *peer_pub = NULL;
+    char local_fg[sizeof(g_arp_binding.local_fingerprint)] = "";
+    char peer_fg[sizeof(g_arp_binding.peer_fingerprint)] = "";
+    char peer_ip[sizeof(g_arp_binding.peer_ip)] = "";
+    char wan_ifname[sizeof(g_arp_binding.wan_ifname)] = "";
+    int role_mode = PQC_ROLE_DYNAMIC;
+    int identity_changed;
+
+    if (profile_id <= 0)
+        return -EINVAL;
+
+    pthread_mutex_lock(&g_key_mutex);
+    for (int i = 0; i < g_policy_bindings_count; i++) {
+        policy_key_binding_t *candidate = &g_policy_bindings[i];
+
+        if (!g_policy_bindings_active[i] ||
+            candidate->profile_id != profile_id || !candidate->is_tunnel ||
+            !candidate->local_priv || !candidate->local_pub ||
+            !candidate->peer_pub)
+            continue;
+        source = candidate;
+        source_found = true;
+        break;
+    }
+    if (source) {
+        local_priv = strdup(source->local_priv);
+        local_pub = strdup(source->local_pub);
+        peer_pub = strdup(source->peer_pub);
+        snprintf(local_fg, sizeof(local_fg), "%s",
+                 source->local_fingerprint);
+        snprintf(peer_fg, sizeof(peer_fg), "%s",
+                 source->peer_fingerprint);
+        snprintf(peer_ip, sizeof(peer_ip), "%s", source->peer_ip);
+        snprintf(wan_ifname, sizeof(wan_ifname), "%s",
+                 source->wan_ifname);
+        role_mode = source->role_mode;
+    }
+    pthread_mutex_unlock(&g_key_mutex);
+
+    if (!source_found || !local_priv || !local_pub || !peer_pub) {
+        free(local_priv);
+        free(local_pub);
+        free(peer_pub);
+        return -ENOENT;
+    }
+
+    if (pqc_arp_stop_worker() != 0) {
+        free(local_priv);
+        free(local_pub);
+        free(peer_pub);
+        return -ETIMEDOUT;
+    }
+
+    pthread_mutex_lock(&g_key_mutex);
+    pqc_arp_binding_init_locked();
+    identity_changed = !g_arp_binding_active ||
+        g_arp_binding.profile_id != profile_id ||
+        g_arp_binding.role_mode != role_mode ||
+        !g_arp_binding.local_priv || !g_arp_binding.local_pub ||
+        !g_arp_binding.peer_pub ||
+        strcmp(g_arp_binding.local_priv, local_priv) != 0 ||
+        strcmp(g_arp_binding.local_pub, local_pub) != 0 ||
+        strcmp(g_arp_binding.peer_pub, peer_pub) != 0;
+
+    if (identity_changed)
+        pqc_arp_wipe_keys_locked();
+
+    free(g_arp_binding.local_priv);
+    free(g_arp_binding.local_pub);
+    free(g_arp_binding.peer_pub);
+    g_arp_binding.local_priv = local_priv;
+    g_arp_binding.local_pub = local_pub;
+    g_arp_binding.peer_pub = peer_pub;
+    g_arp_binding.profile_id = profile_id;
+    g_arp_binding.policy_id = PQC_ARP_INTERNAL_ID;
+    g_arp_binding.role_mode = role_mode;
+    g_arp_binding.is_tunnel = true;
+    strncpy(g_arp_binding.local_fingerprint, local_fg,
+            sizeof(g_arp_binding.local_fingerprint) - 1);
+    g_arp_binding.local_fingerprint[
+        sizeof(g_arp_binding.local_fingerprint) - 1] = '\0';
+    strncpy(g_arp_binding.peer_fingerprint, peer_fg,
+            sizeof(g_arp_binding.peer_fingerprint) - 1);
+    g_arp_binding.peer_fingerprint[
+        sizeof(g_arp_binding.peer_fingerprint) - 1] = '\0';
+    strncpy(g_arp_binding.peer_ip, peer_ip,
+            sizeof(g_arp_binding.peer_ip) - 1);
+    g_arp_binding.peer_ip[sizeof(g_arp_binding.peer_ip) - 1] = '\0';
+    strncpy(g_arp_binding.wan_ifname, wan_ifname,
+            sizeof(g_arp_binding.wan_ifname) - 1);
+    g_arp_binding.wan_ifname[sizeof(g_arp_binding.wan_ifname) - 1] = '\0';
+    g_arp_binding.keepalive_enabled = true;
+    g_arp_binding.keepalive_monitor_start_time = get_time_ms_hs();
+    g_arp_binding.thread_exit_sig = false;
+    if (identity_changed) {
+        uint64_t request_id = 0;
+
+        if (pqc_generate_request_id(&request_id) == 0)
+            g_arp_binding.local_request_id = request_id;
+        g_arp_binding.send_poke = role_mode != PQC_ROLE_INITIATOR;
+    }
+    g_arp_binding_active = true;
+    pthread_mutex_unlock(&g_key_mutex);
+    return 0;
+}
+
+int sig_pqc_arp_get_keys(
+    uint8_t keys[KEY_SLOT_COUNT][PQC_TRAFFIC_KEY_SZ],
+    uint8_t key_ids[KEY_SLOT_COUNT],
+    bool key_slots_valid[KEY_SLOT_COUNT])
+{
+    if (!keys || !key_ids || !key_slots_valid)
+        return -EINVAL;
+
+    pthread_mutex_lock(&g_key_mutex);
+    if (!g_arp_binding_active) {
+        pthread_mutex_unlock(&g_key_mutex);
+        return -ENOENT;
+    }
+    memcpy(keys, g_arp_binding.keys, sizeof(g_arp_binding.keys));
+    memcpy(key_ids, g_arp_binding.key_ids, sizeof(g_arp_binding.key_ids));
+    memcpy(key_slots_valid, g_arp_binding.key_slots_valid,
+           sizeof(g_arp_binding.key_slots_valid));
+    pthread_mutex_unlock(&g_key_mutex);
+    return 0;
+}
+
+int sig_pqc_arp_request_new_session(void)
+{
+    pthread_mutex_lock(&g_key_mutex);
+    if (!g_arp_binding_active || !g_arp_binding.key_ready) {
+        pthread_mutex_unlock(&g_key_mutex);
+        return -EAGAIN;
+    }
+    g_arp_binding.rekey_requested = true;
+    g_arp_binding.handshake_give_up = false;
+    g_arp_binding.rotation_give_up = false;
+    g_arp_binding.rotation_start_time = 0;
+    pthread_mutex_unlock(&g_key_mutex);
+    return 0;
+}
+
+void sig_pqc_arp_discard_prev_key(void)
+{
+    pthread_mutex_lock(&g_key_mutex);
+    if (g_arp_binding_active)
+        pqc_hs_wipe_slot_locked(&g_arp_binding, KEY_SLOT_PREV);
+    pthread_mutex_unlock(&g_key_mutex);
+}
+
+void sig_pqc_arp_clear(void)
+{
+    pthread_mutex_lock(&g_key_mutex);
+    if (!g_arp_binding_initialized) {
+        pthread_mutex_unlock(&g_key_mutex);
+        return;
+    }
+    g_arp_binding_active = false;
+    pthread_mutex_unlock(&g_key_mutex);
+
+    /* The worker still owns the binding storage until it has stopped. Never
+     * wipe or free that storage after a stop timeout. */
+    if (pqc_arp_stop_worker() != 0)
+        return;
+
+    pthread_mutex_lock(&g_key_mutex);
+    pqc_arp_wipe_keys_locked();
+    pqc_flush_l3_rx_queue(&g_arp_binding);
+    free(g_arp_binding.local_priv);
+    free(g_arp_binding.local_pub);
+    free(g_arp_binding.peer_pub);
+    g_arp_binding.local_priv = NULL;
+    g_arp_binding.local_pub = NULL;
+    g_arp_binding.peer_pub = NULL;
+    g_arp_binding.profile_id = 0;
+    g_arp_binding.keepalive_enabled = false;
     pthread_mutex_unlock(&g_key_mutex);
 }
 
