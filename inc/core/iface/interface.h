@@ -12,8 +12,9 @@
 #define MAX_QUEUES     64
 
 #define NE_RING        16384u
-#define NE_FRAME       2048u
-#define NE_N_FRAMES    1048576u
+#define NE_FRAME       4096u
+/* Keep the shared UMEM footprint at 2 GiB with 4 KiB frames. */
+#define NE_N_FRAMES    524288u
 #define NE_BATCH_SIZE   64u
 
 #define NE_QUEUE_OVERRIDE 0

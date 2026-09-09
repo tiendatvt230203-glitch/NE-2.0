@@ -27,7 +27,7 @@ struct {
 #define ETH_P_NE_UDP_ENC 0x104B
 #define ETH_P_CFM        0x8902
 
-SEC("xdp")
+SEC("xdp.frags")
 int xdp_wan_redirect_prog(struct xdp_md *ctx)
 {
     void *data = (void *)(long)ctx->data;
