@@ -19,7 +19,7 @@
 #define JUMBO_ENC_PAYLOAD_OFF     (JUMBO_ENC_START + JUMBO_SHIM_LEN)
 #define JUMBO_BYPASS_SHIM_OFF     (JUMBO_ETH_LEN + JUMBO_PREFIX_LEN)
 #define JUMBO_BYPASS_PAYLOAD_OFF  (JUMBO_BYPASS_SHIM_OFF + JUMBO_SHIM_LEN)
-#define JUMBO_WIRE_MAX            4060u
+#define JUMBO_WIRE_MAX            NE_FRAME_DATA_MAX
 #define JUMBO_ORIGINAL_MAX        (CRYPTO_OPT_FRAG_MTU_MAX + JUMBO_ETH_LEN)
 #define JUMBO_REASM_SLOTS         4096u
 #define JUMBO_REASM_TIMEOUT_NS    (200ULL * 1000000ULL)
@@ -28,8 +28,8 @@
 static const uint8_t jumbo_magic[3] = { 0x4au, 0x4du, 0x42u }; /* JMB */
 static atomic_uint_fast32_t jumbo_packet_clock = ATOMIC_VAR_INIT(1u);
 
-_Static_assert(JUMBO_WIRE_MAX <= NE_FRAME,
-               "jumbo wire fragment must fit one UMEM frame");
+_Static_assert(JUMBO_WIRE_MAX <= NE_FRAME_DATA_MAX,
+               "jumbo wire fragment must fit one XDP data area");
 _Static_assert(JUMBO_WIRE_MAX > JUMBO_ENC_PAYLOAD_OFF + AES_GCM_TAG_SIZE,
                "jumbo encrypted wire header leaves no payload room");
 
@@ -150,6 +150,53 @@ static int packet_copy_out(struct forwarder *fwd,
     return length == 0 ? 0 : -1;
 }
 
+/*
+ * XDP fragments describe one received L2 frame with several UMEM buffers.
+ * A jumbo wire fragment is at most NE_FRAME_DATA_MAX bytes, but the NIC is
+ * still free to expose it as an SG chain. AES-GCM must see the ciphertext and
+ * its tag in one contiguous region, so collapse only that wire frame before
+ * decrypting.
+ *
+ * On success this function consumes every old segment and replaces packet
+ * with one newly allocated frame. On failure ownership stays with the caller.
+ */
+static int packet_linearize_wire(struct forwarder *fwd,
+                                 struct ne_packet *packet)
+{
+    struct ne_packet original;
+    uint64_t linear_addr;
+    uint8_t *linear;
+    uint32_t count;
+    uint32_t total;
+
+    if (!fwd || !packet)
+        return -1;
+    count = packet_segment_count(packet);
+    if (count == 1)
+        return 0;
+    total = packet_total_len(packet);
+    if (!count || total == 0 || total > fwd->pair.frame_size)
+        return -1;
+    if (ne_frame_alloc(&fwd->pair, &linear_addr) != 0)
+        return -1;
+    linear = ne_packet_data(&fwd->pair, linear_addr);
+    if (!linear || packet_copy_out(fwd, packet, 0, linear, total) != 0) {
+        ne_frame_free(&fwd->pair, linear_addr);
+        return -1;
+    }
+
+    original = *packet;
+    packet->addr = linear_addr;
+    packet->len = total;
+    memset(packet->continuation_addr, 0, sizeof(packet->continuation_addr));
+    memset(packet->continuation_len, 0, sizeof(packet->continuation_len));
+    packet->total_len = total;
+    packet->segment_count = 1;
+    packet->xdp_options = 0;
+    ne_packet_free(&fwd->pair, &original);
+    return 0;
+}
+
 static void jumbo_write_shim(uint8_t *shim, uint32_t packet_id,
                              uint16_t total_len, uint16_t offset,
                              uint16_t payload_len, uint8_t index,
@@ -199,7 +246,7 @@ int dp_jumbo_packet_needs_wire_split(const struct ne_packet *packet,
      * fragmentation despite arriving in one descriptor. */
     return encrypted && total &&
         total + JUMBO_PREFIX_LEN + JUMBO_NONCE_LEN + AES_GCM_TAG_SIZE >
-            NE_FRAME;
+            JUMBO_WIRE_MAX;
 }
 
 static void free_output(struct forwarder *fwd, struct ne_packet *output,
@@ -418,6 +465,7 @@ int dp_jumbo_receive(struct forwarder *fwd, int worker_idx,
     uint16_t total_len, offset, payload_len;
     uint8_t index, count;
     uint8_t policy;
+    uint8_t wire_worker;
     int kind;
     int plain_len = 0;
     uint64_t now = jumbo_now_ns();
@@ -425,9 +473,14 @@ int dp_jumbo_receive(struct forwarder *fwd, int worker_idx,
     if (!fwd || !wire_packet || !plain_packet || !wire_policy_id ||
         !encrypted || worker_idx < 0 || worker_idx >= (int)NE_CRYPTO_WORKERS)
         return DP_JUMBO_RX_DROP;
+    if (packet_linearize_wire(fwd, wire_packet) != 0)
+        return DP_JUMBO_RX_DROP;
     wire = ne_packet_data(&fwd->pair, wire_packet->addr);
     kind = dp_jumbo_wire_kind(wire, wire_packet->len);
     if (!kind || dp_jumbo_wire_policy(wire, wire_packet->len, &policy) != 0)
+        return DP_JUMBO_RX_DROP;
+    if (dp_jumbo_wire_worker(wire, wire_packet->len, &wire_worker) != 0 ||
+        wire_worker != (uint8_t)worker_idx)
         return DP_JUMBO_RX_DROP;
 
     if (kind == 2) {

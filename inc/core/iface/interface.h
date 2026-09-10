@@ -13,6 +13,10 @@
 
 #define NE_RING        16384u
 #define NE_FRAME       4096u
+/* XDP keeps 256 bytes before packet data inside each UMEM chunk. Therefore a
+ * 4 KiB chunk can carry at most 3840 bytes as one non-SG wire frame. */
+#define NE_XDP_PACKET_HEADROOM 256u
+#define NE_FRAME_DATA_MAX (NE_FRAME - NE_XDP_PACKET_HEADROOM)
 /* Keep the shared UMEM footprint at 2 GiB with 4 KiB frames. */
 #define NE_N_FRAMES    524288u
 #define NE_BATCH_SIZE   64u
