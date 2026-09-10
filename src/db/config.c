@@ -125,26 +125,6 @@ int config_local_ifname_in_cfg(const struct app_config *cfg, const char *ifname)
     return 0;
 }
 
-int config_wan_profile_weight(const struct app_config *cfg, int wan_idx)
-{
-    int best = 0;
-
-    if (!cfg || wan_idx < 0 || wan_idx >= cfg->wan_count || cfg->profile_count < 1)
-        return 0;
-
-    {
-        const struct profile_config *p = &cfg->profiles[0];
-
-        for (int wi = 0; wi < p->wan_count; wi++) {
-            if (p->wan_indices[wi] != wan_idx)
-                continue;
-            if (p->wan_bandwidth_weight[wi] > best)
-                best = p->wan_bandwidth_weight[wi];
-        }
-    }
-    return best;
-}
-
 int config_wan_live(const struct app_config *cfg, int wan_idx)
 {
     if (!cfg || wan_idx < 0 || wan_idx >= cfg->wan_count)

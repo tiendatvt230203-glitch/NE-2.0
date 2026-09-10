@@ -36,7 +36,6 @@ static void dp_maint_tick(struct forwarder *fwd)
     fwd_crypto_maybe_expire_prev_grace();
     fwd_crypto_pqc_key_lifetime_tick();
     fwd_wan_drain_tick(fwd);
-    fwd_wan_weight_blend_tick();
     mac_learn_tick(fwd);
 }
 static void pin_cpu(unsigned int cpu)

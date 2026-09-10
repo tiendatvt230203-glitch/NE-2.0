@@ -99,7 +99,6 @@ int wan_admin_restore(struct forwarder *fwd, const char *ifname)
 {
     int di = -1;
     int ci;
-    int target_w = 1;
 
     if (!fwd || !fwd->cfg || !ifname || !ifname[0])
         return -1;
@@ -135,10 +134,6 @@ int wan_admin_restore(struct forwarder *fwd, const char *ifname)
     }
 
     fwd_wan_admin_hold_set(di, 0);
-    target_w = config_wan_profile_weight(fwd->cfg, ci);
-    if (target_w <= 0)
-        target_w = 1;
-    fwd_wan_join_ramp_begin(ci, target_w);
     forwarder_runtime_unlock();
 
     fprintf(stderr, "[WAN-ADMIN] RESTORE OK %s dp=%d (traffic on, XDP/UMEM untouched)\n",
@@ -146,4 +141,3 @@ int wan_admin_restore(struct forwarder *fwd, const char *ifname)
     fflush(stderr);
     return 0;
 }
-

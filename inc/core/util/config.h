@@ -100,7 +100,6 @@ struct app_config {
     int policy_count;
 };
 
-int config_wan_profile_weight(const struct app_config *cfg, int wan_idx);
 int config_wan_live(const struct app_config *cfg, int wan_idx);
 int config_wan_live_in_cfg(const struct app_config *cfg, const char *ifname);
 int config_count_dataplane_wans(const struct app_config *cfg);

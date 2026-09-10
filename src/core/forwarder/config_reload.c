@@ -81,7 +81,6 @@ static int forwarder_reload_config_impl(struct forwarder *fwd, struct app_config
         return -1;
 
     fwd->cfg = cfg;
-    fwd_wan_weight_blend_begin(old_cfg, cfg, NULL);
     if (cfg->crypto_enabled) {
         pqc_handshake_start_all_profiles(cfg);
     }
