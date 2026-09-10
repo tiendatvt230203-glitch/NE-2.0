@@ -4,8 +4,11 @@
 #include "core/forwarder/forwarder.h"
 #include "crypto/packet_crypto.h"
 
-#define NE_L2_JUMBO_ENCRYPTED_ETHERTYPE 0x104Cu
-#define NE_L2_JUMBO_BYPASS_ETHERTYPE    0x104Du
+/* Encrypted jumbo fragments keep the normal L2-PQC EtherType (0x104A).
+ * The high bit of the clear worker byte identifies a jumbo fragment while
+ * the low bits retain the crypto-worker index. */
+#define NE_L2_JUMBO_WORKER_FLAG          0x80u
+#define NE_L2_JUMBO_WORKER_MASK          0x7fu
 
 enum dp_jumbo_rx_result {
     DP_JUMBO_RX_DROP = -1,

@@ -24,10 +24,11 @@ struct {
 #define IPPROTO_UDP_VAL 17
 #define IPPROTO_OSPF_VAL 89
 #define ETH_P_NE_ARP_ENC 0x1048
-#define ETH_P_NE_UDP_ENC 0x104B
-#define ETH_P_NE_JUMBO_ENC 0x104C
-#define ETH_P_NE_JUMBO_BYPASS 0x104D
+#define ETH_P_NE_L2_ENC  0x104A
+#define ETH_P_NE_UDP_ENC 0x104B /* standard MTU-1500 UDP wire only */
 #define ETH_P_CFM        0x8902
+
+#define NE_JUMBO_BYPASS_MAGIC_OFF 16
 
 SEC("xdp.frags")
 int xdp_wan_redirect_prog(struct xdp_md *ctx)
@@ -45,25 +46,32 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
     if (proto == __constant_htons(ETH_P_CFM))
         return XDP_PASS;
 
-    if (proto == __constant_htons(ETH_P_ARP)) {
-        goto redirect;
-    }
+    /* One-sided jumbo debug: plain ARP stays entirely in the kernel bridge. */
+    if (proto == __constant_htons(ETH_P_ARP))
+        return XDP_PASS;
 
-    if (proto == __constant_htons(ETH_P_NE_ARP_ENC)) {
-        goto redirect;
-    }
+    if (proto == __constant_htons(ETH_P_NE_ARP_ENC))
+        return XDP_PASS;
 
     if (proto == __constant_htons(ETH_P_NE_UDP_ENC)) {
         goto redirect;
     }
 
-    if (proto == __constant_htons(ETH_P_NE_JUMBO_ENC) ||
-        proto == __constant_htons(ETH_P_NE_JUMBO_BYPASS)) {
+    if (proto == __constant_htons(ETH_P_NE_L2_ENC)) {
         goto redirect;
     }
 
     if (proto == __constant_htons(ETH_P_IP)) {
+        __u8 *jumbo = data + NE_JUMBO_BYPASS_MAGIC_OFF;
         struct iphdr *ip = (void *)(eth + 1);
+
+        /* Plain jumbo fragments retain 0x0800. Their clear JMB tag precedes
+         * the original byte stream, so redirect them before parsing IPv4. */
+        if (jumbo + 4 <= (__u8 *)data_end &&
+            jumbo[0] == 0x4a && jumbo[1] == 0x4d &&
+            jumbo[2] == 0x42 && jumbo[3] == 0x01)
+            goto redirect;
+
         if ((void *)(ip + 1) > data_end)
             return XDP_PASS;
 

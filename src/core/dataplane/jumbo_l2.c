@@ -4,6 +4,7 @@
 #include "../../../inc/core/dataplane/dp_idle.h"
 #include "../../../inc/core/dataplane/crypto_route.h"
 #include "../../../inc/crypto/crypto_option.h"
+#include "../../../inc/crypto/eth_parse.h"
 
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -22,6 +23,7 @@
 #define JUMBO_ORIGINAL_MAX        (CRYPTO_OPT_FRAG_MTU_MAX + JUMBO_ETH_LEN)
 #define JUMBO_REASM_SLOTS         4096u
 #define JUMBO_REASM_TIMEOUT_NS    (200ULL * 1000000ULL)
+#define JUMBO_IPV4_ETHERTYPE      0x0800u
 
 static const uint8_t jumbo_magic[3] = { 0x4au, 0x4du, 0x42u }; /* JMB */
 static atomic_uint_fast32_t jumbo_packet_clock = ATOMIC_VAR_INIT(1u);
@@ -249,14 +251,16 @@ int dp_jumbo_build_wire(struct forwarder *fwd,
             return -1;
         }
         wire = ne_packet_data(&fwd->pair, output[i].addr);
-        if (!wire || packet_copy_out(fwd, input, 0, wire, 12u) != 0) {
+        if (!wire || packet_copy_out(fwd, input, 0, wire,
+                                     encrypted ? 12u : JUMBO_ETH_LEN) != 0) {
             free_output(fwd, output, i + 1u);
             return -1;
         }
-        write_be16(wire + 12, encrypted ? NE_L2_JUMBO_ENCRYPTED_ETHERTYPE
-                                        : NE_L2_JUMBO_BYPASS_ETHERTYPE);
+        if (encrypted)
+            write_be16(wire + 12, NE_L2_FAKE_ETHERTYPE);
         wire[14] = wire_policy_id;
-        wire[15] = worker;
+        wire[15] = encrypted ? (uint8_t)(worker | NE_L2_JUMBO_WORKER_FLAG)
+                             : worker;
 
         if (encrypted) {
             uint8_t nonce[JUMBO_NONCE_LEN];
@@ -311,9 +315,13 @@ int dp_jumbo_wire_kind(const uint8_t *packet, uint32_t length)
         length > JUMBO_WIRE_MAX)
         return 0;
     ethertype = read_be16(packet + 12);
-    if (ethertype == NE_L2_JUMBO_BYPASS_ETHERTYPE)
+    if (ethertype == JUMBO_IPV4_ETHERTYPE &&
+        memcmp(packet + JUMBO_BYPASS_SHIM_OFF, jumbo_magic,
+               sizeof(jumbo_magic)) == 0 &&
+        packet[JUMBO_BYPASS_SHIM_OFF + 3u] == 1u)
         return 1;
-    if (ethertype == NE_L2_JUMBO_ENCRYPTED_ETHERTYPE &&
+    if (ethertype == NE_L2_FAKE_ETHERTYPE &&
+        (packet[15] & NE_L2_JUMBO_WORKER_FLAG) != 0 &&
         length >= JUMBO_ENC_PAYLOAD_OFF + AES_GCM_TAG_SIZE)
         return 2;
     return 0;
@@ -324,7 +332,7 @@ int dp_jumbo_wire_worker(const uint8_t *packet, uint32_t length,
 {
     if (!worker_id || dp_jumbo_wire_kind(packet, length) == 0)
         return -1;
-    *worker_id = packet[15];
+    *worker_id = (uint8_t)(packet[15] & NE_L2_JUMBO_WORKER_MASK);
     return 0;
 }
 

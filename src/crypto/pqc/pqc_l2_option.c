@@ -948,9 +948,9 @@ static int l2_ip_encrypt(struct packet_crypto_ctx *ctx, uint8_t *pkt,
     return 0;
 }
 
-int crypto_l2_pqc_encrypt_tcp_l3(struct packet_crypto_ctx *ctx,
-                                 uint8_t *pkt, uint32_t *pkt_len,
-                                 int l3_off)
+int crypto_l2_pqc_encrypt_ipv4_l3(struct packet_crypto_ctx *ctx,
+                                  uint8_t *pkt, uint32_t *pkt_len,
+                                  int l3_off)
 {
     int n;
 

@@ -667,8 +667,9 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
         uint32_t epoch;
         uint32_t seq;
 
-        /* Jumbo mode carries each UDP datagram as one encrypted wire frame.
-         * Consume its metadata but forward directly without reorder buffering. */
+        /* Jumbo mode uses generic 0x104A L2-PQC and never produces UDP sequence
+         * metadata. Retain this guard so legacy metadata can never enter the
+         * reorder buffer while the dataplane is operating in jumbo mode. */
         if (crypto_option_udp_take_rx_meta(&epoch, &seq) == 0 &&
             !crypto_option_is_jumbo_mode()) {
             struct dp_udp_reorder_key key;

@@ -17,10 +17,11 @@
 #define NE_N_FRAMES    524288u
 #define NE_BATCH_SIZE   64u
 
-/* An MTU-9000 Ethernet packet occupies at most three 4 KiB AF_XDP
- * descriptors. segment_count 0/1 both mean a normal single-frame packet and
- * use only addr/len, so existing MTU-1500 producers remain compatible. */
-#define NE_PACKET_MAX_SEGMENTS 3u
+/* NIC RX-fragment boundaries are independent of the 4 KiB UMEM frame size.
+ * Keep enough descriptor slots for an MTU-9000 packet on drivers that expose
+ * smaller RX fragments. segment_count 0/1 both mean a normal single-frame
+ * packet, so existing MTU-1500 producers remain compatible. */
+#define NE_PACKET_MAX_SEGMENTS 8u
 #define NE_PACKET_MAX_CONTINUATIONS (NE_PACKET_MAX_SEGMENTS - 1u)
 
 #define NE_QUEUE_OVERRIDE 0

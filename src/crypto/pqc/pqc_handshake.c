@@ -1689,7 +1689,6 @@ static void* pqc_policy_handshake_worker_run(void *arg) {
         bool keepalive_enabled;
         bool handshake_give_up;
         bool auto_retry_started = false;
-        bool keepalive_timeout_recovery = false;
         bool flush_l3_queue = false;
         bool discard_prev = false;
         uint8_t keepalive_state = PQC_HS_STATE_FAILED;
@@ -1715,9 +1714,9 @@ static void* pqc_policy_handshake_worker_run(void *arg) {
             if (monitor_from != 0 && loop_now >= monitor_from &&
                 loop_now - monitor_from >=
                     PQC_HS_KEEPALIVE_TIMEOUT_MS) {
-                /* Keepalive is liveness only. A live NE key stays in RAM. */
+                /* Keepalive is liveness only. Keep the live key in RAM and
+                 * silently restart the monitor window. */
                 b->last_keepalive_rx_time = loop_now;
-                keepalive_timeout_recovery = true;
             }
         }
 
@@ -1765,11 +1764,6 @@ static void* pqc_policy_handshake_worker_run(void *arg) {
         }
         if (flush_l3_queue)
             pqc_flush_l3_rx_queue(b);
-        if (keepalive_timeout_recovery) {
-            fprintf(stderr,
-                    "[PQC-HS-L3] Policy %d missed %d keepalive intervals; current session key stays in NE RAM.\n",
-                    policy_id, PQC_HS_KEEPALIVE_MISSED_LIMIT);
-        }
         if (auto_retry_started) {
             fprintf(stderr,
                     "[PQC-HS-L3] Policy %d starting its scheduled automatic retry after %d seconds. Role=%s.\n",

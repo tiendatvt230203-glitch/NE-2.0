@@ -71,9 +71,9 @@ const struct crypto_option_ops *crypto_option_ops(crypto_option_id id, crypto_pr
 uint32_t crypto_option_wire_overhead(crypto_option_id id);
 
 
-int crypto_l2_pqc_encrypt_tcp_l3(struct packet_crypto_ctx *ctx,
-                                 uint8_t *pkt, uint32_t *pkt_len,
-                                 int l3_off);
+int crypto_l2_pqc_encrypt_ipv4_l3(struct packet_crypto_ctx *ctx,
+                                  uint8_t *pkt, uint32_t *pkt_len,
+                                  int l3_off);
 
 int crypto_option_need_split(crypto_option_id id, crypto_proto_class proto, uint32_t pkt_len);
 int crypto_option_split(crypto_option_id id, crypto_proto_class proto,

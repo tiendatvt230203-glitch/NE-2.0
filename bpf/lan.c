@@ -23,9 +23,9 @@ int xdp_redirect_prog(struct xdp_md *ctx)
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
 
-    if (eth->h_proto == bpf_htons(ETH_P_ARP_VAL)) {
-        goto redirect;
-    }
+    /* One-sided jumbo debug: let the kernel bridge ARP directly. */
+    if (eth->h_proto == bpf_htons(ETH_P_ARP_VAL))
+        return XDP_PASS;
 
     if (eth->h_proto == bpf_htons(ETH_P_IP)) {
         struct iphdr *ip = (void *)(eth + 1);

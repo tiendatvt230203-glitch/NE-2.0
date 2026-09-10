@@ -306,12 +306,13 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
         complete_packet_window_after_enqueue(proto, 1, 1);
         return;
     }
-    if (proto == IPPROTO_TCP) {
+    if (crypto_option_is_jumbo_mode() || proto == IPPROTO_TCP) {
         uint32_t len = job.len;
 
-        /* TCP never uses the UDP splitter. Reuse the offset already parsed
-         * for policy/MSS and call the exact same L2 wire encoder directly. */
-        enc = crypto_l2_pqc_encrypt_tcp_l3(pctx, pkt, &len, l3_off);
+        /* Jumbo mode has one L2-PQC format for every IPv4 protocol. It never
+         * emits the legacy UDP 0x104B marker/sequence/split format. TCP uses
+         * the same generic encoder in standard mode after MSS handling. */
+        enc = crypto_l2_pqc_encrypt_ipv4_l3(pctx, pkt, &len, l3_off);
         if (enc == 0)
             job.len = len;
     } else {

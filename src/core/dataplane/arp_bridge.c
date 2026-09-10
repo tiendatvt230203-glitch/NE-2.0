@@ -21,10 +21,11 @@
 #define ARP_DEFAULT_WIRE_ID      250u
 #define ARP_ETH_HDR_LEN          14u
 
-/* 1 = mã hóa ARP L2-PQC (key/option riêng), độc lập bảng policy/data crypto.
- * Decrypt vẫn chạy nếu wire có ARP marker (peer vẫn encrypt). */
+/* Debug one-sided jumbo capture: ARP still traverses the userspace bridge but
+ * is transmitted as plain 0x0806 so a peer without this service can answer.
+ * Decrypt remains enabled for an encrypted ARP received from another peer. */
 #ifndef ARP_ENCRYPT_ENABLE
-#define ARP_ENCRYPT_ENABLE 1
+#define ARP_ENCRYPT_ENABLE 0
 #endif
 
 static struct packet_crypto_ctx g_arp_crypto_ctx;
