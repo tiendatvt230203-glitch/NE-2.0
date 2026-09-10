@@ -28,7 +28,8 @@
 #define NE_PACKET_MAX_SEGMENTS 8u
 #define NE_PACKET_MAX_CONTINUATIONS (NE_PACKET_MAX_SEGMENTS - 1u)
 
-#define NE_QUEUE_OVERRIDE 0
+/* Restore four hardware/XSK queues after the one-queue isolation test. */
+#define NE_QUEUE_OVERRIDE 4
 
 #define NE_FQ_PREFILL   16384u
 

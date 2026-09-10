@@ -14,9 +14,23 @@
 #include "../../../inc/core/dataplane/udp_reorder.h"
 
 #include <netinet/in.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <net/if.h>
 #include <stdio.h>
+
+static atomic_uint jumbo_wan_diag_mask = ATOMIC_VAR_INIT(0u);
+
+static void jumbo_wan_diag_once(unsigned int bit, const char *message)
+{
+    unsigned int old = atomic_fetch_or_explicit(&jumbo_wan_diag_mask, bit,
+                                                 memory_order_relaxed);
+
+    if ((old & bit) != 0)
+        return;
+    fprintf(stderr, "[JUMBO-RX] %s\n", message);
+    fflush(stderr);
+}
 
 /* UDP bonding format. Wire after nonce:
  *   [0x5B 'U' 'D' v1][ciphertext(kind+epoch32+seq32+datagram_id32+
@@ -608,14 +622,20 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
                 goto drop;
             if (jumbo_encrypted) {
                 if (!wan_policy_in_ok(fwd, profile_pi, jumbo_policy,
-                                      pkt, job.len))
+                                      pkt, job.len)) {
+                    jumbo_wan_diag_once(1u << 0, "inbound_policy_failed");
                     goto policy_drop;
+                }
+                jumbo_wan_diag_once(1u << 1, "inbound_policy_passed");
                 dp_out_ring_bind(dp_flow_pick_tx_slot(
                     pkt, job.len, dp_crypto_current_worker_idx()));
             } else {
                 profile_pi = wan_profile_pi_bypass(fwd, pkt, job.len);
-                if (profile_pi < 0)
+                if (profile_pi < 0) {
+                    jumbo_wan_diag_once(1u << 2, "bypass_policy_failed");
                     goto policy_drop;
+                }
+                jumbo_wan_diag_once(1u << 3, "bypass_policy_passed");
                 dp_out_ring_bind(dp_pick_tx_slot(pkt, job.len));
             }
             {
@@ -623,11 +643,14 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
                     fwd, &job, profile_pi,
                     job.wan_idx < fwd->wan_count ? (int)job.wan_idx : -1);
 
-                if (rc < 0)
+                if (rc < 0) {
+                    jumbo_wan_diag_once(1u << 4, "lan_forward_failed");
                     goto drop;
+                }
                 if (rc > 0)
                     return;
             }
+            jumbo_wan_diag_once(1u << 5, "lan_forward_queued");
             return;
         }
     }

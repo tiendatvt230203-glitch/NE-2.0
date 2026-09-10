@@ -7,6 +7,7 @@
 #include "../../../inc/crypto/eth_parse.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -27,6 +28,38 @@
 
 static const uint8_t jumbo_magic[3] = { 0x4au, 0x4du, 0x42u }; /* JMB */
 static atomic_uint_fast32_t jumbo_packet_clock = ATOMIC_VAR_INIT(1u);
+static atomic_uint jumbo_rx_diag_mask = ATOMIC_VAR_INIT(0u);
+
+enum jumbo_rx_diag_bit {
+    JUMBO_DIAG_WIRE_SEEN       = 1u << 0,
+    JUMBO_DIAG_LINEARIZE_FAIL  = 1u << 1,
+    JUMBO_DIAG_WIRE_INVALID    = 1u << 2,
+    JUMBO_DIAG_WORKER_MISMATCH = 1u << 3,
+    JUMBO_DIAG_CRYPTO_CTX      = 1u << 4,
+    JUMBO_DIAG_DECRYPT_FAIL    = 1u << 5,
+    JUMBO_DIAG_SHIM_INVALID    = 1u << 6,
+    JUMBO_DIAG_TABLE_ALLOC     = 1u << 7,
+    JUMBO_DIAG_META_MISMATCH   = 1u << 8,
+    JUMBO_DIAG_DUPLICATE       = 1u << 9,
+    JUMBO_DIAG_COMPLETE        = 1u << 10,
+    JUMBO_DIAG_ENTRY_EVICTED   = 1u << 11,
+    JUMBO_DIAG_TIMEOUT         = 1u << 12,
+};
+
+static void jumbo_rx_diag_once(unsigned int bit, const char *reason,
+                               int worker, int wire_worker, int wan_idx,
+                               uint32_t length)
+{
+    unsigned int old = atomic_fetch_or_explicit(&jumbo_rx_diag_mask, bit,
+                                                 memory_order_relaxed);
+
+    if ((old & bit) != 0)
+        return;
+    fprintf(stderr,
+            "[JUMBO-RX] %s worker=%d wire_worker=%d wan=%d len=%u\n",
+            reason, worker, wire_worker, wan_idx, length);
+    fflush(stderr);
+}
 
 _Static_assert(JUMBO_WIRE_MAX <= NE_FRAME_DATA_MAX,
                "jumbo wire fragment must fit one XDP data area");
@@ -445,6 +478,8 @@ static struct jumbo_reasm_entry *entry_find(struct forwarder *fwd,
         if (!victim || entry->timestamp_ns < victim->timestamp_ns)
             victim = entry;
     }
+    jumbo_rx_diag_once(JUMBO_DIAG_ENTRY_EVICTED,
+                       "reassembly_entry_evicted", -1, -1, -1, 0);
     entry_release(fwd, victim);
     (void)now;
     return victim;
@@ -465,7 +500,7 @@ int dp_jumbo_receive(struct forwarder *fwd, int worker_idx,
     uint16_t total_len, offset, payload_len;
     uint8_t index, count;
     uint8_t policy;
-    uint8_t wire_worker;
+    uint8_t wire_worker = 0xffu;
     int kind;
     int plain_len = 0;
     uint64_t now = jumbo_now_ns();
@@ -473,34 +508,61 @@ int dp_jumbo_receive(struct forwarder *fwd, int worker_idx,
     if (!fwd || !wire_packet || !plain_packet || !wire_policy_id ||
         !encrypted || worker_idx < 0 || worker_idx >= (int)NE_CRYPTO_WORKERS)
         return DP_JUMBO_RX_DROP;
-    if (packet_linearize_wire(fwd, wire_packet) != 0)
+    if (packet_linearize_wire(fwd, wire_packet) != 0) {
+        jumbo_rx_diag_once(JUMBO_DIAG_LINEARIZE_FAIL, "linearize_failed",
+                           worker_idx, -1, wire_packet->wan_idx,
+                           wire_packet->len);
         return DP_JUMBO_RX_DROP;
+    }
     wire = ne_packet_data(&fwd->pair, wire_packet->addr);
     kind = dp_jumbo_wire_kind(wire, wire_packet->len);
-    if (!kind || dp_jumbo_wire_policy(wire, wire_packet->len, &policy) != 0)
+    if (!kind || dp_jumbo_wire_policy(wire, wire_packet->len, &policy) != 0) {
+        jumbo_rx_diag_once(JUMBO_DIAG_WIRE_INVALID, "wire_invalid",
+                           worker_idx, -1, wire_packet->wan_idx,
+                           wire_packet->len);
         return DP_JUMBO_RX_DROP;
+    }
     if (dp_jumbo_wire_worker(wire, wire_packet->len, &wire_worker) != 0 ||
-        wire_worker != (uint8_t)worker_idx)
+        wire_worker != (uint8_t)worker_idx) {
+        jumbo_rx_diag_once(JUMBO_DIAG_WORKER_MISMATCH, "worker_mismatch",
+                           worker_idx, wire_worker, wire_packet->wan_idx,
+                           wire_packet->len);
         return DP_JUMBO_RX_DROP;
+    }
+    jumbo_rx_diag_once(JUMBO_DIAG_WIRE_SEEN, "wire_seen",
+                       worker_idx, wire_worker, wire_packet->wan_idx,
+                       wire_packet->len);
 
     if (kind == 2) {
         uint8_t nonce[JUMBO_NONCE_LEN];
 
-        if (!crypto_ctx || !crypto_ctx->initialized)
+        if (!crypto_ctx || !crypto_ctx->initialized) {
+            jumbo_rx_diag_once(JUMBO_DIAG_CRYPTO_CTX, "crypto_ctx_missing",
+                               worker_idx, wire_worker, wire_packet->wan_idx,
+                               wire_packet->len);
             return DP_JUMBO_RX_DROP;
+        }
         memcpy(nonce, wire + 16, sizeof(nonce));
         if (packet_crypto_decrypt(crypto_ctx, nonce, wire + JUMBO_ENC_START,
                                   (int)(wire_packet->len - JUMBO_ENC_START),
                                   &plain_len) != 0 ||
-            plain_len < (int)JUMBO_SHIM_LEN)
+            plain_len < (int)JUMBO_SHIM_LEN) {
+            jumbo_rx_diag_once(JUMBO_DIAG_DECRYPT_FAIL, "decrypt_failed",
+                               worker_idx, wire_worker, wire_packet->wan_idx,
+                               wire_packet->len);
             return DP_JUMBO_RX_DROP;
+        }
         shim = wire + JUMBO_ENC_START;
         payload = shim + JUMBO_SHIM_LEN;
         if (jumbo_read_shim(shim, (uint32_t)plain_len, &packet_id,
                             &total_len, &offset, &payload_len,
                             &index, &count) != 0 ||
-            payload_len != (uint16_t)(plain_len - (int)JUMBO_SHIM_LEN))
+            payload_len != (uint16_t)(plain_len - (int)JUMBO_SHIM_LEN)) {
+            jumbo_rx_diag_once(JUMBO_DIAG_SHIM_INVALID, "shim_invalid",
+                               worker_idx, wire_worker, wire_packet->wan_idx,
+                               wire_packet->len);
             return DP_JUMBO_RX_DROP;
+        }
     } else {
         shim = wire + JUMBO_BYPASS_SHIM_OFF;
         payload = wire + JUMBO_BYPASS_PAYLOAD_OFF;
@@ -508,15 +570,23 @@ int dp_jumbo_receive(struct forwarder *fwd, int worker_idx,
                             wire_packet->len - JUMBO_BYPASS_SHIM_OFF,
                             &packet_id, &total_len, &offset, &payload_len,
                             &index, &count) != 0 ||
-            payload_len != wire_packet->len - JUMBO_BYPASS_PAYLOAD_OFF)
+            payload_len != wire_packet->len - JUMBO_BYPASS_PAYLOAD_OFF) {
+            jumbo_rx_diag_once(JUMBO_DIAG_SHIM_INVALID, "shim_invalid",
+                               worker_idx, wire_worker, wire_packet->wan_idx,
+                               wire_packet->len);
             return DP_JUMBO_RX_DROP;
+        }
     }
 
     table = jumbo_tables[worker_idx];
     if (!table) {
         table = calloc(1, sizeof(*table));
-        if (!table)
+        if (!table) {
+            jumbo_rx_diag_once(JUMBO_DIAG_TABLE_ALLOC, "table_alloc_failed",
+                               worker_idx, wire_worker, wire_packet->wan_idx,
+                               wire_packet->len);
             return DP_JUMBO_RX_DROP;
+        }
         jumbo_tables[worker_idx] = table;
     }
     entry = entry_find(fwd, table, packet_id, wire + 6, policy,
@@ -533,11 +603,18 @@ int dp_jumbo_receive(struct forwarder *fwd, int worker_idx,
         memcpy(entry->source_mac, wire + 6, 6);
     } else if (entry->total_len != total_len ||
                entry->fragment_count != count) {
+        jumbo_rx_diag_once(JUMBO_DIAG_META_MISMATCH, "fragment_meta_mismatch",
+                           worker_idx, wire_worker, wire_packet->wan_idx,
+                           wire_packet->len);
         entry_release(fwd, entry);
         return DP_JUMBO_RX_DROP;
     }
-    if (entry->got_mask & (1u << index))
+    if (entry->got_mask & (1u << index)) {
+        jumbo_rx_diag_once(JUMBO_DIAG_DUPLICATE, "duplicate_fragment",
+                           worker_idx, wire_worker, wire_packet->wan_idx,
+                           wire_packet->len);
         return DP_JUMBO_RX_DROP;
+    }
 
     memmove(wire, payload, payload_len);
     entry->addr[index] = wire_packet->addr;
@@ -582,6 +659,9 @@ int dp_jumbo_receive(struct forwarder *fwd, int worker_idx,
         *encrypted = entry->encrypted;
         memset(entry, 0, sizeof(*entry));
     }
+    jumbo_rx_diag_once(JUMBO_DIAG_COMPLETE, "reassembly_complete",
+                       worker_idx, wire_worker, wire_packet->wan_idx,
+                       plain_packet->total_len);
     return DP_JUMBO_RX_COMPLETE;
 }
 
@@ -600,8 +680,11 @@ void dp_jumbo_gc(struct forwarder *fwd, int worker_idx)
         struct jumbo_reasm_entry *entry =
             &table->entries[table->gc_cursor++ & (JUMBO_REASM_SLOTS - 1u)];
 
-        if (entry->valid && now - entry->timestamp_ns > JUMBO_REASM_TIMEOUT_NS)
+        if (entry->valid && now - entry->timestamp_ns > JUMBO_REASM_TIMEOUT_NS) {
+            jumbo_rx_diag_once(JUMBO_DIAG_TIMEOUT, "reassembly_timeout",
+                               worker_idx, -1, -1, 0);
             entry_release(fwd, entry);
+        }
     }
 }
 
