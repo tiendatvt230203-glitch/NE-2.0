@@ -46,12 +46,12 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
     if (proto == __constant_htons(ETH_P_CFM))
         return XDP_PASS;
 
-    /* One-sided jumbo debug: plain ARP stays entirely in the kernel bridge. */
+    /* Plain and encrypted ARP belong to the userspace ARP bridge. */
     if (proto == __constant_htons(ETH_P_ARP))
-        return XDP_PASS;
+        goto redirect;
 
     if (proto == __constant_htons(ETH_P_NE_ARP_ENC))
-        return XDP_PASS;
+        goto redirect;
 
     if (proto == __constant_htons(ETH_P_NE_UDP_ENC)) {
         goto redirect;
