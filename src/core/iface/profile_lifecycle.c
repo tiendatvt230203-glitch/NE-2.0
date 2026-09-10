@@ -89,6 +89,11 @@ void profile_iface_life_reconcile_counts(struct forwarder *fwd)
     fwd->pair.local_count = max_li;
     fwd->wan_count = max_di;
     fwd->pair.wan_count = max_di;
+
+    /* The WAN scheduler keeps its own dataplane bound.  Without refreshing
+     * it after a live attach, a newly added second WAN has a valid XSK and
+     * rings but is still rejected by fwd_wan_dp_ok_for_new_traffic(). */
+    fwd_wan_refresh_active(fwd);
 }
 
 void profile_iface_life_attach_rollback(struct forwarder *fwd,

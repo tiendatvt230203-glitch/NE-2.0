@@ -591,8 +591,13 @@ int fwd_wan_pick_for_local(struct forwarder *fwd, int profile_idx, int flow_ok,
 {
     if (!fwd || fwd->wan_count <= 0)
         return -1;
+    /* Jumbo scheduling must always be attached to a parsed connection key.
+     * Falling back to the global per-packet scheduler would mix unrelated
+     * connections and break the 1024-original-packet window. */
+    if (jumbo_packet && !flow_ok)
+        return -1;
     if (profile_idx < 0 || profile_idx >= fwd->cfg->profile_count)
-        return pick_least_loaded_wan(fwd, profile_idx, 0);
+        return jumbo_packet ? -1 : pick_least_loaded_wan(fwd, profile_idx, 0);
 
     struct profile_config *p = &fwd->cfg->profiles[profile_idx];
     int allowed_wans[MAX_INTERFACES];
@@ -600,7 +605,7 @@ int fwd_wan_pick_for_local(struct forwarder *fwd, int profile_idx, int flow_ok,
     int pool_n = fwd_wan_build_profile_pool(fwd, p, allowed_wans, allowed_weights,
                                             MAX_INTERFACES);
     if (pool_n <= 0)
-        return pick_least_loaded_wan(fwd, profile_idx, 0);
+        return jumbo_packet ? -1 : pick_least_loaded_wan(fwd, profile_idx, 0);
 
     int wan_cfg = flow_ok
         ? flow_table_pick_wan_per_flow_packet(src_ip, dst_ip, src_port, dst_port, proto,
@@ -608,13 +613,20 @@ int fwd_wan_pick_for_local(struct forwarder *fwd, int profile_idx, int flow_ok,
                                               jumbo_packet)
         : flow_table_pick_wan_per_packet(allowed_wans, allowed_weights, pool_n);
     if (wan_cfg < 0)
-        return pick_least_loaded_wan(fwd, profile_idx, 0);
+        return jumbo_packet ? -1 : pick_least_loaded_wan(fwd, profile_idx, 0);
 
     int dp = fwd_wan_live_dp_for_cfg(fwd, wan_cfg);
     if (dp < 0)
         dp = fwd_wan_dp_for_legacy_cfg(fwd, wan_cfg);
     if (dp < 0 || dp >= fwd->wan_count || !fwd_wan_dp_ok_for_new_traffic(dp))
-        return pick_least_loaded_wan(fwd, profile_idx, 0);
+        return jumbo_packet ? -1 : pick_least_loaded_wan(fwd, profile_idx, 0);
+
+    /* All fragments of one original jumbo packet, and all original packets
+     * inside its per-connection window, stay on this selected WAN. If its TX
+     * ring is temporarily full, the caller drops without advancing the
+     * window instead of silently moving this packet to another WAN. */
+    if (jumbo_packet)
+        return dp;
 
     /* Do not drop only because the scheduled WAN ring is full while another
      * eligible WAN still has room.  The smooth state advances as if selected,

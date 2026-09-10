@@ -16,11 +16,15 @@ struct flow_swrr_state {
     struct flow_key key;
     int wans[MAX_INTERFACES];
     int64_t current[MAX_INTERFACES];
+    int64_t jumbo_current[MAX_INTERFACES];
     uint64_t stamp;
     int selected_wan;
+    int jumbo_selected_wan;
     uint16_t packet_count;
+    uint16_t jumbo_packet_count;
     uint8_t wan_count;
     uint8_t tie_start;
+    uint8_t jumbo_tie_start;
     uint8_t valid;
 };
 
@@ -107,19 +111,21 @@ static void flow_swrr_reset(struct flow_swrr_state *state,
         state->wans[i] = allowed_wans[i];
     state->wan_count = (uint8_t)allowed_count;
     state->tie_start = (uint8_t)(allowed_count > 0 ? hash % (uint32_t)allowed_count : 0u);
+    state->jumbo_tie_start = state->tie_start;
     state->valid = 1;
 }
 
-static int flow_swrr_pick(struct flow_swrr_state *state,
-                          const int *allowed_wans,
-                          const int *allowed_weights,
-                          int allowed_count)
+static int flow_swrr_pick_cursor(int64_t current[MAX_INTERFACES],
+                                 uint8_t *tie_start,
+                                 const int *allowed_wans,
+                                 const int *allowed_weights,
+                                 int allowed_count)
 {
     int best = -1;
     int64_t best_current = INT64_MIN;
     int64_t total = 0;
 
-    if (!state || !allowed_wans || allowed_count <= 0)
+    if (!current || !tie_start || !allowed_wans || allowed_count <= 0)
         return 0;
     if (allowed_count == 1)
         return allowed_wans[0];
@@ -129,28 +135,40 @@ static int flow_swrr_pick(struct flow_swrr_state *state,
 
         if (weight <= 0)
             continue;
-        state->current[i] += weight;
+        current[i] += weight;
         total += weight;
     }
     if (total <= 0)
-        return allowed_wans[state->tie_start++ % allowed_count];
+        return allowed_wans[(*tie_start)++ % allowed_count];
 
     for (int off = 0; off < allowed_count; off++) {
-        int i = (state->tie_start + off) % allowed_count;
+        int i = (*tie_start + off) % allowed_count;
         int weight = allowed_weights ? allowed_weights[i] : 1;
 
         if (weight <= 0)
             continue;
-        if (best < 0 || state->current[i] > best_current) {
+        if (best < 0 || current[i] > best_current) {
             best = i;
-            best_current = state->current[i];
+            best_current = current[i];
         }
     }
     if (best < 0)
         best = 0;
-    state->current[best] -= total;
-    state->tie_start = (uint8_t)((best + 1) % allowed_count);
+    current[best] -= total;
+    *tie_start = (uint8_t)((best + 1) % allowed_count);
     return allowed_wans[best];
+}
+
+static int flow_swrr_pick(struct flow_swrr_state *state,
+                          const int *allowed_wans,
+                          const int *allowed_weights,
+                          int allowed_count)
+{
+    if (!state)
+        return 0;
+    return flow_swrr_pick_cursor(state->current, &state->tie_start,
+                                 allowed_wans, allowed_weights,
+                                 allowed_count);
 }
 
 static int flow_window_wan(struct flow_swrr_state *state,
@@ -163,6 +181,18 @@ static int flow_window_wan(struct flow_swrr_state *state,
                                              allowed_weights,
                                              allowed_count);
     return state->selected_wan;
+}
+
+static int flow_jumbo_window_wan(struct flow_swrr_state *state,
+                                 const int *allowed_wans,
+                                 const int *allowed_weights,
+                                 int allowed_count)
+{
+    if (state->jumbo_packet_count == 0)
+        state->jumbo_selected_wan = flow_swrr_pick_cursor(
+            state->jumbo_current, &state->jumbo_tie_start,
+            allowed_wans, allowed_weights, allowed_count);
+    return state->jumbo_selected_wan;
 }
 
 static void flow_window_advance(struct flow_swrr_state *state,
@@ -245,8 +275,8 @@ int flow_table_pick_wan_per_flow_packet(uint32_t src_ip, uint32_t dst_ip,
 
     if (jumbo_packet) {
         g_pending_jumbo_state = state;
-        return flow_window_wan(state, allowed_wans, allowed_weights,
-                               allowed_count);
+        return flow_jumbo_window_wan(state, allowed_wans, allowed_weights,
+                                     allowed_count);
     }
 
     if (protocol == IPPROTO_TCP) {
@@ -280,6 +310,9 @@ void flow_table_jumbo_packet_complete(int sent)
     struct flow_swrr_state *state = g_pending_jumbo_state;
 
     g_pending_jumbo_state = NULL;
-    if (sent)
-        flow_window_advance(state, FLOW_JUMBO_PACKET_WINDOW);
+    if (!sent || !state)
+        return;
+    state->jumbo_packet_count++;
+    if (state->jumbo_packet_count >= FLOW_JUMBO_PACKET_WINDOW)
+        state->jumbo_packet_count = 0;
 }
