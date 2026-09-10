@@ -2,6 +2,7 @@
 #define INTERFACE_H
 
 #include "core/util/config.h"
+#include "core/iface/mtu_mode.h"
 #include <linux/if_link.h>
 #include <net/if.h>
 #include <pthread.h>
@@ -11,15 +12,18 @@
 
 #define MAX_QUEUES     64
 
-#define NE_RING        16384u
-#define NE_FRAME       4096u
+#define NE_RING          16384u
+#define NE_FRAME_1500     2048u
+#define NE_FRAME_9000     4096u
+#define NE_FRAME_MAX      NE_FRAME_9000
+#define NE_N_FRAMES_1500  1048576u
+#define NE_N_FRAMES_9000   524288u
+#define NE_BATCH_SIZE       64u
+
 /* XDP keeps 256 bytes before packet data inside each UMEM chunk. Therefore a
- * 4 KiB chunk can carry at most 3840 bytes as one non-SG wire frame. */
+ * 4 KiB jumbo chunk can carry at most 3840 bytes as one non-SG wire frame. */
 #define NE_XDP_PACKET_HEADROOM 256u
-#define NE_FRAME_DATA_MAX (NE_FRAME - NE_XDP_PACKET_HEADROOM)
-/* Keep the shared UMEM footprint at 2 GiB with 4 KiB frames. */
-#define NE_N_FRAMES    524288u
-#define NE_BATCH_SIZE   64u
+#define NE_FRAME_DATA_MAX_9000 (NE_FRAME_9000 - NE_XDP_PACKET_HEADROOM)
 
 /* NIC RX-fragment boundaries are independent of the 4 KiB UMEM frame size.
  * Keep enough descriptor slots for an MTU-9000 packet on drivers that expose
@@ -133,6 +137,7 @@ struct ne_pair {
     uint8_t local_live[MAX_INTERFACES];
     uint8_t wan_live[MAX_INTERFACES];
     uint32_t xdp_flags;
+    enum ne_mtu_mode mtu_mode;
 };
 
 int ne_pair_local_live(const struct ne_pair *p, int pair_local_idx);
@@ -159,7 +164,8 @@ uint32_t ne_ring_try_pop_batch(struct ne_ring *r, struct ne_packet *pkts,
                                uint32_t max_n);
 uint32_t ne_ring_count(const struct ne_ring *r);
 
-int ne_pair_open(struct ne_pair *p, const struct app_config *cfg);
+int ne_pair_open(struct ne_pair *p, const struct app_config *cfg,
+                 enum ne_mtu_mode mtu_mode);
 void ne_pair_close(struct ne_pair *p, const struct app_config *cfg);
 void ne_pair_delete_local_xsks(struct ne_pair *p, int pair_li);
 void ne_pair_delete_wan_xsks(struct ne_pair *p, int dp_slot);

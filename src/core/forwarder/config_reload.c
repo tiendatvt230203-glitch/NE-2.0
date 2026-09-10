@@ -72,9 +72,18 @@ int forwarder_same_topology(const struct app_config *a, const struct app_config 
 
 static int forwarder_reload_config_impl(struct forwarder *fwd, struct app_config *cfg)
 {
+    char mtu_error[256];
+
     if (forwarder_should_stop())
         return -1;
     const struct app_config *old_cfg = fwd->cfg;
+
+    if (ne_mtu_mode_validate(cfg, fwd->mtu_mode,
+                             mtu_error, sizeof(mtu_error)) != 0) {
+        fprintf(stderr, "[MTU-MODE] reload rejected: %s\n", mtu_error);
+        fflush(stderr);
+        return -1;
+    }
 
     fwd_wan_configure_live_drains(fwd, old_cfg, cfg);
     if (profile_iface_xdp_sync_wan_live(fwd, cfg, old_cfg) != 0)

@@ -11,12 +11,14 @@ KERNEL_HEADERS = /usr/include
 LIB_DIR = lib
 TARGET  = network-encryptor
 
-OPT_SRCS = $(wildcard src/crypto/options/common/*.c)
+OPT_SRCS = $(wildcard src/crypto/options/common/*.c) \
+           $(wildcard src/crypto/options/mtu1500/*.c)
 
 PQC_SRCS = $(wildcard src/crypto/pqc/*.c)
 
 CORE_SRCS = $(wildcard src/core/forwarder/*.c) \
             $(wildcard src/core/dataplane/*.c) \
+            $(wildcard src/core/dataplane/mtu1500/*.c) \
             $(wildcard src/core/iface/*.c) \
             $(wildcard src/core/flow/*.c) \
             $(wildcard src/core/failover/*.c) \
@@ -38,8 +40,10 @@ DB_SRC = src/db/config.c \
          src/db/vault.c
 DB_OBJ = $(DB_SRC:.c=.o)
 
-BPF_OBJ = $(LIB_DIR)/lan.o \
-          $(LIB_DIR)/wan.o
+BPF_OBJ = $(LIB_DIR)/lan_1500.o \
+          $(LIB_DIR)/wan_1500.o \
+          $(LIB_DIR)/lan_9000.o \
+          $(LIB_DIR)/wan_9000.o
 
 .PHONY: all clean dirs
 
@@ -52,10 +56,21 @@ $(TARGET): $(APP_OBJ) $(DB_OBJ)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 
-$(LIB_DIR)/%.o: bpf/%.c
+$(LIB_DIR)/lan_1500.o: bpf/lan_1500.c bpf/common/lan_redirect.h
+	$(CLANG) $(BPF_CFLAGS) -I$(KERNEL_HEADERS) -I./include -c $< -o $@
+
+$(LIB_DIR)/wan_1500.o: bpf/wan_1500.c bpf/common/wan_redirect.h
+	$(CLANG) $(BPF_CFLAGS) -I$(KERNEL_HEADERS) -I./include -c $< -o $@
+
+$(LIB_DIR)/lan_9000.o: bpf/lan_9000.c bpf/common/lan_redirect.h
+	$(CLANG) $(BPF_CFLAGS) -I$(KERNEL_HEADERS) -I./include -c $< -o $@
+
+$(LIB_DIR)/wan_9000.o: bpf/wan_9000.c bpf/common/wan_redirect.h
 	$(CLANG) $(BPF_CFLAGS) -I$(KERNEL_HEADERS) -I./include -c $< -o $@
 
 clean:
 	rm -rf network-encryptor src/*.o src/core/*/*.o src/crypto/common/*.o \
+		src/core/dataplane/mtu1500/*.o \
 		src/crypto/options/*.o src/crypto/options/common/*.o \
-		src/crypto/pqc/*.o src/db/*.o *.o $(BPF_OBJ)
+		src/crypto/options/mtu1500/*.o \
+		src/crypto/pqc/*.o src/db/*.o *.o $(BPF_OBJ) lib/lan.o lib/wan.o

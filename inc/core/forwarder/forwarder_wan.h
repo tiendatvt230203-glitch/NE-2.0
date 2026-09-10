@@ -3,6 +3,7 @@
 
 #include "core/util/config.h"
 #include "core/forwarder/forwarder.h"
+#include "core/flow/flow_table.h"
 
 void fwd_wan_reset_on_init(struct forwarder *fwd);
 
@@ -34,6 +35,7 @@ int fwd_wan_live_dp_for_cfg(struct forwarder *fwd, int cfg_wan);
 int fwd_wan_pick_for_local(struct forwarder *fwd, int profile_idx, int flow_ok,
                            uint32_t src_ip, uint32_t dst_ip,
                            uint16_t src_port, uint16_t dst_port,
-                           uint8_t proto, int jumbo_packet);
+                           uint8_t proto,
+                           enum flow_wan_window_class window_class);
 
 #endif

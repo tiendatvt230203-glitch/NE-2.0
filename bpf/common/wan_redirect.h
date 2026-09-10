@@ -1,9 +1,16 @@
+#ifndef NE_BPF_WAN_REDIRECT_H
+#define NE_BPF_WAN_REDIRECT_H
+
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <linux/icmp.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
+
+#ifndef NE_XDP_SECTION
+#error "NE_XDP_SECTION must be defined by the MTU-specific WAN entry"
+#endif
 
 struct {
     __uint(type, BPF_MAP_TYPE_XSKMAP);
@@ -30,7 +37,7 @@ struct {
 
 #define NE_JUMBO_BYPASS_MAGIC_OFF 16
 
-SEC("xdp.frags")
+SEC(NE_XDP_SECTION)
 int xdp_wan_redirect_prog(struct xdp_md *ctx)
 {
     void *data = (void *)(long)ctx->data;
@@ -102,3 +109,5 @@ redirect:
 }
 
 char _license[] SEC("license") = "GPL";
+
+#endif

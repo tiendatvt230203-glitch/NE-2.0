@@ -4,12 +4,14 @@
 #include "../../../inc/core/forwarder/forwarder_crypto_runtime.h"
 
 #include "../../../inc/crypto/crypto_option.h"
+#include "../../../inc/crypto/mtu1500_udp_option.h"
 #include "../../../inc/crypto/eth_parse.h"
 #include "../../../inc/crypto/packet_crypto.h"
 #include "../../../inc/crypto/pqc_handshake.h"
 #include "../../../inc/core/dataplane/crypto_route.h"
 #include "../../../inc/core/dataplane/arp_bridge.h"
 #include "../../../inc/core/dataplane/jumbo_l2.h"
+#include "../../../inc/core/dataplane/mtu1500/tcp_mss.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
 #include "../../../inc/core/flow/flow_table.h"
 
@@ -28,17 +30,24 @@ static int push_to_wan(struct forwarder *fwd, struct ne_packet *job, int wan_dp)
     return dp_ring_push(fwd, &fwd->mid_to_wan[wan_dp][ri], job);
 }
 
-static void complete_packet_window_after_enqueue(uint8_t proto,
-                                                 int jumbo_packet,
-                                                 int enqueue_ok)
+static void complete_packet_window_after_enqueue(
+    enum flow_wan_window_class window_class, int enqueue_ok)
 {
-    if (jumbo_packet) {
-        flow_table_jumbo_packet_complete(enqueue_ok);
-        return;
-    }
-    /* TCP advances when its WAN is selected. UDP waits for TX enqueue. */
+    /* MTU1500 TCP advances during selection. MTU1500 UDP and every MTU9000
+     * packet advance once only after the complete original packet is queued. */
+    flow_table_packet_complete(window_class, enqueue_ok);
+}
+
+static enum flow_wan_window_class flow_window_class_for_packet(
+    const struct forwarder *fwd, uint8_t proto)
+{
+    if (fwd && fwd->mtu_mode == NE_MTU_MODE_9000)
+        return FLOW_WAN_WINDOW_MTU9000;
+    if (proto == IPPROTO_TCP)
+        return FLOW_WAN_WINDOW_MTU1500_TCP;
     if (proto == IPPROTO_UDP)
-        flow_table_udp_packet_complete(enqueue_ok);
+        return FLOW_WAN_WINDOW_MTU1500_UDP;
+    return FLOW_WAN_WINDOW_MTU1500_OTHER;
 }
 
 static void free_wire_fragments(struct forwarder *fwd,
@@ -109,20 +118,26 @@ static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
     uint8_t *tail_buf = NULL;
     uint32_t len = job->len;
     uint32_t l1 = 0, l2 = 0;
-    crypto_option_id opt_id = CRYPTO_OPT_L2_PQC;
+    crypto_option_id opt_id = pclass == CRYPTO_PROTO_UDP
+        ? CRYPTO_OPT_L2_PQC_UDP_1500
+        : (pclass == CRYPTO_PROTO_ICMP
+           ? CRYPTO_OPT_L2_PQC_ICMP_1500 : CRYPTO_OPT_L2_PQC);
     uint32_t udp_seq;
 
     (void)flow_ok;
     (void)cp;
 
+    if ((pclass == CRYPTO_PROTO_UDP || pclass == CRYPTO_PROTO_ICMP) &&
+        fwd->mtu_mode != NE_MTU_MODE_1500)
+        return -1;
+
     if (pclass == CRYPTO_PROTO_UDP) {
         if (!flow_ok || dp_udp_next_tx_seq(pkt, len, &udp_seq) != 0)
             return -1;
-        crypto_option_udp_set_tx_seq(udp_seq);
+        crypto_mtu1500_udp_set_tx_seq(udp_seq);
     }
 
-    if (!crypto_option_is_jumbo_mode() &&
-        crypto_option_need_split(opt_id, pclass, len)) {
+    if (crypto_option_need_split(opt_id, pclass, len)) {
         if (split_tail_take(fwd, worker_idx, &tail.addr) != 0)
             return -1;
         tail_buf = ne_packet_data(&fwd->pair, tail.addr);
@@ -222,6 +237,8 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     struct packet_crypto_ctx *pctx;
     int enc;
     int jumbo_packet = 0;
+    enum flow_wan_window_class window_class =
+        FLOW_WAN_WINDOW_MTU1500_OTHER;
 
     if (!fwd || !pkt)
         goto drop;
@@ -238,11 +255,12 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     if (pick_profile_policy(fwd, li, flow_ok, src_ip, dst_ip, src_port, dst_port, proto,
                             &profile_idx, &cp) != 0)
         goto drop;
-    jumbo_packet = crypto_option_is_jumbo_mode() &&
+    jumbo_packet = ne_mtu_mode_is_jumbo(fwd->mtu_mode) &&
         dp_jumbo_packet_needs_wire_split(&job,
                                          cp->action == POLICY_ACTION_ENCRYPT_L2);
+    window_class = flow_window_class_for_packet(fwd, proto);
     wan_dp = fwd_wan_pick_for_local(fwd, profile_idx, flow_ok, src_ip, dst_ip,
-                                    src_port, dst_port, proto, jumbo_packet);
+                                    src_port, dst_port, proto, window_class);
     if (wan_dp < 0 || !fwd_wan_has_tx_room(fwd,wan_dp))
         goto drop;
 
@@ -264,23 +282,19 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
                 goto drop;
             }
             ne_packet_free(&fwd->pair, &job);
-            complete_packet_window_after_enqueue(proto, 1, 1);
+            complete_packet_window_after_enqueue(window_class, 1);
             return;
         }
 
         sent = push_to_wan(fwd, &job, wan_dp) == 0;
-        complete_packet_window_after_enqueue(proto, 0, sent);
+        complete_packet_window_after_enqueue(window_class, sent);
         return;
     }
     if (!fwd->cfg->crypto_enabled)
         goto drop;
 
-    if (!crypto_option_is_jumbo_mode() && proto == IPPROTO_TCP &&
-        (tcp_flags & 0x02u)) {
-        (void)crypto_tcp_clamp_mss_l3(pkt, job.len, l3_off,
-                                      crypto_option_get_mtu(),
-                                      crypto_option_wire_overhead(CRYPTO_OPT_L2_PQC));
-    }
+    if (proto == IPPROTO_TCP && (tcp_flags & 0x02u))
+        (void)dp_mtu1500_tcp_clamp_mss(fwd, pkt, job.len, l3_off);
 
     pi = (int)(cp - fwd->cfg->policies);
     if (pi < 0 || pi >= MAX_CRYPTO_POLICIES || !fwd_crypto_policy_ready(pi))
@@ -303,10 +317,10 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
             goto drop;
         }
         ne_packet_free(&fwd->pair, &job);
-        complete_packet_window_after_enqueue(proto, 1, 1);
+        complete_packet_window_after_enqueue(window_class, 1);
         return;
     }
-    if (crypto_option_is_jumbo_mode() || proto == IPPROTO_TCP) {
+    if (ne_mtu_mode_is_jumbo(fwd->mtu_mode) || proto == IPPROTO_TCP) {
         uint32_t len = job.len;
 
         /* Jumbo mode has one L2-PQC format for every IPv4 protocol. It never
@@ -322,17 +336,17 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     if (enc < 0)
         goto drop;
     if (enc > 0) {
-        complete_packet_window_after_enqueue(proto, 0, 1);
+        complete_packet_window_after_enqueue(window_class, 1);
         return;
     }
     {
         int sent = push_to_wan(fwd, &job, wan_dp) == 0;
 
-        complete_packet_window_after_enqueue(proto, 0, sent);
+        complete_packet_window_after_enqueue(window_class, sent);
     }
     return;
 
 drop:
-    complete_packet_window_after_enqueue(proto, jumbo_packet, 0);
+    complete_packet_window_after_enqueue(window_class, 0);
     ne_packet_free(&fwd->pair, &job);
 }

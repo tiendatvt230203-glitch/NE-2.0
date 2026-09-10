@@ -280,40 +280,41 @@ static int pick_least_loaded_wan(struct forwarder *fwd, int profile_idx, int sel
 int fwd_wan_pick_for_local(struct forwarder *fwd, int profile_idx, int flow_ok,
                            uint32_t src_ip, uint32_t dst_ip,
                            uint16_t src_port, uint16_t dst_port,
-                           uint8_t proto, int jumbo_packet)
+                           uint8_t proto,
+                           enum flow_wan_window_class window_class)
 {
+    int strict_window = window_class == FLOW_WAN_WINDOW_MTU9000;
+
     if (!fwd || fwd->wan_count <= 0)
         return -1;
-    /* Jumbo scheduling must always be attached to a parsed connection key.
-     * Falling back to the global per-packet scheduler would mix unrelated
-     * connections and break the 1024-original-packet window. */
-    if (jumbo_packet && !flow_ok)
+    /* MTU9000 scheduling must always be attached to a parsed connection key.
+     * Falling back to the global scheduler would mix unrelated connections
+     * and break the 1024-original-packet window. */
+    if (strict_window && !flow_ok)
         return -1;
     if (profile_idx < 0 || profile_idx >= fwd->cfg->profile_count)
-        return jumbo_packet ? -1 : pick_least_loaded_wan(fwd, profile_idx, 0);
+        return strict_window ? -1 : pick_least_loaded_wan(fwd, profile_idx, 0);
 
     struct profile_config *p = &fwd->cfg->profiles[profile_idx];
     int allowed_wans[MAX_INTERFACES];
     int pool_n = fwd_wan_build_profile_pool(fwd, p, allowed_wans, MAX_INTERFACES);
     if (pool_n <= 0)
-        return jumbo_packet ? -1 : pick_least_loaded_wan(fwd, profile_idx, 0);
+        return strict_window ? -1 : pick_least_loaded_wan(fwd, profile_idx, 0);
 
     int wan_cfg = flow_ok
         ? flow_table_pick_wan_per_flow_packet(src_ip, dst_ip, src_port, dst_port, proto,
-                                              allowed_wans, pool_n, jumbo_packet)
+                                              allowed_wans, pool_n, window_class)
         : flow_table_pick_wan_per_packet(allowed_wans, pool_n);
     if (wan_cfg < 0)
-        return jumbo_packet ? -1 : pick_least_loaded_wan(fwd, profile_idx, 0);
+        return strict_window ? -1 : pick_least_loaded_wan(fwd, profile_idx, 0);
 
     int dp = fwd_wan_live_dp_for_cfg(fwd, wan_cfg);
     if (dp < 0 || dp >= fwd->wan_count || !fwd_wan_dp_ok_for_new_traffic(dp))
-        return jumbo_packet ? -1 : pick_least_loaded_wan(fwd, profile_idx, 0);
+        return strict_window ? -1 : pick_least_loaded_wan(fwd, profile_idx, 0);
 
-    /* All fragments of one original jumbo packet, and all original packets
-     * inside its per-connection window, stay on this selected WAN. If its TX
-     * ring is temporarily full, the caller drops without advancing the
-     * window instead of silently moving this packet to another WAN. */
-    if (jumbo_packet)
+    /* Every original MTU9000 packet, including all of its wire fragments,
+     * stays on the selected WAN for the full per-connection window. */
+    if (strict_window)
         return dp;
 
     /* If the equal-share WAN ring is temporarily full, use another eligible

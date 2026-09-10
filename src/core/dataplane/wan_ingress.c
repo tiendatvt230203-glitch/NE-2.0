@@ -4,6 +4,7 @@
 
 #include "../../../inc/crypto/eth_parse.h"
 #include "../../../inc/crypto/crypto_option.h"
+#include "../../../inc/crypto/mtu1500_udp_option.h"
 #include "../../../inc/crypto/packet_crypto.h"
 
 #include "../../../inc/core/dataplane/crypto_route.h"
@@ -11,7 +12,7 @@
 #include "../../../inc/core/flow/mac_learn.h"
 #include "../../../inc/core/dataplane/arp_bridge.h"
 #include "../../../inc/core/dataplane/jumbo_l2.h"
-#include "../../../inc/core/dataplane/udp_reorder.h"
+#include "../../../inc/core/dataplane/mtu1500/udp_reorder.h"
 
 #include <netinet/in.h>
 #include <stdatomic.h>
@@ -30,34 +31,6 @@ static void jumbo_wan_diag_once(unsigned int bit, const char *message)
         return;
     fprintf(stderr, "[JUMBO-RX] %s\n", message);
     fflush(stderr);
-}
-
-/* UDP bonding format. Wire after nonce:
- *   [0x5B 'U' 'D' v1][ciphertext(kind+epoch32+seq32+datagram_id32+
- *                                IPv4/fragment)||tag]
- * The four-byte marker makes this path unambiguous without copying a full
- * frame solely for rollback; sequence/kind remain authenticated ciphertext. */
-#define WAN_L2_UDP_MARKER_LEN  4u
-#define WAN_L2_UDP_SHIM_LEN    13u
-#define WAN_L2_GCM_TAG_LEN     16u
-static const uint8_t wan_l2_udp_marker[WAN_L2_UDP_MARKER_LEN] = {
-    0x5Bu, 0x55u, 0x44u, 0x01u
-};
-
-static int wan_l2_is_udp_tagged(const uint8_t *pkt, uint32_t len)
-{
-    int mark_off;
-
-    if (!pkt || !crypto_eth_l2_has_marker(pkt, len))
-        return 0;
-    mark_off = crypto_eth_l2_frag_magic_off(pkt, len, PACKET_CRYPTO_NONCE_BYTES);
-    if (mark_off < 0)
-        return 0;
-    if (len < (uint32_t)mark_off + WAN_L2_UDP_MARKER_LEN +
-        WAN_L2_UDP_SHIM_LEN + WAN_L2_GCM_TAG_LEN)
-        return 0;
-    return memcmp(pkt + mark_off, wan_l2_udp_marker,
-                  WAN_L2_UDP_MARKER_LEN) == 0;
 }
 
 static int wan_try_l2_pqc_icmp(struct forwarder *fwd, uint8_t *pkt,
@@ -100,8 +73,6 @@ static int wan_wire_is_encrypted(struct forwarder *fwd, const uint8_t *pkt, uint
         return jumbo_kind == 2;
     if (fwd_crypto_has_l2_marker(pkt, len) || crypto_eth_l2_has_marker(pkt, len))
         return 1;
-    if (wan_l2_is_udp_tagged(pkt, len))
-        return 1;
     return 0;
 }
 
@@ -140,7 +111,9 @@ static int reassemble_l2(struct forwarder *fwd, uint8_t *pkt, uint32_t *len,
     if (slot < 0)
         return -1;
     crypto_l2_pqc_reasm_set_addr(addr);
-    rr = crypto_option_reassemble(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_UDP, slot, dp_crypto_current_worker_idx(),
+    rr = crypto_option_reassemble(CRYPTO_OPT_L2_PQC_UDP_1500,
+                                  CRYPTO_PROTO_UDP, slot,
+                                  dp_crypto_current_worker_idx(),
                                   ctx, pkt, len, pkt, &blen);
     if (rr == 0) {
         *pending = crypto_l2_pqc_reasm_held() ? 2 : 1;
@@ -158,8 +131,13 @@ static int wan_try_l2_pqc_udp(struct forwarder *fwd, uint8_t *pkt, uint32_t *len
 {
     struct packet_crypto_ctx *ctx;
     uint8_t wire_pol = 0;
+    uint16_t fragment_id = 0;
+    uint8_t fragment_index = 0;
 
-    if (!wan_l2_is_udp_tagged(pkt, *len))
+    if (fwd->mtu_mode != NE_MTU_MODE_1500 ||
+        !crypto_option_is_fragment(CRYPTO_OPT_L2_PQC_UDP_1500,
+                                   CRYPTO_PROTO_UDP, fwd->cfg, pkt, *len,
+                                   &fragment_id, &fragment_index))
         return 0;
 
     if (crypto_eth_l2_read_policy_id(pkt, *len, &wire_pol) != 0)
@@ -171,15 +149,6 @@ static int wan_try_l2_pqc_udp(struct forwarder *fwd, uint8_t *pkt, uint32_t *len
     ctx = fwd_crypto_ctx_for_wire_id(wire_pol);
     if (!ctx)
         return 0;
-
-    if (crypto_option_is_jumbo_mode()) {
-        if (crypto_option_decrypt(CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_UDP,
-                                  ctx, pkt, len) != 0)
-            return -1;
-        if (pending)
-            *pending = 0;
-        return 1;
-    }
 
     if (reassemble_l2(fwd, pkt, len, wire_pol, addr, pending) != 0) {
         if (pending)
@@ -205,15 +174,21 @@ static int decrypt_wan(struct forwarder *fwd, struct ne_packet *job)
     if (!wan_wire_is_encrypted(fwd, pkt, len))
         return 0;
 
-    is_l2 = fwd_crypto_has_l2_marker(pkt, len) || wan_l2_is_udp_tagged(pkt, len);
+    is_l2 = fwd_crypto_has_l2_marker(pkt, len) ||
+        crypto_eth_l2_has_marker(pkt, len);
 
     {
-        int l2_fast = crypto_option_is_jumbo_mode() ? 0 :
-            wan_try_l2_pqc_icmp(fwd, pkt, &len, job->addr, &pending);
+        int l2_fast = 0;
 
-        if (l2_fast == 0)
-            l2_fast = wan_try_l2_pqc_udp(fwd, pkt, &len, job->addr,
-                                         &pending);
+        /* MTU 1500 owns the legacy UDP/ICMP split and reassembly formats.
+         * Jumbo mode uses only the generic 0x104A L2 format plus jumbo_l2. */
+        if (!ne_mtu_mode_is_jumbo(fwd->mtu_mode)) {
+            l2_fast = wan_try_l2_pqc_icmp(fwd, pkt, &len,
+                                          job->addr, &pending);
+            if (l2_fast == 0)
+                l2_fast = wan_try_l2_pqc_udp(fwd, pkt, &len,
+                                             job->addr, &pending);
+        }
 
         if (l2_fast < 0)
             return -1;
@@ -235,19 +210,18 @@ static int decrypt_wan(struct forwarder *fwd, struct ne_packet *job)
         if (l2_fast == 0) {
             uint32_t orig_len = len;
             uint8_t wire_pol = 0;
-            int need_backup = !crypto_option_is_jumbo_mode() &&
-                (wan_l2_is_udp_tagged(pkt, len) ||
-                 crypto_option_is_fragment(CRYPTO_OPT_L2_PQC,
-                                           CRYPTO_PROTO_UDP, fwd->cfg,
-                                           pkt, len, &pid, &fidx));
+            int need_backup = fwd->mtu_mode == NE_MTU_MODE_1500 &&
+                crypto_option_is_fragment(CRYPTO_OPT_L2_PQC_UDP_1500,
+                                          CRYPTO_PROTO_UDP, fwd->cfg,
+                                          pkt, len, &pid, &fidx);
             if (need_backup && orig_len <= sizeof(scratch))
                 memcpy(scratch, pkt, orig_len);
             if (decrypt_l2(fwd, pkt, &len) != 0 || !wan_l2_plain_ok(pkt, len)) {
                 if (need_backup)
                     memcpy(pkt, scratch, orig_len);
                 len = orig_len;
-                if (!crypto_option_is_jumbo_mode() &&
-                    crypto_option_is_fragment(CRYPTO_OPT_L2_PQC,
+                if (!ne_mtu_mode_is_jumbo(fwd->mtu_mode) &&
+                    crypto_option_is_fragment(CRYPTO_OPT_L2_PQC_UDP_1500,
                                               CRYPTO_PROTO_UDP, fwd->cfg,
                                               pkt, len, &pid, &fidx)) {
                     if (crypto_eth_l2_read_policy_id(pkt, len, &wire_pol) != 0)
@@ -523,23 +497,30 @@ static struct dp_udp_reorder_ops udp_reorder_ops(struct forwarder *fwd)
     return ops;
 }
 
-void dataplane_udp_reorder_configure(void)
+void dataplane_mtu1500_udp_reorder_configure(struct forwarder *fwd)
 {
-    dp_udp_reorder_configure_from_env();
+    if (!fwd || fwd->mtu_mode != NE_MTU_MODE_1500)
+        return;
+    dp_mtu1500_udp_reorder_configure_from_env();
 }
 
-void dataplane_udp_reorder_gc(struct forwarder *fwd, int worker_idx)
+void dataplane_mtu1500_udp_reorder_gc(struct forwarder *fwd, int worker_idx)
 {
+    if (!fwd || fwd->mtu_mode != NE_MTU_MODE_1500)
+        return;
     struct dp_udp_reorder_ops ops = udp_reorder_ops(fwd);
 
-    dp_udp_reorder_gc(worker_idx, dp_udp_reorder_now_ns(), &ops);
+    dp_mtu1500_udp_reorder_gc(worker_idx,
+                              dp_mtu1500_udp_reorder_now_ns(), &ops);
 }
 
-void dataplane_udp_reorder_reset(struct forwarder *fwd, int worker_idx)
+void dataplane_mtu1500_udp_reorder_reset(struct forwarder *fwd, int worker_idx)
 {
+    if (!fwd || fwd->mtu_mode != NE_MTU_MODE_1500)
+        return;
     struct dp_udp_reorder_ops ops = udp_reorder_ops(fwd);
 
-    dp_udp_reorder_reset_worker(worker_idx, &ops);
+    dp_mtu1500_udp_reorder_reset_worker(worker_idx, &ops);
 }
 
 int dataplane_wan_needs_mid(struct forwarder *fwd, const uint8_t *pkt, uint32_t len)
@@ -567,7 +548,7 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
     if (!fwd || !pkt)
         goto drop;
 
-    if (job.len < 14u || job.len > NE_FRAME)
+    if (job.len < 14u || job.len > fwd->pair.frame_size)
         goto drop;
 
     if (crypto_eth_l2_has_arp_marker(pkt, job.len) || dp_pkt_is_arp(pkt, job.len)) {
@@ -657,12 +638,13 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
 
     encrypted = wan_wire_is_encrypted(fwd, pkt, job.len);
     /* Resolve the wire policy before in-place decrypt overwrites the encrypted
-     * L2 header.  Keeping this integer replaces a full NE_FRAME stack copy. */
+     * L2 header. Keeping this integer avoids a full maximum-frame stack copy. */
     profile_pi = wan_profile_pi(fwd, pkt, job.len, &wire_policy_id);
     if (profile_pi < 0)
         goto drop;
     if (encrypted) {
-        crypto_option_udp_clear_rx_meta();
+        if (fwd->mtu_mode == NE_MTU_MODE_1500)
+            crypto_mtu1500_udp_clear_rx_meta();
         if (!fwd->cfg->crypto_enabled)
             goto drop;
         dec = decrypt_wan(fwd, &job);
@@ -693,8 +675,8 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
         /* Jumbo mode uses generic 0x104A L2-PQC and never produces UDP sequence
          * metadata. Retain this guard so legacy metadata can never enter the
          * reorder buffer while the dataplane is operating in jumbo mode. */
-        if (crypto_option_udp_take_rx_meta(&epoch, &seq) == 0 &&
-            !crypto_option_is_jumbo_mode()) {
+        if (fwd->mtu_mode == NE_MTU_MODE_1500 &&
+            crypto_mtu1500_udp_take_rx_meta(&epoch, &seq) == 0) {
             struct dp_udp_reorder_key key;
             struct dp_udp_reorder_item item;
             struct dp_udp_reorder_ops ops = udp_reorder_ops(fwd);
@@ -715,9 +697,9 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
             item.profile_pi = (int16_t)profile_pi;
             item.ingress_wan_dp = job.wan_idx < fwd->wan_count
                 ? (int8_t)job.wan_idx : -1;
-            dp_udp_reorder_submit(dp_crypto_current_worker_idx(), &key,
-                                  epoch, seq, &item,
-                                  dp_udp_reorder_now_ns(), &ops);
+            dp_mtu1500_udp_reorder_submit(
+                dp_crypto_current_worker_idx(), &key, epoch, seq, &item,
+                dp_mtu1500_udp_reorder_now_ns(), &ops);
             return;
         }
         dp_out_ring_bind(dp_flow_pick_tx_slot(pkt, job.len,
@@ -748,30 +730,6 @@ drop:
 
 /* ===================== ICMP fragmentation/reassembly ===================== */
 
-#define WAN_L2_ICMP_MARKER_LEN 4u
-#define WAN_L2_ICMP_SHIM_LEN   13u
-#define WAN_L2_ICMP_TAG_LEN    16u
-
-static const uint8_t wan_l2_icmp_marker[WAN_L2_ICMP_MARKER_LEN] = {
-    0x5Bu, 0x49u, 0x43u, 0x01u
-};
-
-static int wan_l2_is_icmp_fragment(const uint8_t *pkt, uint32_t len)
-{
-    int marker_off;
-
-    if (!pkt || !crypto_eth_l2_has_marker(pkt, len))
-        return 0;
-    marker_off = crypto_eth_l2_frag_magic_off(pkt, len,
-                                              PACKET_CRYPTO_NONCE_BYTES);
-    if (marker_off < 0 ||
-        len < (uint32_t)marker_off + WAN_L2_ICMP_MARKER_LEN +
-            WAN_L2_ICMP_SHIM_LEN + WAN_L2_ICMP_TAG_LEN)
-        return 0;
-    return memcmp(pkt + marker_off, wan_l2_icmp_marker,
-                  WAN_L2_ICMP_MARKER_LEN) == 0;
-}
-
 static int wan_reassemble_l2_icmp(struct forwarder *fwd, uint8_t *pkt,
                                   uint32_t *len, uint8_t policy_id,
                                   uint64_t addr, int *pending)
@@ -791,7 +749,7 @@ static int wan_reassemble_l2_icmp(struct forwarder *fwd, uint8_t *pkt,
 
     crypto_l2_pqc_reasm_set_addr(addr);
     result = crypto_option_reassemble(
-        CRYPTO_OPT_L2_PQC, CRYPTO_PROTO_ICMP, profile_slot,
+        CRYPTO_OPT_L2_PQC_ICMP_1500, CRYPTO_PROTO_ICMP, profile_slot,
         dp_crypto_current_worker_idx(), ctx, pkt, len, pkt, &joined_len);
     if (result == 0) {
         *pending = crypto_l2_pqc_reasm_held() ? 2 : 1;
@@ -807,8 +765,13 @@ static int wan_try_l2_pqc_icmp(struct forwarder *fwd, uint8_t *pkt,
                                uint32_t *len, uint64_t addr, int *pending)
 {
     uint8_t wire_policy_id = 0;
+    uint16_t fragment_id = 0;
+    uint8_t fragment_index = 0;
 
-    if (!wan_l2_is_icmp_fragment(pkt, *len))
+    if (fwd->mtu_mode != NE_MTU_MODE_1500 ||
+        !crypto_option_is_fragment(CRYPTO_OPT_L2_PQC_ICMP_1500,
+                                   CRYPTO_PROTO_ICMP, fwd->cfg, pkt, *len,
+                                   &fragment_id, &fragment_index))
         return 0;
     if (crypto_eth_l2_read_policy_id(pkt, *len, &wire_policy_id) != 0 ||
         !fwd_policy_by_wire_id(fwd, wire_policy_id) ||

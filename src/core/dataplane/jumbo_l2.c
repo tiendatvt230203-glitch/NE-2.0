@@ -20,7 +20,7 @@
 #define JUMBO_ENC_PAYLOAD_OFF     (JUMBO_ENC_START + JUMBO_SHIM_LEN)
 #define JUMBO_BYPASS_SHIM_OFF     (JUMBO_ETH_LEN + JUMBO_PREFIX_LEN)
 #define JUMBO_BYPASS_PAYLOAD_OFF  (JUMBO_BYPASS_SHIM_OFF + JUMBO_SHIM_LEN)
-#define JUMBO_WIRE_MAX            NE_FRAME_DATA_MAX
+#define JUMBO_WIRE_MAX            NE_FRAME_DATA_MAX_9000
 #define JUMBO_ORIGINAL_MAX        (CRYPTO_OPT_FRAG_MTU_MAX + JUMBO_ETH_LEN)
 #define JUMBO_REASM_SLOTS         4096u
 #define JUMBO_REASM_TIMEOUT_NS    (200ULL * 1000000ULL)
@@ -61,7 +61,7 @@ static void jumbo_rx_diag_once(unsigned int bit, const char *reason,
     fflush(stderr);
 }
 
-_Static_assert(JUMBO_WIRE_MAX <= NE_FRAME_DATA_MAX,
+_Static_assert(JUMBO_WIRE_MAX <= NE_FRAME_DATA_MAX_9000,
                "jumbo wire fragment must fit one XDP data area");
 _Static_assert(JUMBO_WIRE_MAX > JUMBO_ENC_PAYLOAD_OFF + AES_GCM_TAG_SIZE,
                "jumbo encrypted wire header leaves no payload room");
@@ -185,7 +185,7 @@ static int packet_copy_out(struct forwarder *fwd,
 
 /*
  * XDP fragments describe one received L2 frame with several UMEM buffers.
- * A jumbo wire fragment is at most NE_FRAME_DATA_MAX bytes, but the NIC is
+ * A jumbo wire fragment is at most NE_FRAME_DATA_MAX_9000 bytes, but the NIC is
  * still free to expose it as an SG chain. AES-GCM must see the ciphertext and
  * its tag in one contiguous region, so collapse only that wire frame before
  * decrypting.

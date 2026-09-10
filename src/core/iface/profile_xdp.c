@@ -216,7 +216,8 @@ static const char *resolve_bpf_object_path(const char *path, char resolved[PATH_
 
 static int open_bpf_object(const char *path, struct bpf_object **obj_out,
                            const char *prog_name, struct bpf_program **prog_out,
-                           const char *map_name, struct bpf_map **map_out)
+                           const char *map_name, struct bpf_map **map_out,
+                           int has_frags)
 {
     char resolved_path[PATH_MAX];
     const char *open_path;
@@ -243,24 +244,25 @@ static int open_bpf_object(const char *path, struct bpf_object **obj_out,
         return -1;
     }
 
-    /* Do not rely on the installed libbpf version to infer this load flag
-     * from SEC("xdp.frags"). i40e checks the flag recorded by BPF_PROG_LOAD
-     * before it permits native XDP on an interface whose MTU needs frags. */
-    if (!bpf_program__flags || !bpf_program__set_flags) {
-        fprintf(stderr,
-                "[PROFILE-XDP] installed libbpf cannot enable XDP fragments for %s\n",
-                open_path);
-        bpf_object__close(obj);
-        return -1;
-    }
-    prog_flags = bpf_program__flags(prog);
-    rc = bpf_program__set_flags(prog, prog_flags | BPF_F_XDP_HAS_FRAGS);
-    if (rc != 0) {
-        fprintf(stderr,
-                "[PROFILE-XDP] cannot enable fragment support for %s: %s\n",
-                open_path, strerror(rc < 0 ? -rc : rc));
-        bpf_object__close(obj);
-        return -1;
+    if (has_frags) {
+        /* i40e/ice check the flag recorded by BPF_PROG_LOAD before accepting
+         * native multi-buffer XDP. Standard mode deliberately skips it. */
+        if (!bpf_program__flags || !bpf_program__set_flags) {
+            fprintf(stderr,
+                    "[PROFILE-XDP] installed libbpf cannot enable XDP fragments for %s\n",
+                    open_path);
+            bpf_object__close(obj);
+            return -1;
+        }
+        prog_flags = bpf_program__flags(prog);
+        rc = bpf_program__set_flags(prog, prog_flags | BPF_F_XDP_HAS_FRAGS);
+        if (rc != 0) {
+            fprintf(stderr,
+                    "[PROFILE-XDP] cannot enable fragment support for %s: %s\n",
+                    open_path, strerror(rc < 0 ? -rc : rc));
+            bpf_object__close(obj);
+            return -1;
+        }
     }
 
     if (bpf_object__load(obj) != 0) {
@@ -320,11 +322,15 @@ int profile_iface_xdp_bind_local(struct ne_pair *p, const struct app_config *cfg
     struct bpf_program *prog = NULL;
     struct bpf_map *map = NULL;
     const char *ifname;
+    const char *object_path;
+    int has_frags;
 
     if (!p || !cfg || pair_li < 0 || pair_li >= p->local_count)
         return -1;
 
     ifname = p->locals[pair_li].ifname;
+    has_frags = ne_mtu_mode_is_jumbo(p->mtu_mode);
+    object_path = has_frags ? "lib/lan_9000.o" : cfg->bpf_file;
     if (profile_iface_ifindex(ifname, "LAN") < 0)
         return -1;
 
@@ -334,8 +340,9 @@ int profile_iface_xdp_bind_local(struct ne_pair *p, const struct app_config *cfg
         p->xdp_local_on[pair_li] = 0;
     }
 
-    if (open_bpf_object(cfg->bpf_file, &p->bpf_locals[pair_li],
-                        "xdp_redirect_prog", &prog, "xsks_map", &map) != 0)
+    if (open_bpf_object(object_path, &p->bpf_locals[pair_li],
+                        "xdp_redirect_prog", &prog, "xsks_map", &map,
+                        has_frags) != 0)
         return -1;
     profile_iface_xdp_link_off(ifname);
     if (xdp_attach_prog(p->locals[pair_li].ifindex, bpf_program__fd(prog),
@@ -353,13 +360,18 @@ int profile_iface_xdp_bind_wan(struct ne_pair *p, const struct app_config *cfg, 
 {
     struct bpf_program *prog = NULL;
     struct bpf_map *map = NULL;
+    const char *object_path;
+    int has_frags;
 
     if (!p || !cfg || dp_slot < 0 || dp_slot >= p->wan_count)
         return -1;
+    has_frags = ne_mtu_mode_is_jumbo(p->mtu_mode);
+    object_path = has_frags ? "lib/wan_9000.o" : cfg->bpf_wan_file;
     if (profile_iface_ifindex(p->wans[dp_slot].ifname, "WAN") < 0)
         return -1;
-    if (open_bpf_object(cfg->bpf_wan_file, &p->bpf_wans[dp_slot],
-                        "xdp_wan_redirect_prog", &prog, "wan_xsks_map", &map) != 0)
+    if (open_bpf_object(object_path, &p->bpf_wans[dp_slot],
+                        "xdp_wan_redirect_prog", &prog, "wan_xsks_map", &map,
+                        has_frags) != 0)
         return -1;
     update_wan_fake_ethertype(p->bpf_wans[dp_slot], fake_ethertype_ipv4);
     profile_iface_xdp_link_off(p->wans[dp_slot].ifname);
@@ -378,8 +390,8 @@ int profile_iface_xdp_attach_init(struct ne_pair *p, const struct app_config *cf
     if (!p || !cfg)
         return -1;
 
-    fprintf(stderr, "[PROFILE-XDP] cold attach: %d LAN, %d WAN(dp)\n",
-            p->local_count, p->wan_count);
+    fprintf(stderr, "[PROFILE-XDP] cold attach: MTU %s, %d LAN, %d WAN(dp)\n",
+            ne_mtu_mode_name(p->mtu_mode), p->local_count, p->wan_count);
     fflush(stderr);
 
     for (int i = 0; i < p->local_count; i++) {

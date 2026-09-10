@@ -23,8 +23,6 @@
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
-#include <sys/ioctl.h>
-#include <sys/socket.h>
 static atomic_int running = 1;
 static pthread_mutex_t runtime_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t tx_maint_tick;
@@ -225,64 +223,6 @@ static void init_iface_meta(struct fwd_iface *iface, const char *ifname)
     iface->ifindex = (int)if_nametoindex(ifname);
     strncpy(iface->ifname, ifname, sizeof(iface->ifname) - 1);
     iface->ifname[sizeof(iface->ifname) - 1] = '\0';
-}
-
-static int read_iface_mtu(int sockfd, const char *ifname, uint32_t *mtu_out)
-{
-    struct ifreq ifr;
-
-    if (sockfd < 0 || !ifname || !ifname[0] || !mtu_out)
-        return -1;
-    memset(&ifr, 0, sizeof(ifr));
-    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
-    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
-    if (ioctl(sockfd, SIOCGIFMTU, &ifr) != 0 || ifr.ifr_mtu <= 0)
-        return -1;
-    *mtu_out = (uint32_t)ifr.ifr_mtu;
-    return 0;
-}
-
-static uint32_t resolve_runtime_frag_mtu(const struct app_config *cfg)
-{
-    int sockfd;
-    uint32_t min_mtu = CRYPTO_OPT_FRAG_MTU_MAX;
-    int seen = 0;
-
-    if (!cfg)
-        return CRYPTO_OPT_FRAG_MTU_DEFAULT;
-
-    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0)
-        return CRYPTO_OPT_FRAG_MTU_DEFAULT;
-
-    for (int li = 0; li < cfg->local_count; li++) {
-        uint32_t mtu;
-
-        if (read_iface_mtu(sockfd, cfg->locals[li].ifname, &mtu) != 0) {
-            close(sockfd);
-            return CRYPTO_OPT_FRAG_MTU_DEFAULT;
-        }
-        if (mtu < min_mtu)
-            min_mtu = mtu;
-        seen = 1;
-    }
-
-    for (int wi = 0; wi < cfg->wan_count; wi++) {
-        uint32_t mtu;
-
-        if (!cfg->wans[wi].dataplane)
-            continue;
-        if (read_iface_mtu(sockfd, cfg->wans[wi].ifname, &mtu) != 0) {
-            close(sockfd);
-            return CRYPTO_OPT_FRAG_MTU_DEFAULT;
-        }
-        if (mtu < min_mtu)
-            min_mtu = mtu;
-        seen = 1;
-    }
-
-    close(sockfd);
-    return seen ? min_mtu : CRYPTO_OPT_FRAG_MTU_DEFAULT;
 }
 
 static void *local_rx_thread(void *arg)
@@ -527,10 +467,10 @@ static void *crypto_worker_thread(void *arg)
         if (++gc_tick >= 2048) {
             if (crypto_on)
                 fwd_crypto_frag_gc_worker_tick(ctx->worker_idx);
-            if (crypto_option_is_jumbo_mode())
+            if (ne_mtu_mode_is_jumbo(fwd->mtu_mode))
                 dp_jumbo_gc(fwd, ctx->worker_idx);
             else
-                dataplane_udp_reorder_gc(fwd, ctx->worker_idx);
+                dataplane_mtu1500_udp_reorder_gc(fwd, ctx->worker_idx);
             gc_tick = 0;
         }
 
@@ -539,8 +479,8 @@ static void *crypto_worker_thread(void *arg)
         else
             crypto_idle_pause(fwd, &idle, ctx->worker_idx);
     }
-    if (!crypto_option_is_jumbo_mode())
-        dataplane_udp_reorder_reset(fwd, ctx->worker_idx);
+    if (!ne_mtu_mode_is_jumbo(fwd->mtu_mode))
+        dataplane_mtu1500_udp_reorder_reset(fwd, ctx->worker_idx);
     else
         dp_jumbo_reset(fwd, ctx->worker_idx);
     packet_crypto_worker_cleanup();
@@ -550,6 +490,9 @@ static void *crypto_worker_thread(void *arg)
 
 int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
 {
+    enum ne_mtu_mode mtu_mode;
+    char mtu_error[256];
+
     if (!fwd || !cfg || cfg->local_count <= 0)
         return -1;
     if (forwarder_should_stop())
@@ -560,9 +503,22 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
         fflush(stderr);
     }
 
+    if (ne_mtu_mode_detect(cfg, &mtu_mode, mtu_error, sizeof(mtu_error)) != 0) {
+        fprintf(stderr, "[MTU-MODE] startup rejected: %s\n", mtu_error);
+        fflush(stderr);
+        return -1;
+    }
+
     memset(fwd, 0, sizeof(*fwd));
-    dataplane_udp_reorder_configure();
     fwd->cfg = cfg;
+    fwd->mtu_mode = mtu_mode;
+
+    crypto_option_set_mtu(ne_mtu_mode_value(mtu_mode));
+    fprintf(stderr, "[MTU-MODE] selected MTU %s\n",
+            ne_mtu_mode_name(mtu_mode));
+    if (mtu_mode == NE_MTU_MODE_1500)
+        dataplane_mtu1500_udp_reorder_configure(fwd);
+
     fwd->local_count = cfg->local_count;
     fwd->wan_count = config_count_dataplane_wans(cfg);
     if (fwd->local_count > MAX_INTERFACES)
@@ -570,10 +526,6 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
     if (fwd->wan_count > MAX_INTERFACES)
         fwd->wan_count = MAX_INTERFACES;
 
-    crypto_option_set_mtu(resolve_runtime_frag_mtu(cfg));
-    fprintf(stderr, "[FRAG] runtime MTU set to %u (%s mode)\n",
-            crypto_option_get_mtu(),
-            crypto_option_is_jumbo_mode() ? "jumbo" : "standard");
     ne_dp_idle_init();
 
     for (int i = 0; i < fwd->local_count; i++)
@@ -600,7 +552,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
 
     pqc_handshake_start_all_profiles(cfg);
 
-    if (ne_pair_open(&fwd->pair, cfg) != 0)
+    if (ne_pair_open(&fwd->pair, cfg, mtu_mode) != 0)
         return -1;
     if (profile_iface_xdp_attach_init(&fwd->pair, cfg) != 0) {
         forwarder_cleanup(fwd);
@@ -765,7 +717,6 @@ void forwarder_run(struct forwarder *fwd)
 
     fwd->threads_started = 1;
     if (fwd->cfg) {
-        ne_cpu_map_log();
         fwd_crypto_sync_pqc_session_keys(fwd->cfg);
         main_diag_log_dataplane_ready(fwd);
     }

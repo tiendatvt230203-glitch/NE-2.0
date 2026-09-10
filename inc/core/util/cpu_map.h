@@ -36,6 +36,5 @@ static inline uint8_t ne_cpu_crypto(uint32_t worker)
 }
 
 int ne_cpu_map_validate(void);
-void ne_cpu_map_log(void);
 
 #endif

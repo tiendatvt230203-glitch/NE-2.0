@@ -25,18 +25,14 @@ uint64_t crypto_l2_pqc_reasm_out_addr(void);
 
 /* --- option router --- */
 
-void crypto_option_udp_set_tx_seq(uint32_t seq);
-int crypto_option_udp_tx_meta(uint32_t *epoch, uint32_t *seq,
-                              uint32_t *datagram_id);
-void crypto_option_udp_clear_rx_meta(void);
-void crypto_option_udp_set_rx_meta(uint32_t epoch, uint32_t seq);
-int crypto_option_udp_take_rx_meta(uint32_t *epoch, uint32_t *seq);
 void crypto_option_set_mtu(uint32_t mtu);
 uint32_t crypto_option_get_mtu(void);
 int crypto_option_is_jumbo_mode(void);
 
 typedef enum {
     CRYPTO_OPT_L2_PQC = 0,
+    CRYPTO_OPT_L2_PQC_UDP_1500,
+    CRYPTO_OPT_L2_PQC_ICMP_1500,
     CRYPTO_OPT_COUNT
 } crypto_option_id;
 

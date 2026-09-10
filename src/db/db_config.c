@@ -786,8 +786,8 @@ int config_load_from_db(struct app_config *cfg, int profile_id, const char *conn
         return -1;
 
     memset(cfg, 0, sizeof(*cfg));
-    strncpy(cfg->bpf_file, "lib/lan.o", sizeof(cfg->bpf_file) - 1);
-    strncpy(cfg->bpf_wan_file, "lib/wan.o", sizeof(cfg->bpf_wan_file) - 1);
+    strncpy(cfg->bpf_file, "lib/lan_1500.o", sizeof(cfg->bpf_file) - 1);
+    strncpy(cfg->bpf_wan_file, "lib/wan_1500.o", sizeof(cfg->bpf_wan_file) - 1);
 
     PGconn *conn = PQconnectdbParams(pg.keywords, pg.values, 0);
     if (PQstatus(conn) != CONNECTION_OK) {

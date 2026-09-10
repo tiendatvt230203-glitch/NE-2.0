@@ -461,7 +461,7 @@ static int arp_try_encrypt_l2_pqc(struct forwarder *fwd, struct ne_packet *job,
                                   uint8_t *pkt, int profile_idx)
 {
     struct packet_crypto_ctx ctx;
-    uint8_t scratch[NE_FRAME];
+    uint8_t scratch[NE_FRAME_MAX];
     uint32_t orig_len;
     uint32_t len;
 
@@ -473,7 +473,7 @@ static int arp_try_encrypt_l2_pqc(struct forwarder *fwd, struct ne_packet *job,
         return 0;
 
     orig_len = job->len;
-    if (orig_len > NE_FRAME)
+    if (orig_len > fwd->pair.frame_size)
         return 0;
     memcpy(scratch, pkt, orig_len);
     len = orig_len;
@@ -493,7 +493,7 @@ static int arp_try_decrypt_l2_pqc(struct forwarder *fwd, struct ne_packet *job,
 {
     struct packet_crypto_ctx ctx;
     struct packet_crypto_ctx static_ctx;
-    uint8_t encrypted[NE_FRAME];
+    uint8_t encrypted[NE_FRAME_MAX];
     uint32_t wire_len;
     uint32_t len;
     int using_static = 1;

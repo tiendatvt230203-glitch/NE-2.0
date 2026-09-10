@@ -12,6 +12,7 @@ struct fwd_iface {
 
 struct forwarder {
     struct app_config *cfg;
+    enum ne_mtu_mode mtu_mode;
 
     struct fwd_iface locals[MAX_INTERFACES];
     int local_count;

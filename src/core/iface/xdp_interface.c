@@ -535,7 +535,8 @@ static int interface_get_mtu(const char *ifname)
     return ifr.ifr_mtu;
 }
 
-static void interface_log_xsk_context(const char *ifname, int queue_id, int ret)
+static void interface_log_xsk_context(const char *ifname, int queue_id, int ret,
+                                      uint32_t frame_size)
 {
     char master[IF_NAMESIZE];
     char path[256];
@@ -565,7 +566,7 @@ static void interface_log_xsk_context(const char *ifname, int queue_id, int ret)
     nq = interface_get_queue_count(ifname);
     fprintf(stderr,
             "[DP] XSK create failed %s q=%d: %s (%d) — mtu=%d queues=%d frame=%u master=%s%s\n",
-            ifname, queue_id, strerror(err), ret, mtu, nq, NE_FRAME,
+            ifname, queue_id, strerror(err), ret, mtu, nq, frame_size,
             master[0] ? master : "-",
             interface_is_bridge_slave(ifname) ? " (bridge-slave, Br kept)" : "");
     fflush(stderr);
@@ -853,10 +854,13 @@ static int xsk_create_queue(struct ne_pair *p, struct ne_iface *iface, const cha
         .tx_size = NE_RING,
         .libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD,
         .xdp_flags = xdp_flags,
-        /* XDP_USE_SG exposes one MTU-9000 packet as a descriptor chain.
-         * XDP_COPY remains intentional for the current i40e deployment. */
-        .bind_flags = XDP_COPY | XDP_USE_NEED_WAKEUP | XDP_USE_SG,
+        .bind_flags = XDP_COPY | XDP_USE_NEED_WAKEUP,
     };
+
+    /* Scatter-gather is a jumbo-only capability. Keeping it off in standard
+     * mode preserves AF_XDP support on older ixgbe cards. */
+    if (ne_mtu_mode_is_jumbo(p->mtu_mode))
+        cfg.bind_flags |= XDP_USE_SG;
 
     zero_queue_rings(slot, preserve);
     return xsk_socket__create_shared(&slot->xsk, ifname, (uint32_t)q, p->umem,
@@ -901,7 +905,7 @@ static int open_iface_queues(struct ne_pair *p, struct ne_iface *iface,
         ret = xsk_create_queue(p, iface, ifname, q, mode);
         if (ret) {
             open_iface_queues_rollback(p, iface, q);
-            interface_log_xsk_context(ifname, q, ret);
+            interface_log_xsk_context(ifname, q, ret, p->frame_size);
             iface->queue_count = 0;
             iface->ifindex = 0;
             iface->ifname[0] = '\0';
@@ -963,13 +967,16 @@ static uint32_t pair_fq_prefill_per_queue(const struct ne_pair *p)
     return prefill;
 }
 
-int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
+int ne_pair_open(struct ne_pair *p, const struct app_config *cfg,
+                 enum ne_mtu_mode mtu_mode)
 {
 #define NE_TRY(expr) do { if (expr) goto fail; } while (0)
-    if (!p || !cfg || cfg->local_count <= 0)
+    if (!p || !cfg || cfg->local_count <= 0 ||
+        mtu_mode == NE_MTU_MODE_INVALID)
         return -1;
 
     memset(p, 0, sizeof(*p));
+    p->mtu_mode = mtu_mode;
     p->umem_fq_li = -1;
     p->umem_fq_q = -1;
     p->local_count = cfg->local_count;
@@ -981,7 +988,8 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
     struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
     (void)setrlimit(RLIMIT_MEMLOCK, &rl);
 
-    p->frame_size = NE_FRAME;
+    p->frame_size = ne_mtu_mode_is_jumbo(mtu_mode) ? NE_FRAME_9000
+                                                    : NE_FRAME_1500;
     p->xdp_flags = XDP_FLAGS_DRV_MODE;
 
     p->local_queue_total = 0;
@@ -1003,7 +1011,8 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
         p->wan_queue_total += nq;
     }
 
-    p->n_frames = NE_N_FRAMES;
+    p->n_frames = ne_mtu_mode_is_jumbo(mtu_mode) ? NE_N_FRAMES_9000
+                                                  : NE_N_FRAMES_1500;
     p->bufsize = (size_t)p->n_frames * (size_t)p->frame_size;
 
     p->bufs = mmap(NULL, p->bufsize, PROT_READ | PROT_WRITE,

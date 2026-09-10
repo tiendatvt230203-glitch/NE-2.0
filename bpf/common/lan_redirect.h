@@ -1,8 +1,15 @@
+#ifndef NE_BPF_LAN_REDIRECT_H
+#define NE_BPF_LAN_REDIRECT_H
+
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
+
+#ifndef NE_XDP_SECTION
+#error "NE_XDP_SECTION must be defined by the MTU-specific LAN entry"
+#endif
 
 #define ETH_P_ARP_VAL 0x0806
 
@@ -13,7 +20,7 @@ struct {
     __type(value, __u32);
 } xsks_map SEC(".maps");
 
-SEC("xdp.frags")
+SEC(NE_XDP_SECTION)
 int xdp_redirect_prog(struct xdp_md *ctx)
 {
     void *data     = (void *)(long)ctx->data;
@@ -44,3 +51,5 @@ redirect:
 }
 
 char _license[] SEC("license") = "GPL";
+
+#endif

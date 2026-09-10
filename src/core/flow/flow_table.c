@@ -7,28 +7,31 @@
 
 #define FLOW_TABLE_SETS 512u
 #define FLOW_TABLE_WAYS 4u
-#define FLOW_TCP_PACKET_WINDOW 4096u
-#define FLOW_UDP_PACKET_WINDOW 16384u
-#define FLOW_JUMBO_PACKET_WINDOW 1024u
+#define FLOW_MTU1500_TCP_PACKET_WINDOW 4096u
+#define FLOW_MTU1500_UDP_PACKET_WINDOW 16384u
+#define FLOW_MTU9000_PACKET_WINDOW 1024u
+
+#define FLOW_WINDOW_CLASS_COUNT ((int)FLOW_WAN_WINDOW_MTU9000 + 1)
+
+struct flow_class_state {
+    int selected_wan;
+    uint16_t packet_count;
+    uint8_t tie_start;
+};
 
 struct flow_window_state {
     struct flow_key key;
     int wans[MAX_INTERFACES];
     uint64_t stamp;
-    int selected_wan;
-    int jumbo_selected_wan;
-    uint16_t packet_count;
-    uint16_t jumbo_packet_count;
+    struct flow_class_state classes[FLOW_WINDOW_CLASS_COUNT];
     uint8_t wan_count;
-    uint8_t tie_start;
-    uint8_t jumbo_tie_start;
     uint8_t valid;
 };
 
 static _Thread_local struct flow_window_state (*g_flow_table)[FLOW_TABLE_WAYS];
 static _Thread_local struct flow_window_state g_default_state;
-static _Thread_local struct flow_window_state *g_pending_udp_state;
-static _Thread_local struct flow_window_state *g_pending_jumbo_state;
+static _Thread_local struct flow_window_state *g_pending_state;
+static _Thread_local enum flow_wan_window_class g_pending_class;
 static _Thread_local uint64_t g_flow_clock;
 
 int flow_table_thread_init(void)
@@ -44,8 +47,8 @@ void flow_table_thread_cleanup(void)
     free(g_flow_table);
     g_flow_table = NULL;
     memset(&g_default_state, 0, sizeof(g_default_state));
-    g_pending_udp_state = NULL;
-    g_pending_jumbo_state = NULL;
+    g_pending_state = NULL;
+    g_pending_class = FLOW_WAN_WINDOW_MTU1500_OTHER;
     g_flow_clock = 0;
 }
 
@@ -107,8 +110,9 @@ static void flow_state_reset(struct flow_window_state *state,
     for (int i = 0; i < allowed_count; i++)
         state->wans[i] = allowed_wans[i];
     state->wan_count = (uint8_t)allowed_count;
-    state->tie_start = (uint8_t)(allowed_count > 0 ? hash % (uint32_t)allowed_count : 0u);
-    state->jumbo_tie_start = state->tie_start;
+    for (int i = 0; i < FLOW_WINDOW_CLASS_COUNT; i++)
+        state->classes[i].tie_start =
+            (uint8_t)(allowed_count > 0 ? hash % (uint32_t)allowed_count : 0u);
     state->valid = 1;
 }
 
@@ -128,33 +132,31 @@ static int flow_pick_next(uint8_t *cursor, const int *allowed_wans,
 }
 
 static int flow_window_wan(struct flow_window_state *state,
+                           enum flow_wan_window_class window_class,
                            const int *allowed_wans,
                            int allowed_count)
 {
-    if (state->packet_count == 0)
-        state->selected_wan = flow_pick_next(&state->tie_start, allowed_wans,
-                                             allowed_count);
-    return state->selected_wan;
-}
+    struct flow_class_state *class_state = &state->classes[window_class];
 
-static int flow_jumbo_window_wan(struct flow_window_state *state,
-                                 const int *allowed_wans,
-                                 int allowed_count)
-{
-    if (state->jumbo_packet_count == 0)
-        state->jumbo_selected_wan = flow_pick_next(
-            &state->jumbo_tie_start, allowed_wans, allowed_count);
-    return state->jumbo_selected_wan;
+    if (class_state->packet_count == 0)
+        class_state->selected_wan = flow_pick_next(&class_state->tie_start,
+                                                   allowed_wans,
+                                                   allowed_count);
+    return class_state->selected_wan;
 }
 
 static void flow_window_advance(struct flow_window_state *state,
+                                enum flow_wan_window_class window_class,
                                 uint16_t packet_window)
 {
+    struct flow_class_state *class_state;
+
     if (!state)
         return;
-    state->packet_count++;
-    if (state->packet_count >= packet_window)
-        state->packet_count = 0;
+    class_state = &state->classes[window_class];
+    class_state->packet_count++;
+    if (class_state->packet_count >= packet_window)
+        class_state->packet_count = 0;
 }
 
 int flow_table_pick_wan_per_packet(const int *allowed_wans, int allowed_count)
@@ -165,7 +167,9 @@ int flow_table_pick_wan_per_packet(const int *allowed_wans, int allowed_count)
         allowed_count = MAX_INTERFACES;
     if (!flow_pool_same(&g_default_state, allowed_wans, allowed_count))
         flow_state_reset(&g_default_state, NULL, 0, allowed_wans, allowed_count);
-    return flow_pick_next(&g_default_state.tie_start, allowed_wans, allowed_count);
+    return flow_pick_next(
+        &g_default_state.classes[FLOW_WAN_WINDOW_MTU1500_OTHER].tie_start,
+        allowed_wans, allowed_count);
 }
 
 int flow_table_pick_wan_per_flow_packet(uint32_t src_ip, uint32_t dst_ip,
@@ -173,7 +177,7 @@ int flow_table_pick_wan_per_flow_packet(uint32_t src_ip, uint32_t dst_ip,
                                         uint8_t protocol,
                                         const int *allowed_wans,
                                         int allowed_count,
-                                        int jumbo_packet)
+                                        enum flow_wan_window_class window_class)
 {
     struct flow_key key;
     struct flow_window_state *set;
@@ -218,46 +222,50 @@ int flow_table_pick_wan_per_flow_packet(uint32_t src_ip, uint32_t dst_ip,
     }
     state->stamp = ++g_flow_clock;
 
-    g_pending_udp_state = NULL;
-    g_pending_jumbo_state = NULL;
+    g_pending_state = NULL;
+    g_pending_class = FLOW_WAN_WINDOW_MTU1500_OTHER;
 
-    if (jumbo_packet) {
-        g_pending_jumbo_state = state;
-        return flow_jumbo_window_wan(state, allowed_wans, allowed_count);
+    if (window_class == FLOW_WAN_WINDOW_MTU9000) {
+        g_pending_state = state;
+        g_pending_class = window_class;
+        return flow_window_wan(state, window_class, allowed_wans,
+                               allowed_count);
     }
 
-    if (protocol == IPPROTO_TCP) {
-        int selected = flow_window_wan(state, allowed_wans, allowed_count);
+    if (window_class == FLOW_WAN_WINDOW_MTU1500_TCP) {
+        int selected = flow_window_wan(state, window_class, allowed_wans,
+                                       allowed_count);
 
-        flow_window_advance(state, FLOW_TCP_PACKET_WINDOW);
+        flow_window_advance(state, window_class,
+                            FLOW_MTU1500_TCP_PACKET_WINDOW);
         return selected;
     }
 
-    if (protocol == IPPROTO_UDP) {
-        g_pending_udp_state = state;
-        return flow_window_wan(state, allowed_wans, allowed_count);
+    if (window_class == FLOW_WAN_WINDOW_MTU1500_UDP) {
+        g_pending_state = state;
+        g_pending_class = window_class;
+        return flow_window_wan(state, window_class, allowed_wans,
+                               allowed_count);
     }
 
-    return flow_pick_next(&state->tie_start, allowed_wans, allowed_count);
+    return flow_pick_next(
+        &state->classes[FLOW_WAN_WINDOW_MTU1500_OTHER].tie_start,
+        allowed_wans, allowed_count);
 }
 
-void flow_table_udp_packet_complete(int sent)
+void flow_table_packet_complete(enum flow_wan_window_class window_class,
+                                int sent)
 {
-    struct flow_window_state *state = g_pending_udp_state;
+    struct flow_window_state *state = g_pending_state;
 
-    g_pending_udp_state = NULL;
-    if (sent)
-        flow_window_advance(state, FLOW_UDP_PACKET_WINDOW);
-}
-
-void flow_table_jumbo_packet_complete(int sent)
-{
-    struct flow_window_state *state = g_pending_jumbo_state;
-
-    g_pending_jumbo_state = NULL;
-    if (!sent || !state)
+    g_pending_state = NULL;
+    if (!sent || !state || g_pending_class != window_class)
         return;
-    state->jumbo_packet_count++;
-    if (state->jumbo_packet_count >= FLOW_JUMBO_PACKET_WINDOW)
-        state->jumbo_packet_count = 0;
+
+    if (window_class == FLOW_WAN_WINDOW_MTU1500_UDP)
+        flow_window_advance(state, window_class,
+                            FLOW_MTU1500_UDP_PACKET_WINDOW);
+    else if (window_class == FLOW_WAN_WINDOW_MTU9000)
+        flow_window_advance(state, window_class,
+                            FLOW_MTU9000_PACKET_WINDOW);
 }

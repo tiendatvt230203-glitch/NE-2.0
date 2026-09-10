@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
-#include "../../../inc/core/dataplane/udp_reorder.h"
-#include "../../../inc/core/util/cpu_map.h"
+#include "core/dataplane/mtu1500/udp_reorder.h"
+#include "core/util/cpu_map.h"
 
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -266,7 +266,7 @@ static void flow_make_window_room(int worker_idx, uint32_t flow_idx,
     }
 }
 
-void dp_udp_reorder_configure_from_env(void)
+void dp_mtu1500_udp_reorder_configure_from_env(void)
 {
     const char *enabled = getenv("NE_UDP_REORDER");
     const char *hold_us = getenv("NE_UDP_REORDER_US");
@@ -287,7 +287,7 @@ void dp_udp_reorder_configure_from_env(void)
     }
 }
 
-uint64_t dp_udp_reorder_now_ns(void)
+uint64_t dp_mtu1500_udp_reorder_now_ns(void)
 {
     struct timespec ts;
 
@@ -295,12 +295,12 @@ uint64_t dp_udp_reorder_now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-void dp_udp_reorder_submit(int worker_idx,
-                           const struct dp_udp_reorder_key *key,
-                           uint32_t epoch, uint32_t seq,
-                           struct dp_udp_reorder_item *item,
-                           uint64_t now_ns,
-                           const struct dp_udp_reorder_ops *ops)
+void dp_mtu1500_udp_reorder_submit(int worker_idx,
+                                   const struct dp_udp_reorder_key *key,
+                                   uint32_t epoch, uint32_t seq,
+                                   struct dp_udp_reorder_item *item,
+                                   uint64_t now_ns,
+                                   const struct dp_udp_reorder_ops *ops)
 {
     uint32_t flow_idx;
     struct udp_reorder_flow *flow;
@@ -376,8 +376,8 @@ void dp_udp_reorder_submit(int worker_idx,
     update_high_water(g_held_by_worker[worker_idx]);
 }
 
-void dp_udp_reorder_gc(int worker_idx, uint64_t now_ns,
-                       const struct dp_udp_reorder_ops *ops)
+void dp_mtu1500_udp_reorder_gc(int worker_idx, uint64_t now_ns,
+                               const struct dp_udp_reorder_ops *ops)
 {
     uint32_t cursor;
 
@@ -400,8 +400,8 @@ void dp_udp_reorder_gc(int worker_idx, uint64_t now_ns,
         UDP_REORDER_FLOW_CAP;
 }
 
-void dp_udp_reorder_reset_worker(int worker_idx,
-                                 const struct dp_udp_reorder_ops *ops)
+void dp_mtu1500_udp_reorder_reset_worker(
+    int worker_idx, const struct dp_udp_reorder_ops *ops)
 {
     if (worker_idx < 0 || worker_idx >= (int)NE_CRYPTO_WORKERS)
         return;
@@ -415,7 +415,7 @@ void dp_udp_reorder_reset_worker(int worker_idx,
     g_gc_cursor[worker_idx] = 0;
 }
 
-void dp_udp_reorder_get_stats(struct dp_udp_reorder_stats *out)
+void dp_mtu1500_udp_reorder_get_stats(struct dp_udp_reorder_stats *out)
 {
     if (!out)
         return;
