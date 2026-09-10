@@ -1,8 +1,10 @@
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/iface/profile_iface_xdp.h"
 #include <bpf/libbpf.h>
+#include <linux/ethtool.h>
 #include <linux/if_link.h>
 #include <linux/if_xdp.h>
+#include <linux/sockios.h>
 #include <net/if.h>
 #include <errno.h>
 #include <stdio.h>
@@ -146,35 +148,74 @@ int interface_get_queue_count(const char *ifname)
     return count > 0 ? count : 1;
 }
 
+/* Read "Pre-set maximums" instead of mistaking the current sysfs queue
+ * count for the NIC limit. Every RSS queue must have a matching XSK entry. */
+static int interface_get_max_queue_count(const char *ifname)
+{
+    struct ethtool_channels channels;
+    struct ifreq ifr;
+    int fd;
+    int count = 0;
+
+    if (!ifname_is_safe(ifname))
+        return 1;
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return interface_get_queue_count(ifname);
+
+    memset(&channels, 0, sizeof(channels));
+    memset(&ifr, 0, sizeof(ifr));
+    channels.cmd = ETHTOOL_GCHANNELS;
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
+    ifr.ifr_data = (void *)&channels;
+    if (ioctl(fd, SIOCETHTOOL, &ifr) == 0) {
+        if (channels.max_combined > 0) {
+            count = (int)channels.max_combined;
+        } else if (channels.max_rx > 0 && channels.max_tx > 0) {
+            count = (int)(channels.max_rx < channels.max_tx
+                ? channels.max_rx : channels.max_tx);
+        }
+    }
+    close(fd);
+    if (count <= 0)
+        count = interface_get_queue_count(ifname);
+    return count > 0 ? count : 1;
+}
+
 static int resolve_iface_queue_count(const char *ifname)
 {
-    int hw = interface_get_queue_count(ifname);
-    if (hw < 1)
-        hw = 1;
+    int maximum = interface_get_max_queue_count(ifname);
+    int current = interface_get_queue_count(ifname);
+    int want;
 
 #if NE_QUEUE_OVERRIDE > 0
-    int want = NE_QUEUE_OVERRIDE;
+    want = NE_QUEUE_OVERRIDE;
+    if (want > maximum)
+        want = maximum;
 #else
-    int want = hw;
+    want = maximum;
 #endif
 
     if (want > MAX_QUEUES)
         want = MAX_QUEUES;
     if (want < 1)
         want = 1;
+    fprintf(stderr, "[DP-CONF] %s queues current=%d max=%d target=%d\n",
+            ifname, current, maximum, want);
+    fflush(stderr);
     return want;
 }
 
 static int apply_iface_queue_count(const char *ifname, int want)
 {
-#if NE_QUEUE_OVERRIDE > 0
-    int hw = interface_get_queue_count(ifname);
+    int current = interface_get_queue_count(ifname);
 
-    if (hw != want)
-        return interface_set_queue_count(ifname, want);
-#endif
-    (void)ifname;
-    (void)want;
+    if (current != want) {
+        if (interface_set_queue_count(ifname, want) != 0)
+            return -1;
+        if (interface_get_queue_count(ifname) != want)
+            return -1;
+    }
     return 0;
 }
 
@@ -901,6 +942,27 @@ static void prefill_iface(struct ne_pair *p, struct ne_iface *iface, uint32_t wa
         prefill_queue(p, &iface->queues[q], want_per_queue);
 }
 
+/* Keep at least half of UMEM outside FQ for packets held by crypto/reassembly
+ * and for newly allocated TX frames. This also makes full 16-queue NICs fit
+ * the fixed 2 GiB UMEM instead of starving the WAN queues opened last. */
+static uint32_t pair_fq_prefill_per_queue(const struct ne_pair *p)
+{
+    uint32_t total_queues;
+    uint32_t prefill;
+
+    if (!p || p->n_frames == 0)
+        return 1;
+    total_queues = (uint32_t)(p->local_queue_total + p->wan_queue_total);
+    if (total_queues == 0)
+        total_queues = 1;
+    prefill = (p->n_frames / 2u) / total_queues;
+    if (prefill > NE_FQ_PREFILL)
+        prefill = NE_FQ_PREFILL;
+    if (prefill == 0)
+        prefill = 1;
+    return prefill;
+}
+
 int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
 {
 #define NE_TRY(expr) do { if (expr) goto fail; } while (0)
@@ -1025,7 +1087,13 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
         NE_TRY(rc);
     }
 
-    uint32_t prefill = NE_FQ_PREFILL;
+    uint32_t prefill = pair_fq_prefill_per_queue(p);
+
+    fprintf(stderr,
+            "[DP-CONF] XSK queues=%d, FQ prefill=%u/queue, UMEM reserve >=%u frames\n",
+            p->local_queue_total + p->wan_queue_total, prefill,
+            p->n_frames / 2u);
+    fflush(stderr);
 
     for (int i = 0; i < p->local_count; i++)
         prefill_iface(p, &p->locals[i], prefill);
@@ -1161,7 +1229,7 @@ int ne_pair_plumb_local(struct ne_pair *p, const struct app_config *cfg, int cfg
     if (pair_li >= p->local_count)
         p->local_count = pair_li + 1;
     p->local_queue_total += nq;
-    prefill_iface(p, &p->locals[pair_li], NE_FQ_PREFILL);
+    prefill_iface(p, &p->locals[pair_li], pair_fq_prefill_per_queue(p));
     p->local_live[pair_li] = 1;
     return 0;
 }
@@ -1204,7 +1272,7 @@ int ne_pair_plumb_wan_dp(struct ne_pair *p, const struct app_config *cfg, int cf
     if (dp_slot >= p->wan_count)
         p->wan_count = dp_slot + 1;
     p->wan_queue_total += nq;
-    prefill_iface(p, &p->wans[dp_slot], NE_FQ_PREFILL);
+    prefill_iface(p, &p->wans[dp_slot], pair_fq_prefill_per_queue(p));
     p->wan_live[dp_slot] = 1;
     return 0;
 }

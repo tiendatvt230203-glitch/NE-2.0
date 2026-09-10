@@ -28,8 +28,9 @@
 #define NE_PACKET_MAX_SEGMENTS 8u
 #define NE_PACKET_MAX_CONTINUATIONS (NE_PACKET_MAX_SEGMENTS - 1u)
 
-/* Restore four hardware/XSK queues after the one-queue isolation test. */
-#define NE_QUEUE_OVERRIDE 4
+/* 0 = open every combined queue supported by each loaded LAN/WAN.
+ * A positive value is only a diagnostic cap. */
+#define NE_QUEUE_OVERRIDE 0
 
 #define NE_FQ_PREFILL   16384u
 
