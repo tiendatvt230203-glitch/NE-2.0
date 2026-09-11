@@ -186,6 +186,7 @@ static int resolve_iface_queue_count(const char *ifname)
 {
     int maximum = interface_get_max_queue_count(ifname);
     int current = interface_get_queue_count(ifname);
+    long online_cpus = sysconf(_SC_NPROCESSORS_ONLN);
     int want;
 
 #if NE_QUEUE_OVERRIDE > 0
@@ -196,27 +197,50 @@ static int resolve_iface_queue_count(const char *ifname)
     want = maximum;
 #endif
 
+    /* i40e/ice may advertise more queue pairs than this host can activate.
+     * Their channel setup clamps the requested count to online CPUs while
+     * still returning success, so use the same effective limit here. */
+    if (online_cpus > 0 && want > online_cpus)
+        want = (int)online_cpus;
     if (want > MAX_QUEUES)
         want = MAX_QUEUES;
     if (want < 1)
         want = 1;
-    fprintf(stderr, "[DP-CONF] %s queues current=%d max=%d target=%d\n",
-            ifname, current, maximum, want);
+    fprintf(stderr,
+            "[DP-CONF] %s queues current=%d max=%d online_cpus=%ld target=%d\n",
+            ifname, current, maximum, online_cpus, want);
     fflush(stderr);
     return want;
 }
 
+/* Return the queue count actually activated by the driver. Some drivers
+ * legally accept a request but clamp/round it, so equality with want is not
+ * required. Correctness only requires opening every active RX queue. */
 static int apply_iface_queue_count(const char *ifname, int want)
 {
     int current = interface_get_queue_count(ifname);
+    int actual;
 
     if (current != want) {
-        if (interface_set_queue_count(ifname, want) != 0)
+        int rc = interface_set_queue_count(ifname, want);
+
+        actual = interface_get_queue_count(ifname);
+        if (actual < 1 || actual > MAX_QUEUES)
             return -1;
-        if (interface_get_queue_count(ifname) != want)
-            return -1;
+        if (rc != 0) {
+            fprintf(stderr,
+                    "[DP-CONF] %s cannot set target=%d; using active=%d\n",
+                    ifname, want, actual);
+            fflush(stderr);
+        } else if (actual != want) {
+            fprintf(stderr,
+                    "[DP-CONF] %s driver adjusted target=%d to active=%d\n",
+                    ifname, want, actual);
+            fflush(stderr);
+        }
+        return actual;
     }
-    return 0;
+    return current;
 }
 
 int ne_ring_init(struct ne_ring *r, uint32_t cap, int mpsc_pop)
@@ -996,8 +1020,10 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg,
     p->wan_queue_total = 0;
 
     for (int i = 0; i < p->local_count; i++) {
-        int nq = resolve_iface_queue_count(cfg->locals[i].ifname);
-        NE_TRY(apply_iface_queue_count(cfg->locals[i].ifname, nq));
+        int target = resolve_iface_queue_count(cfg->locals[i].ifname);
+        int nq = apply_iface_queue_count(cfg->locals[i].ifname, target);
+
+        NE_TRY(nq < 1);
         p->locals[i].queue_count = nq;
         p->local_queue_total += nq;
     }
@@ -1005,8 +1031,10 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg,
         int ci = config_wan_dp_to_cfg(cfg, di);
         if (ci < 0)
             goto fail;
-        int nq = resolve_iface_queue_count(cfg->wans[ci].ifname);
-        NE_TRY(apply_iface_queue_count(cfg->wans[ci].ifname, nq));
+        int target = resolve_iface_queue_count(cfg->wans[ci].ifname);
+        int nq = apply_iface_queue_count(cfg->wans[ci].ifname, target);
+
+        NE_TRY(nq < 1);
         p->wans[di].queue_count = nq;
         p->wan_queue_total += nq;
     }
@@ -1209,10 +1237,11 @@ int ne_pair_plumb_local(struct ne_pair *p, const struct app_config *cfg, int cfg
     
     profile_iface_xdp_detach_ifname(ifname);
 
-    int nq = resolve_iface_queue_count(ifname);
-    if (apply_iface_queue_count(ifname, nq) != 0) {
+    int target = resolve_iface_queue_count(ifname);
+    int nq = apply_iface_queue_count(ifname, target);
+    if (nq < 1) {
         fprintf(stderr, "[DP] plumb LAN %s: queue_count apply failed (want=%d)\n",
-                ifname, nq);
+                ifname, target);
         fflush(stderr);
         return -1;
     }
@@ -1258,10 +1287,11 @@ int ne_pair_plumb_wan_dp(struct ne_pair *p, const struct app_config *cfg, int cf
 
     profile_iface_xdp_detach_ifname(ifname);
 
-    int nq = resolve_iface_queue_count(ifname);
-    if (apply_iface_queue_count(ifname, nq) != 0) {
+    int target = resolve_iface_queue_count(ifname);
+    int nq = apply_iface_queue_count(ifname, target);
+    if (nq < 1) {
         fprintf(stderr, "[DP] plumb WAN %s: queue_count apply failed (want=%d)\n",
-                ifname, nq);
+                ifname, target);
         fflush(stderr);
         return -1;
     }
