@@ -1481,63 +1481,115 @@ static int xsk_queue_for_rx_slot(int q, int rx_slot, int nq, int rx_slots,
     return ((q + direction_offset) % slots) == rx_slot;
 }
 
+#define NE_RX_QUEUE_BURST 16u
+
+struct ne_rx_queue_ref {
+    struct ne_xsk_queue *queue;
+    uint8_t iface_idx;
+};
+
+static _Thread_local uint32_t tls_local_rx_cursor;
+static _Thread_local uint32_t tls_wan_rx_cursor;
+
 int ne_recv_local_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out, uint32_t max)
 {
+    struct ne_rx_queue_ref refs[MAX_INTERFACES * MAX_QUEUES];
     uint32_t total = 0;
+    uint32_t ref_count = 0;
+    uint32_t start;
+    uint32_t visited = 0;
     struct ne_packet *out_ptr = out;
 
     if (!p || rx_slot < 0 || rx_slot >= (int)NE_RX_LAN_SLOTS)
         return 0;
 
-    for (int i = 0; i < p->local_count && total < max; i++) {
+    for (int i = 0; i < p->local_count; i++) {
         if (!p->local_live[i])
             continue;
         struct ne_iface *iface = &p->locals[i];
         int q_count = iface->queue_count;
 
-        for (int q = 0; q < q_count && total < max; q++) {
+        for (int q = 0; q < q_count; q++) {
             if (!xsk_queue_for_rx_slot(q, rx_slot, q_count,
                                        (int)NE_RX_SLOTS, 0))
                 continue;
-            iface->queues[q].rx_pending = 0;
-
-            int n = recv_queue(&iface->queues[q], out_ptr, max - total,
-                               NE_DIR_LOCAL, 0, (uint8_t)i);
-
-            total += (uint32_t)n;
-            out_ptr += n;
+            refs[ref_count].queue = &iface->queues[q];
+            refs[ref_count].iface_idx = (uint8_t)i;
+            ref_count++;
         }
     }
+    if (ref_count == 0)
+        return 0;
+
+    start = tls_local_rx_cursor % ref_count;
+    while (visited < ref_count && total < max) {
+        struct ne_rx_queue_ref *ref =
+            &refs[(start + visited) % ref_count];
+        uint32_t budget = max - total;
+        int n;
+
+        if (ref_count > 1 && budget > NE_RX_QUEUE_BURST)
+            budget = NE_RX_QUEUE_BURST;
+        ref->queue->rx_pending = 0;
+        n = recv_queue(ref->queue, out_ptr, budget, NE_DIR_LOCAL, 0,
+                       ref->iface_idx);
+        total += (uint32_t)n;
+        out_ptr += n;
+        visited++;
+    }
+    /* Continue after the last queue examined. A permanently busy first
+     * interface can therefore never starve queues on later interfaces. */
+    tls_local_rx_cursor = (start + (visited ? visited : 1u)) % ref_count;
     return (int)total;
 }
 
 int ne_recv_wan_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out, uint32_t max)
 {
+    struct ne_rx_queue_ref refs[MAX_INTERFACES * MAX_QUEUES];
     uint32_t total = 0;
+    uint32_t ref_count = 0;
+    uint32_t start;
+    uint32_t visited = 0;
     struct ne_packet *out_ptr = out;
 
     if (!p || rx_slot < 0 || rx_slot >= (int)NE_RX_WAN_SLOTS)
         return 0;
 
-    for (int i = 0; i < p->wan_count && total < max; i++) {
+    for (int i = 0; i < p->wan_count; i++) {
         if (!p->wan_live[i])
             continue;
         struct ne_iface *iface = &p->wans[i];
         int q_count = iface->queue_count;
 
-        for (int q = 0; q < q_count && total < max; q++) {
+        for (int q = 0; q < q_count; q++) {
             if (!xsk_queue_for_rx_slot(q, rx_slot, q_count,
                                        (int)NE_RX_SLOTS, 1))
                 continue;
-            iface->queues[q].rx_pending = 0;
-
-            int n = recv_queue(&iface->queues[q], out_ptr, max - total,
-                               NE_DIR_WAN, (uint8_t)i, 0);
-
-            total += (uint32_t)n;
-            out_ptr += n;
+            refs[ref_count].queue = &iface->queues[q];
+            refs[ref_count].iface_idx = (uint8_t)i;
+            ref_count++;
         }
     }
+    if (ref_count == 0)
+        return 0;
+
+    start = tls_wan_rx_cursor % ref_count;
+    while (visited < ref_count && total < max) {
+        struct ne_rx_queue_ref *ref =
+            &refs[(start + visited) % ref_count];
+        uint32_t budget = max - total;
+        int n;
+
+        if (ref_count > 1 && budget > NE_RX_QUEUE_BURST)
+            budget = NE_RX_QUEUE_BURST;
+        ref->queue->rx_pending = 0;
+        n = recv_queue(ref->queue, out_ptr, budget, NE_DIR_WAN,
+                       ref->iface_idx, 0);
+        total += (uint32_t)n;
+        out_ptr += n;
+        visited++;
+    }
+    tls_wan_rx_cursor = (start + (visited ? visited : 1u)) % ref_count;
     return (int)total;
 }
 
