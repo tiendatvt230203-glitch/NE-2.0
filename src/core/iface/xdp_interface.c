@@ -1515,7 +1515,8 @@ static _Thread_local time_t tls_xsk_stats_second;
 static atomic_uint xsk_stats_error_reported = ATOMIC_VAR_INIT(0u);
 
 static void report_iface_xsk_stats(const char *role,
-                                   struct ne_iface *iface)
+                                   struct ne_iface *iface,
+                                   uint32_t pool_free)
 {
     if (!role || !iface)
         return;
@@ -1539,13 +1540,15 @@ static void report_iface_xsk_stats(const char *role,
             return;
         fprintf(stderr,
                 "[XSK-STATS] %s %s q=%d rx_drop=%llu rx_invalid=%llu "
-                "tx_invalid=%llu rx_ring_full=%llu fq_empty=%llu\n",
+                "tx_invalid=%llu rx_ring_full=%llu fq_empty=%llu "
+                "pool_free=%u\n",
                 role, iface->ifname, q,
                 (unsigned long long)stats.rx_dropped,
                 (unsigned long long)stats.rx_invalid_descs,
                 (unsigned long long)stats.tx_invalid_descs,
                 (unsigned long long)stats.rx_ring_full,
-                (unsigned long long)stats.rx_fill_ring_empty_descs);
+                (unsigned long long)stats.rx_fill_ring_empty_descs,
+                pool_free);
         fflush(stderr);
         return;
     }
@@ -1554,6 +1557,7 @@ static void report_iface_xsk_stats(const char *role,
 static void report_pair_xsk_stats(struct ne_pair *p)
 {
     struct timespec now;
+    uint32_t pool_free;
 
     if (!p ||
         atomic_load_explicit(&xsk_stats_error_reported,
@@ -1563,13 +1567,14 @@ static void report_pair_xsk_stats(struct ne_pair *p)
         now.tv_sec == tls_xsk_stats_second)
         return;
     tls_xsk_stats_second = now.tv_sec;
+    pool_free = ne_pool_free_count(p);
     for (int i = 0; i < p->local_count; i++) {
         if (p->local_live[i])
-            report_iface_xsk_stats("LAN", &p->locals[i]);
+            report_iface_xsk_stats("LAN", &p->locals[i], pool_free);
     }
     for (int i = 0; i < p->wan_count; i++) {
         if (p->wan_live[i])
-            report_iface_xsk_stats("WAN", &p->wans[i]);
+            report_iface_xsk_stats("WAN", &p->wans[i], pool_free);
     }
 }
 
@@ -1775,33 +1780,67 @@ void ne_drain_cq_wan(struct ne_pair *p, int tx_slot)
     }
 }
 
-static void refill_fq_queue(struct ne_xsk_queue *slot, struct ne_pool *pool)
+#define NE_FQ_REFILL_BUDGET_9000 1024u
+
+static atomic_uint fq_pool_empty_reported = ATOMIC_VAR_INIT(0u);
+static atomic_uint fq_reserve_failed_reported = ATOMIC_VAR_INIT(0u);
+
+static void refill_fq_queue(struct ne_xsk_queue *slot, struct ne_pool *pool,
+                            const char *ifname, int queue_id,
+                            uint32_t refill_budget)
 {
     uint64_t addrs[NE_BATCH_SIZE];
-    uint32_t idx = 0;
-    uint32_t free_slots = xsk_prod_nb_free(&slot->fq, NE_BATCH_SIZE);
-    uint32_t want;
-    uint32_t got;
+    uint32_t supplied = 0;
 
-    if (!free_slots)
-        return;
-    want = free_slots > NE_BATCH_SIZE ? NE_BATCH_SIZE : free_slots;
-    got = pool_pop(pool, addrs, want);
-    if (!got)
-        return;
-    if (xsk_ring_prod__reserve(&slot->fq, got, &idx) != got) {
-        (void)pool_push(pool, addrs, got);
-        return;
+    while (supplied < refill_budget) {
+        uint32_t request = refill_budget - supplied;
+        uint32_t free_slots;
+        uint32_t want;
+        uint32_t got;
+        uint32_t idx = 0;
+
+        if (request > NE_BATCH_SIZE)
+            request = NE_BATCH_SIZE;
+        free_slots = xsk_prod_nb_free(&slot->fq, request);
+        if (!free_slots)
+            break;
+        want = free_slots > request ? request : free_slots;
+        got = pool_pop(pool, addrs, want);
+        if (!got) {
+            if (atomic_exchange_explicit(&fq_pool_empty_reported, 1u,
+                                         memory_order_relaxed) == 0) {
+                fprintf(stderr,
+                        "[FQ-REFILL] shared UMEM pool empty at %s q=%d\n",
+                        ifname ? ifname : "?", queue_id);
+                fflush(stderr);
+            }
+            break;
+        }
+        if (xsk_ring_prod__reserve(&slot->fq, got, &idx) != got) {
+            (void)pool_push(pool, addrs, got);
+            if (atomic_exchange_explicit(&fq_reserve_failed_reported, 1u,
+                                         memory_order_relaxed) == 0) {
+                fprintf(stderr,
+                        "[FQ-REFILL] reserve failed at %s q=%d want=%u\n",
+                        ifname ? ifname : "?", queue_id, got);
+                fflush(stderr);
+            }
+            break;
+        }
+        for (uint32_t i = 0; i < got; i++)
+            *xsk_ring_prod__fill_addr(&slot->fq, idx + i) = addrs[i];
+        xsk_ring_prod__submit(&slot->fq, got);
+        supplied += got;
+        if (got < want)
+            break;
     }
-    for (uint32_t i = 0; i < got; i++)
-        *xsk_ring_prod__fill_addr(&slot->fq, idx + i) = addrs[i];
-    xsk_ring_prod__submit(&slot->fq, got);
     if (slot->xsk && xsk_ring_prod__needs_wakeup(&slot->fq))
         (void)recvfrom(xsk_socket__fd(slot->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
 }
 
 static void refill_fq_iface_slot(struct ne_iface *iface, struct ne_pool *pool, int rx_slot,
-                                 int rx_slots, int direction_offset)
+                                 int rx_slots, int direction_offset,
+                                 uint32_t refill_budget)
 {
     int nq = iface->queue_count;
 
@@ -1809,31 +1848,40 @@ static void refill_fq_iface_slot(struct ne_iface *iface, struct ne_pool *pool, i
         if (!xsk_queue_for_rx_slot(q, rx_slot, nq, rx_slots,
                                    direction_offset))
             continue;
-        refill_fq_queue(&iface->queues[q], pool);
+        refill_fq_queue(&iface->queues[q], pool, iface->ifname, q,
+                        refill_budget);
     }
 }
 
 void ne_refill_fq_local_slot(struct ne_pair *p, int rx_slot)
 {
+    uint32_t refill_budget;
+
     if (!p || rx_slot < 0 || rx_slot >= (int)NE_RX_LAN_SLOTS)
         return;
+    refill_budget = ne_mtu_mode_is_jumbo(p->mtu_mode)
+        ? NE_FQ_REFILL_BUDGET_9000 : NE_BATCH_SIZE;
     for (int i = 0; i < p->local_count; i++) {
         if (!p->local_live[i])
             continue;
         refill_fq_iface_slot(&p->locals[i], &p->pool, rx_slot,
-                             (int)NE_RX_LAN_SLOTS, 0);
+                             (int)NE_RX_LAN_SLOTS, 0, refill_budget);
     }
 }
 
 void ne_refill_fq_wan_slot(struct ne_pair *p, int rx_slot)
 {
+    uint32_t refill_budget;
+
     if (!p || rx_slot < 0 || rx_slot >= (int)NE_RX_WAN_SLOTS)
         return;
+    refill_budget = ne_mtu_mode_is_jumbo(p->mtu_mode)
+        ? NE_FQ_REFILL_BUDGET_9000 : NE_BATCH_SIZE;
     for (int i = 0; i < p->wan_count; i++) {
         if (!p->wan_live[i])
             continue;
         refill_fq_iface_slot(&p->wans[i], &p->pool, rx_slot,
-                             (int)NE_RX_WAN_SLOTS, 0);
+                             (int)NE_RX_WAN_SLOTS, 0, refill_budget);
     }
 }
 
