@@ -437,13 +437,11 @@ static void *crypto_worker_thread(void *arg)
     pin_cpu(ctx->cpu_id);
     dp_crypto_worker_bind(ctx->worker_idx);
     crypto_option_bind_worker_idx((uint8_t)ctx->worker_idx);
-    crypto_l2_pqc_bind_pair(&fwd->pair);
     (void)flow_table_thread_init();
 
     /* Encrypt / decrypt / reasm only. Bypass never queues here. */
     while (atomic_load_explicit(&running, memory_order_acquire)) {
         int did_work = 0;
-        int crypto_on = fwd->cfg && fwd->cfg->crypto_enabled;
         uint32_t n;
 
         /* Drain small batches to amortize ring atomics and worker-loop
@@ -465,12 +463,7 @@ static void *crypto_worker_thread(void *arg)
             did_work = 1;
         }
         if (++gc_tick >= 2048) {
-            if (crypto_on)
-                fwd_crypto_frag_gc_worker_tick(ctx->worker_idx);
-            if (ne_mtu_mode_is_jumbo(fwd->mtu_mode))
-                dp_jumbo_gc(fwd, ctx->worker_idx);
-            else
-                dataplane_mtu1500_udp_reorder_gc(fwd, ctx->worker_idx);
+            dp_jumbo_gc(fwd, ctx->worker_idx);
             gc_tick = 0;
         }
 
@@ -479,10 +472,7 @@ static void *crypto_worker_thread(void *arg)
         else
             crypto_idle_pause(fwd, &idle, ctx->worker_idx);
     }
-    if (!ne_mtu_mode_is_jumbo(fwd->mtu_mode))
-        dataplane_mtu1500_udp_reorder_reset(fwd, ctx->worker_idx);
-    else
-        dp_jumbo_reset(fwd, ctx->worker_idx);
+    dp_jumbo_reset(fwd, ctx->worker_idx);
     packet_crypto_worker_cleanup();
     flow_table_thread_cleanup();
     return NULL;
@@ -513,12 +503,8 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
     fwd->cfg = cfg;
     fwd->mtu_mode = mtu_mode;
 
-    crypto_option_set_mtu(ne_mtu_mode_value(mtu_mode));
     fprintf(stderr, "[MTU-MODE] selected MTU %s\n",
             ne_mtu_mode_name(mtu_mode));
-    if (mtu_mode == NE_MTU_MODE_1500)
-        dataplane_mtu1500_udp_reorder_configure(fwd);
-
     fwd->local_count = cfg->local_count;
     fwd->wan_count = config_count_dataplane_wans(cfg);
     if (fwd->local_count > MAX_INTERFACES)

@@ -13,7 +13,6 @@ int fwd_crypto_rebuild(struct app_config *cfg);
 void fwd_crypto_snapshot_active_to_prev(void);
 void fwd_crypto_maybe_expire_prev_grace(void);
 void fwd_crypto_clear_grace(void);
-void fwd_crypto_frag_gc_worker_tick(int worker_idx);
 
 int fwd_crypto_profile_slot_for_id(int profile_id);
 struct packet_crypto_ctx *fwd_crypto_ctx_for_wire_id(uint8_t wire_id);

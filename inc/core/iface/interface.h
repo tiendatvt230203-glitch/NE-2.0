@@ -13,10 +13,8 @@
 #define MAX_QUEUES     64
 
 #define NE_RING          16384u
-#define NE_FRAME_1500     2048u
 #define NE_FRAME_9000     4096u
 #define NE_FRAME_MAX      NE_FRAME_9000
-#define NE_N_FRAMES_1500  1048576u
 #define NE_N_FRAMES_9000   524288u
 #define NE_BATCH_SIZE       64u
 
@@ -28,7 +26,7 @@
 /* NIC RX-fragment boundaries are independent of the 4 KiB UMEM frame size.
  * Keep enough descriptor slots for an MTU-9000 packet on drivers that expose
  * smaller RX fragments. segment_count 0/1 both mean a normal single-frame
- * packet, so existing MTU-1500 producers remain compatible. */
+ * packet. */
 #define NE_PACKET_MAX_SEGMENTS 8u
 #define NE_PACKET_MAX_CONTINUATIONS (NE_PACKET_MAX_SEGMENTS - 1u)
 

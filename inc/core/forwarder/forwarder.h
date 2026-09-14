@@ -32,8 +32,6 @@ struct forwarder {
     pthread_t wan_rx_threads[NE_RX_WAN_SLOTS];
     int threads_started;
 
-    uint64_t split_tail_cache[NE_CRYPTO_WORKERS][64];
-    uint16_t split_tail_count[NE_CRYPTO_WORKERS];
 
     struct mac_learn_table mac_table;
 };

@@ -16,7 +16,6 @@ void dp_crypto_worker_bind(int worker_idx);
 int dp_crypto_current_worker_idx(void);
 
 /* Monotonic sequence in one UDP flow/direction. Called on its sticky worker. */
-int dp_udp_next_tx_seq(const uint8_t *pkt, uint32_t len, uint32_t *seq_out);
 
 /* Learn/lookup a decrypted flow and return its sticky, independently balanced TX slot. */
 int dp_flow_pick_tx_slot(const uint8_t *pkt, uint32_t len, int worker_hint);

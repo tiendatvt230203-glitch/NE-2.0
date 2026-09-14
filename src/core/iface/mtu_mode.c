@@ -8,7 +8,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define NE_MTU_STANDARD 1500u
 #define NE_MTU_JUMBO    9000u
 
 static int read_iface_mtu(int fd, const char *ifname, uint32_t *mtu_out)
@@ -59,8 +58,6 @@ static int jumbo_driver_supported(const char *ifname, char *driver,
 
 static enum ne_mtu_mode mode_for_mtu(uint32_t mtu)
 {
-    if (mtu == NE_MTU_STANDARD)
-        return NE_MTU_MODE_1500;
     if (mtu == NE_MTU_JUMBO)
         return NE_MTU_MODE_9000;
     return NE_MTU_MODE_INVALID;
@@ -81,7 +78,7 @@ static int check_iface(int fd, const char *role, const char *ifname,
     mode = mode_for_mtu(mtu);
     if (mode == NE_MTU_MODE_INVALID) {
         snprintf(error, error_size,
-                 "%s %s: unsupported MTU %u (only 1500 or 9000)",
+                 "%s %s: unsupported MTU %u (this build requires 9000)",
                  role, ifname, mtu);
         return -1;
     }
@@ -111,8 +108,6 @@ static int validate_jumbo_driver(const char *role, const char *ifname,
 const char *ne_mtu_mode_name(enum ne_mtu_mode mode)
 {
     switch (mode) {
-    case NE_MTU_MODE_1500:
-        return "1500";
     case NE_MTU_MODE_9000:
         return "9000";
     default:
@@ -124,8 +119,6 @@ uint32_t ne_mtu_mode_value(enum ne_mtu_mode mode)
 {
     if (mode == NE_MTU_MODE_9000)
         return NE_MTU_JUMBO;
-    if (mode == NE_MTU_MODE_1500)
-        return NE_MTU_STANDARD;
     return 0;
 }
 
@@ -169,19 +162,17 @@ int ne_mtu_mode_detect(const struct app_config *cfg, enum ne_mtu_mode *mode_out,
         snprintf(error, error_size, "no LAN/dataplane WAN available for MTU detection");
         return -1;
     }
-    if (detected == NE_MTU_MODE_9000) {
-        for (int i = 0; i < cfg->local_count; i++) {
-            if (validate_jumbo_driver("LAN", cfg->locals[i].ifname,
-                                      error, error_size) != 0)
-                return -1;
-        }
-        for (int i = 0; i < cfg->wan_count; i++) {
-            if (!cfg->wans[i].dataplane)
-                continue;
-            if (validate_jumbo_driver("WAN", cfg->wans[i].ifname,
-                                      error, error_size) != 0)
-                return -1;
-        }
+    for (int i = 0; i < cfg->local_count; i++) {
+        if (validate_jumbo_driver("LAN", cfg->locals[i].ifname,
+                                  error, error_size) != 0)
+            return -1;
+    }
+    for (int i = 0; i < cfg->wan_count; i++) {
+        if (!cfg->wans[i].dataplane)
+            continue;
+        if (validate_jumbo_driver("WAN", cfg->wans[i].ifname,
+                                  error, error_size) != 0)
+            return -1;
     }
     *mode_out = detected;
     return 0;

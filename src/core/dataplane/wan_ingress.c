@@ -4,7 +4,6 @@
 
 #include "../../../inc/crypto/eth_parse.h"
 #include "../../../inc/crypto/crypto_option.h"
-#include "../../../inc/crypto/mtu1500_udp_option.h"
 #include "../../../inc/crypto/packet_crypto.h"
 
 #include "../../../inc/core/dataplane/crypto_route.h"
@@ -12,7 +11,6 @@
 #include "../../../inc/core/flow/mac_learn.h"
 #include "../../../inc/core/dataplane/arp_bridge.h"
 #include "../../../inc/core/dataplane/jumbo_l2.h"
-#include "../../../inc/core/dataplane/mtu1500/udp_reorder.h"
 
 #include <netinet/in.h>
 #include <stdatomic.h>
@@ -32,9 +30,6 @@ static void jumbo_wan_diag_once(unsigned int bit, const char *message)
     fprintf(stderr, "[JUMBO-RX] %s\n", message);
     fflush(stderr);
 }
-
-static int wan_try_l2_pqc_icmp(struct forwarder *fwd, uint8_t *pkt,
-                               uint32_t *len, uint64_t addr, int *pending);
 
 static const struct crypto_policy *fwd_policy_by_wire_id(struct forwarder *fwd, uint8_t wire_id)
 {
@@ -96,162 +91,18 @@ static int decrypt_l2(struct forwarder *fwd, uint8_t *pkt, uint32_t *len)
     return -1;
 }
 
-static int reassemble_l2(struct forwarder *fwd, uint8_t *pkt, uint32_t *len,
-                         uint8_t policy_id, uint64_t addr, int *pending)
-{
-    struct packet_crypto_ctx *ctx;
-    int slot, rr;
-    uint32_t blen = 0;
-
-    ctx = fwd_crypto_ctx_for_wire_id(policy_id);
-    if (!ctx)
-        return -1;
-    slot = fwd_crypto_profile_slot_for_id(
-        fwd_crypto_profile_id_for_wire_id(policy_id));
-    if (slot < 0)
-        return -1;
-    crypto_l2_pqc_reasm_set_addr(addr);
-    rr = crypto_option_reassemble(CRYPTO_OPT_L2_PQC_UDP_1500,
-                                  CRYPTO_PROTO_UDP, slot,
-                                  dp_crypto_current_worker_idx(),
-                                  ctx, pkt, len, pkt, &blen);
-    if (rr == 0) {
-        *pending = crypto_l2_pqc_reasm_held() ? 2 : 1;
-        return 0;
-    }
-    if (rr != 1)
-        return -1;
-    *len = blen;
-    return 0;
-}
-
-/* The versioned four-byte marker covers both full and split UDP. */
-static int wan_try_l2_pqc_udp(struct forwarder *fwd, uint8_t *pkt, uint32_t *len,
-                              uint64_t addr, int *pending)
-{
-    struct packet_crypto_ctx *ctx;
-    uint8_t wire_pol = 0;
-    uint16_t fragment_id = 0;
-    uint8_t fragment_index = 0;
-
-    if (fwd->mtu_mode != NE_MTU_MODE_1500 ||
-        !crypto_option_is_fragment(CRYPTO_OPT_L2_PQC_UDP_1500,
-                                   CRYPTO_PROTO_UDP, fwd->cfg, pkt, *len,
-                                   &fragment_id, &fragment_index))
-        return 0;
-
-    if (crypto_eth_l2_read_policy_id(pkt, *len, &wire_pol) != 0)
-        return 0;
-
-    if (!fwd_policy_by_wire_id(fwd, wire_pol))
-        return 0;
-
-    ctx = fwd_crypto_ctx_for_wire_id(wire_pol);
-    if (!ctx)
-        return 0;
-
-    if (reassemble_l2(fwd, pkt, len, wire_pol, addr, pending) != 0) {
-        if (pending)
-            *pending = 0;
-        return -1;
-    }
-    return 1;
-}
-
 static int decrypt_wan(struct forwarder *fwd, struct ne_packet *job)
 {
-    uint8_t scratch[8192];
     uint8_t *pkt = ne_packet_data(&fwd->pair, job->addr);
     uint32_t len = job->len;
-    uint16_t pid = 0;
-    uint8_t fidx = 0;
-    int pending = 0;
-    int is_l2 = 0;
 
     if (!fwd || !pkt || !job)
         return -1;
-    /* Caller must only invoke this for encrypted wire; plain bypass never enters. */
     if (!wan_wire_is_encrypted(fwd, pkt, len))
         return 0;
-
-    is_l2 = fwd_crypto_has_l2_marker(pkt, len) ||
-        crypto_eth_l2_has_marker(pkt, len);
-
-    {
-        int l2_fast = 0;
-
-        /* MTU 1500 owns the legacy UDP/ICMP split and reassembly formats.
-         * Jumbo mode uses only the generic 0x104A L2 format plus jumbo_l2. */
-        if (!ne_mtu_mode_is_jumbo(fwd->mtu_mode)) {
-            l2_fast = wan_try_l2_pqc_icmp(fwd, pkt, &len,
-                                          job->addr, &pending);
-            if (l2_fast == 0)
-                l2_fast = wan_try_l2_pqc_udp(fwd, pkt, &len,
-                                             job->addr, &pending);
-        }
-
-        if (l2_fast < 0)
-            return -1;
-        if (l2_fast == 1) {
-            uint64_t out_addr;
-
-            if (pending == 2)
-                return 2;
-            if (pending)
-                return 1;
-            out_addr = crypto_l2_pqc_reasm_out_addr();
-            if (out_addr && out_addr != job->addr) {
-                ne_frame_free(&fwd->pair, job->addr);
-                job->addr = out_addr;
-            }
-            job->len = len;
-            return 0;
-        }
-        if (l2_fast == 0) {
-            uint32_t orig_len = len;
-            uint8_t wire_pol = 0;
-            int need_backup = fwd->mtu_mode == NE_MTU_MODE_1500 &&
-                crypto_option_is_fragment(CRYPTO_OPT_L2_PQC_UDP_1500,
-                                          CRYPTO_PROTO_UDP, fwd->cfg,
-                                          pkt, len, &pid, &fidx);
-            if (need_backup && orig_len <= sizeof(scratch))
-                memcpy(scratch, pkt, orig_len);
-            if (decrypt_l2(fwd, pkt, &len) != 0 || !wan_l2_plain_ok(pkt, len)) {
-                if (need_backup)
-                    memcpy(pkt, scratch, orig_len);
-                len = orig_len;
-                if (!ne_mtu_mode_is_jumbo(fwd->mtu_mode) &&
-                    crypto_option_is_fragment(CRYPTO_OPT_L2_PQC_UDP_1500,
-                                              CRYPTO_PROTO_UDP, fwd->cfg,
-                                              pkt, len, &pid, &fidx)) {
-                    if (crypto_eth_l2_read_policy_id(pkt, len, &wire_pol) != 0)
-                        return -1;
-                    if (reassemble_l2(fwd, pkt, &len, wire_pol, job->addr, &pending) != 0)
-                        return -1;
-                } else if (is_l2) {
-                    return -1;
-                }
-            }
-        }
-    }
-    if (pending == 2)
-        return 2;
-    if (pending)
-        return 1;
-
-    if (!fwd->cfg->crypto_enabled) {
-        job->len = len;
-        return 0;
-    }
-
-    {
-        uint64_t out_addr = crypto_l2_pqc_reasm_out_addr();
-
-        if (out_addr && out_addr != job->addr) {
-            ne_frame_free(&fwd->pair, job->addr);
-            job->addr = out_addr;
-        }
-    }
+    if (decrypt_l2(fwd, pkt, &len) != 0 ||
+        !wan_l2_plain_ok(pkt, len))
+        return -1;
     job->len = len;
     return 0;
 }
@@ -455,74 +306,6 @@ static int forward_wan_to_local(struct forwarder *fwd, struct ne_packet *job,
     return -1;
 }
 
-static int udp_reorder_emit(void *ctx, struct dp_udp_reorder_item *item)
-{
-    struct forwarder *fwd = ctx;
-    uint8_t *pkt;
-    int rc;
-
-    if (!fwd || !item)
-        return -1;
-    pkt = ne_packet_data(&fwd->pair, item->packet.addr);
-    if (!pkt)
-        return -1;
-    dp_out_ring_bind(dp_flow_pick_tx_slot(pkt, item->packet.len,
-                                          dp_crypto_current_worker_idx()));
-    rc = forward_wan_to_local(fwd, &item->packet, item->profile_pi,
-                              item->ingress_wan_dp);
-    if (rc < 0)
-        return -1;
-    if (rc > 0)
-        return 0;
-    return 0;
-}
-
-static void udp_reorder_drop(void *ctx, struct dp_udp_reorder_item *item)
-{
-    struct forwarder *fwd = ctx;
-
-    if (!fwd || !item)
-        return;
-    ne_frame_free(&fwd->pair, item->packet.addr);
-}
-
-static struct dp_udp_reorder_ops udp_reorder_ops(struct forwarder *fwd)
-{
-    struct dp_udp_reorder_ops ops = {
-        .ctx = fwd,
-        .emit = udp_reorder_emit,
-        .drop = udp_reorder_drop,
-    };
-
-    return ops;
-}
-
-void dataplane_mtu1500_udp_reorder_configure(struct forwarder *fwd)
-{
-    if (!fwd || fwd->mtu_mode != NE_MTU_MODE_1500)
-        return;
-    dp_mtu1500_udp_reorder_configure_from_env();
-}
-
-void dataplane_mtu1500_udp_reorder_gc(struct forwarder *fwd, int worker_idx)
-{
-    if (!fwd || fwd->mtu_mode != NE_MTU_MODE_1500)
-        return;
-    struct dp_udp_reorder_ops ops = udp_reorder_ops(fwd);
-
-    dp_mtu1500_udp_reorder_gc(worker_idx,
-                              dp_mtu1500_udp_reorder_now_ns(), &ops);
-}
-
-void dataplane_mtu1500_udp_reorder_reset(struct forwarder *fwd, int worker_idx)
-{
-    if (!fwd || fwd->mtu_mode != NE_MTU_MODE_1500)
-        return;
-    struct dp_udp_reorder_ops ops = udp_reorder_ops(fwd);
-
-    dp_mtu1500_udp_reorder_reset_worker(worker_idx, &ops);
-}
-
 int dataplane_wan_needs_mid(struct forwarder *fwd, const uint8_t *pkt, uint32_t len)
 {
     if (!fwd || !pkt || !fwd->cfg)
@@ -643,8 +426,6 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
     if (profile_pi < 0)
         goto drop;
     if (encrypted) {
-        if (fwd->mtu_mode == NE_MTU_MODE_1500)
-            crypto_mtu1500_udp_clear_rx_meta();
         if (!fwd->cfg->crypto_enabled)
             goto drop;
         dec = decrypt_wan(fwd, &job);
@@ -669,39 +450,6 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
     }
 
     if (encrypted) {
-        uint32_t epoch;
-        uint32_t seq;
-
-        /* Jumbo mode uses generic 0x104A L2-PQC and never produces UDP sequence
-         * metadata. Retain this guard so legacy metadata can never enter the
-         * reorder buffer while the dataplane is operating in jumbo mode. */
-        if (fwd->mtu_mode == NE_MTU_MODE_1500 &&
-            crypto_mtu1500_udp_take_rx_meta(&epoch, &seq) == 0) {
-            struct dp_udp_reorder_key key;
-            struct dp_udp_reorder_item item;
-            struct dp_udp_reorder_ops ops = udp_reorder_ops(fwd);
-            uint32_t src_ip = 0, dst_ip = 0;
-            uint16_t src_port = 0, dst_port = 0;
-            uint8_t proto = 0;
-
-            if (dp_parse_flow(pkt, job.len, &src_ip, &dst_ip,
-                              &src_port, &dst_port, &proto) != 0 ||
-                proto != IPPROTO_UDP)
-                goto drop;
-            key.src_ip = src_ip;
-            key.dst_ip = dst_ip;
-            key.src_port = src_port;
-            key.dst_port = dst_port;
-            memset(&item, 0, sizeof(item));
-            item.packet = job;
-            item.profile_pi = (int16_t)profile_pi;
-            item.ingress_wan_dp = job.wan_idx < fwd->wan_count
-                ? (int8_t)job.wan_idx : -1;
-            dp_mtu1500_udp_reorder_submit(
-                dp_crypto_current_worker_idx(), &key, epoch, seq, &item,
-                dp_mtu1500_udp_reorder_now_ns(), &ops);
-            return;
-        }
         dp_out_ring_bind(dp_flow_pick_tx_slot(pkt, job.len,
                                               dp_crypto_current_worker_idx()));
     } else {
@@ -726,62 +474,4 @@ policy_drop:
 
 drop:
     ne_packet_free(&fwd->pair, &job);
-}
-
-/* ===================== ICMP fragmentation/reassembly ===================== */
-
-static int wan_reassemble_l2_icmp(struct forwarder *fwd, uint8_t *pkt,
-                                  uint32_t *len, uint8_t policy_id,
-                                  uint64_t addr, int *pending)
-{
-    struct packet_crypto_ctx *ctx;
-    uint32_t joined_len = 0;
-    int profile_slot;
-    int result;
-
-    ctx = fwd_crypto_ctx_for_wire_id(policy_id);
-    if (!ctx)
-        return -1;
-    profile_slot = fwd_crypto_profile_slot_for_id(
-        fwd_crypto_profile_id_for_wire_id(policy_id));
-    if (profile_slot < 0)
-        return -1;
-
-    crypto_l2_pqc_reasm_set_addr(addr);
-    result = crypto_option_reassemble(
-        CRYPTO_OPT_L2_PQC_ICMP_1500, CRYPTO_PROTO_ICMP, profile_slot,
-        dp_crypto_current_worker_idx(), ctx, pkt, len, pkt, &joined_len);
-    if (result == 0) {
-        *pending = crypto_l2_pqc_reasm_held() ? 2 : 1;
-        return 0;
-    }
-    if (result != 1)
-        return -1;
-    *len = joined_len;
-    return 0;
-}
-
-static int wan_try_l2_pqc_icmp(struct forwarder *fwd, uint8_t *pkt,
-                               uint32_t *len, uint64_t addr, int *pending)
-{
-    uint8_t wire_policy_id = 0;
-    uint16_t fragment_id = 0;
-    uint8_t fragment_index = 0;
-
-    if (fwd->mtu_mode != NE_MTU_MODE_1500 ||
-        !crypto_option_is_fragment(CRYPTO_OPT_L2_PQC_ICMP_1500,
-                                   CRYPTO_PROTO_ICMP, fwd->cfg, pkt, *len,
-                                   &fragment_id, &fragment_index))
-        return 0;
-    if (crypto_eth_l2_read_policy_id(pkt, *len, &wire_policy_id) != 0 ||
-        !fwd_policy_by_wire_id(fwd, wire_policy_id) ||
-        !fwd_crypto_ctx_for_wire_id(wire_policy_id))
-        return 0;
-    if (wan_reassemble_l2_icmp(fwd, pkt, len, wire_policy_id, addr,
-                               pending) != 0) {
-        if (pending)
-            *pending = 0;
-        return -1;
-    }
-    return 1;
 }

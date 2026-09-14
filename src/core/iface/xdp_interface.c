@@ -897,10 +897,7 @@ static int xsk_create_queue(struct ne_pair *p, struct ne_iface *iface, const cha
         .bind_flags = XDP_COPY | XDP_USE_NEED_WAKEUP,
     };
 
-    /* Scatter-gather is a jumbo-only capability. Keeping it off in standard
-     * mode preserves AF_XDP support on older ixgbe cards. */
-    if (ne_mtu_mode_is_jumbo(p->mtu_mode))
-        cfg.bind_flags |= XDP_USE_SG;
+    cfg.bind_flags |= XDP_USE_SG;
 
     zero_queue_rings(slot, preserve);
     return xsk_socket__create_shared(&slot->xsk, ifname, (uint32_t)q, p->umem,
@@ -1028,8 +1025,7 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg,
     struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
     (void)setrlimit(RLIMIT_MEMLOCK, &rl);
 
-    p->frame_size = ne_mtu_mode_is_jumbo(mtu_mode) ? NE_FRAME_9000
-                                                    : NE_FRAME_1500;
+    p->frame_size = NE_FRAME_9000;
     p->xdp_flags = XDP_FLAGS_DRV_MODE;
 
     p->local_queue_total = 0;
@@ -1055,8 +1051,7 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg,
         p->wan_queue_total += nq;
     }
 
-    p->n_frames = ne_mtu_mode_is_jumbo(mtu_mode) ? NE_N_FRAMES_9000
-                                                  : NE_N_FRAMES_1500;
+    p->n_frames = NE_N_FRAMES_9000;
     p->bufsize = (size_t)p->n_frames * (size_t)p->frame_size;
 
     p->bufs = mmap(NULL, p->bufsize, PROT_READ | PROT_WRITE,
@@ -1875,10 +1870,8 @@ void ne_refill_fq_local_slot(struct ne_pair *p, int rx_slot)
 
     if (!p || rx_slot < 0 || rx_slot >= (int)NE_RX_LAN_SLOTS)
         return;
-    refill_budget = ne_mtu_mode_is_jumbo(p->mtu_mode)
-        ? NE_FQ_REFILL_BUDGET_9000 : NE_BATCH_SIZE;
-    target_occupancy = ne_mtu_mode_is_jumbo(p->mtu_mode)
-        ? pair_fq_prefill_per_queue(p) : NE_RING;
+    refill_budget = NE_FQ_REFILL_BUDGET_9000;
+    target_occupancy = pair_fq_prefill_per_queue(p);
     for (int i = 0; i < p->local_count; i++) {
         if (!p->local_live[i])
             continue;
@@ -1895,10 +1888,8 @@ void ne_refill_fq_wan_slot(struct ne_pair *p, int rx_slot)
 
     if (!p || rx_slot < 0 || rx_slot >= (int)NE_RX_WAN_SLOTS)
         return;
-    refill_budget = ne_mtu_mode_is_jumbo(p->mtu_mode)
-        ? NE_FQ_REFILL_BUDGET_9000 : NE_BATCH_SIZE;
-    target_occupancy = ne_mtu_mode_is_jumbo(p->mtu_mode)
-        ? pair_fq_prefill_per_queue(p) : NE_RING;
+    refill_budget = NE_FQ_REFILL_BUDGET_9000;
+    target_occupancy = pair_fq_prefill_per_queue(p);
     for (int i = 0; i < p->wan_count; i++) {
         if (!p->wan_live[i])
             continue;

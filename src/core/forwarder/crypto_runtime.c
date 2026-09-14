@@ -535,20 +535,6 @@ int fwd_crypto_profile_id_for_wire_id(uint8_t wire_id)
     return -1;
 }
 
-void fwd_crypto_frag_gc_worker_tick(int worker_idx)
-{
-    struct timespec ts;
-    uint64_t now_ns;
-
-    if (worker_idx < 0 || worker_idx >= (int)NE_CRYPTO_WORKERS)
-        return;
-
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-
-    crypto_option_frag_gc_all(0, worker_idx, now_ns);
-}
-
 int fwd_crypto_policy_ready(int policy_index)
 {
     return policy_index >= 0 && policy_index < MAX_CRYPTO_POLICIES && policy_crypto_ready[policy_index];

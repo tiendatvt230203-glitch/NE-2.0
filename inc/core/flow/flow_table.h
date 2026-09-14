@@ -18,10 +18,7 @@ struct flow_key {
  * descriptors and the resulting wire fragments never count separately.
  */
 enum flow_wan_window_class {
-    FLOW_WAN_WINDOW_MTU1500_OTHER = 0,
-    FLOW_WAN_WINDOW_MTU1500_TCP,
-    FLOW_WAN_WINDOW_MTU1500_UDP,
-    FLOW_WAN_WINDOW_MTU9000,
+    FLOW_WAN_WINDOW_MTU9000 = 0,
 };
 
 /* Preallocate/free the lock-free per-flow WAN cache for the calling worker. */

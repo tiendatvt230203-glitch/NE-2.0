@@ -4,14 +4,12 @@
 #include "../../../inc/core/forwarder/forwarder_crypto_runtime.h"
 
 #include "../../../inc/crypto/crypto_option.h"
-#include "../../../inc/crypto/mtu1500_udp_option.h"
 #include "../../../inc/crypto/eth_parse.h"
 #include "../../../inc/crypto/packet_crypto.h"
 #include "../../../inc/crypto/pqc_handshake.h"
 #include "../../../inc/core/dataplane/crypto_route.h"
 #include "../../../inc/core/dataplane/arp_bridge.h"
 #include "../../../inc/core/dataplane/jumbo_l2.h"
-#include "../../../inc/core/dataplane/mtu1500/tcp_mss.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
 #include "../../../inc/core/flow/flow_table.h"
 
@@ -20,7 +18,6 @@
 #include <net/if.h>
 #include <stdio.h>
 
-#define SPLIT_TAIL_REFILL_BATCH 32u
 static int push_to_wan(struct forwarder *fwd, struct ne_packet *job, int wan_dp)
 {
     int ri = dp_out_ring_idx();
@@ -33,21 +30,16 @@ static int push_to_wan(struct forwarder *fwd, struct ne_packet *job, int wan_dp)
 static void complete_packet_window_after_enqueue(
     enum flow_wan_window_class window_class, int enqueue_ok)
 {
-    /* MTU1500 TCP advances during selection. MTU1500 UDP and every MTU9000
-     * packet advance once only after the complete original packet is queued. */
+    /* Advance once only after the complete original packet is queued. */
     flow_table_packet_complete(window_class, enqueue_ok);
 }
 
 static enum flow_wan_window_class flow_window_class_for_packet(
     const struct forwarder *fwd, uint8_t proto)
 {
-    if (fwd && fwd->mtu_mode == NE_MTU_MODE_9000)
-        return FLOW_WAN_WINDOW_MTU9000;
-    if (proto == IPPROTO_TCP)
-        return FLOW_WAN_WINDOW_MTU1500_TCP;
-    if (proto == IPPROTO_UDP)
-        return FLOW_WAN_WINDOW_MTU1500_UDP;
-    return FLOW_WAN_WINDOW_MTU1500_OTHER;
+    (void)fwd;
+    (void)proto;
+    return FLOW_WAN_WINDOW_MTU9000;
 }
 
 static void free_wire_fragments(struct forwarder *fwd,
@@ -56,106 +48,6 @@ static void free_wire_fragments(struct forwarder *fwd,
 {
     for (uint32_t i = 0; i < fragment_count; i++)
         ne_frame_free(&fwd->pair, fragments[i].addr);
-}
-
-static int push_split_to_wan(struct forwarder *fwd, struct ne_packet *job,
-                            uint32_t l1, struct ne_packet *tail, uint32_t l2, int wan_dp)
-{
-    struct ne_ring *tx = &fwd->mid_to_wan[wan_dp][dp_out_ring_idx()];
-
-    if (!fwd || !job || !tail)
-        return -1;
-    if (wan_dp < 0 || wan_dp >= fwd->wan_count || ne_ring_count(tx) + 2 > tx->cap) {
-        ne_frame_free(&fwd->pair, tail->addr);
-        return -1;
-    }
-    if (l1 == 0 || l2 == 0 || l1 > fwd->pair.frame_size || l2 > fwd->pair.frame_size) {
-        ne_frame_free(&fwd->pair, tail->addr);
-        return -1;
-    }
-    tail->len = l2;
-    tail->dir = NE_DIR_WAN;
-    tail->wan_idx = (uint8_t)wan_dp;
-    job->len = l1;
-    job->dir = NE_DIR_WAN;
-    job->wan_idx = (uint8_t)wan_dp;
-    if (ne_ring_try_push_pair(tx, job, tail) != 0) {
-        ne_frame_free(&fwd->pair, tail->addr);
-        return -1;
-    }
-    ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
-    return 0;
-}
-
-static int split_tail_take(struct forwarder *fwd, int worker_idx, uint64_t *addr_out)
-{
-    uint32_t got;
-
-    if (!fwd || !addr_out || worker_idx < 0 || worker_idx >= (int)NE_CRYPTO_WORKERS)
-        return -1;
-
-    if (fwd->split_tail_count[worker_idx] == 0) {
-        got = ne_frame_alloc_batch(&fwd->pair, fwd->split_tail_cache[worker_idx],
-                                   SPLIT_TAIL_REFILL_BATCH);
-        if (got == 0)
-            return -1;
-        fwd->split_tail_count[worker_idx] = (uint16_t)got;
-    }
-
-    fwd->split_tail_count[worker_idx]--;
-    *addr_out = fwd->split_tail_cache[worker_idx][fwd->split_tail_count[worker_idx]];
-    return 0;
-}
-
-static int encrypt_to_wan(struct forwarder *fwd, struct ne_packet *job,
-                        const struct crypto_policy *cp, int wan_dp,
-                        struct packet_crypto_ctx *pctx,
-                        crypto_proto_class pclass, int flow_ok)
-{
-    int worker_idx = dp_crypto_current_worker_idx();
-    uint8_t *pkt = ne_packet_data(&fwd->pair, job->addr);
-    struct ne_packet tail = {0};
-    uint8_t *tail_buf = NULL;
-    uint32_t len = job->len;
-    uint32_t l1 = 0, l2 = 0;
-    crypto_option_id opt_id = pclass == CRYPTO_PROTO_UDP
-        ? CRYPTO_OPT_L2_PQC_UDP_1500
-        : (pclass == CRYPTO_PROTO_ICMP
-           ? CRYPTO_OPT_L2_PQC_ICMP_1500 : CRYPTO_OPT_L2_PQC);
-    uint32_t udp_seq;
-
-    (void)flow_ok;
-    (void)cp;
-
-    if ((pclass == CRYPTO_PROTO_UDP || pclass == CRYPTO_PROTO_ICMP) &&
-        fwd->mtu_mode != NE_MTU_MODE_1500)
-        return -1;
-
-    if (pclass == CRYPTO_PROTO_UDP) {
-        if (!flow_ok || dp_udp_next_tx_seq(pkt, len, &udp_seq) != 0)
-            return -1;
-        crypto_mtu1500_udp_set_tx_seq(udp_seq);
-    }
-
-    if (crypto_option_need_split(opt_id, pclass, len)) {
-        if (split_tail_take(fwd, worker_idx, &tail.addr) != 0)
-            return -1;
-        tail_buf = ne_packet_data(&fwd->pair, tail.addr);
-        if (crypto_option_split(opt_id, pclass, pctx, pkt, len, fwd->pair.frame_size, &l1,
-                                tail_buf, fwd->pair.frame_size, &l2) != 0) {
-            ne_frame_free(&fwd->pair, tail.addr);
-            return -1;
-        }
-        if (push_split_to_wan(fwd, job, l1, &tail, l2, wan_dp) != 0)
-            return -1;
-        return 1;
-    }
-
-    if (crypto_option_encrypt(opt_id, pclass, pctx, pkt, &len) != 0) {
-        return -1;
-    }
-    job->len = len;
-    return 0;
 }
 
 static int pick_profile_policy(struct forwarder *fwd, int local_idx, int flow_ok,
@@ -237,8 +129,7 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     struct packet_crypto_ctx *pctx;
     int enc;
     int jumbo_packet = 0;
-    enum flow_wan_window_class window_class =
-        FLOW_WAN_WINDOW_MTU1500_OTHER;
+    enum flow_wan_window_class window_class = FLOW_WAN_WINDOW_MTU9000;
 
     if (!fwd || !pkt)
         goto drop;
@@ -255,9 +146,8 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     if (pick_profile_policy(fwd, li, flow_ok, src_ip, dst_ip, src_port, dst_port, proto,
                             &profile_idx, &cp) != 0)
         goto drop;
-    jumbo_packet = ne_mtu_mode_is_jumbo(fwd->mtu_mode) &&
-        dp_jumbo_packet_needs_wire_split(&job,
-                                         cp->action == POLICY_ACTION_ENCRYPT_L2);
+    jumbo_packet = dp_jumbo_packet_needs_wire_split(
+        &job, cp->action == POLICY_ACTION_ENCRYPT_L2);
     window_class = flow_window_class_for_packet(fwd, proto);
     wan_dp = fwd_wan_pick_for_local(fwd, profile_idx, flow_ok, src_ip, dst_ip,
                                     src_port, dst_port, proto, window_class);
@@ -293,9 +183,6 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     if (!fwd->cfg->crypto_enabled)
         goto drop;
 
-    if (proto == IPPROTO_TCP && (tcp_flags & 0x02u))
-        (void)dp_mtu1500_tcp_clamp_mss(fwd, pkt, job.len, l3_off);
-
     pi = (int)(cp - fwd->cfg->policies);
     if (pi < 0 || pi >= MAX_CRYPTO_POLICIES || !fwd_crypto_policy_ready(pi))
         goto drop;
@@ -320,25 +207,15 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
         complete_packet_window_after_enqueue(window_class, 1);
         return;
     }
-    if (ne_mtu_mode_is_jumbo(fwd->mtu_mode) || proto == IPPROTO_TCP) {
+    {
         uint32_t len = job.len;
 
-        /* Jumbo mode has one L2-PQC format for every IPv4 protocol. It never
-         * emits the legacy UDP 0x104B marker/sequence/split format. TCP uses
-         * the same generic encoder in standard mode after MSS handling. */
         enc = crypto_l2_pqc_encrypt_ipv4_l3(pctx, pkt, &len, l3_off);
         if (enc == 0)
             job.len = len;
-    } else {
-        enc = encrypt_to_wan(fwd, &job, cp, wan_dp, pctx,
-                             crypto_proto_classify(proto), flow_ok);
     }
     if (enc < 0)
         goto drop;
-    if (enc > 0) {
-        complete_packet_window_after_enqueue(window_class, 1);
-        return;
-    }
     {
         int sent = push_to_wan(fwd, &job, wan_dp) == 0;
 

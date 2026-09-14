@@ -7,8 +7,6 @@
 
 #define FLOW_TABLE_SETS 512u
 #define FLOW_TABLE_WAYS 4u
-#define FLOW_MTU1500_TCP_PACKET_WINDOW 4096u
-#define FLOW_MTU1500_UDP_PACKET_WINDOW 16384u
 #define FLOW_MTU9000_PACKET_WINDOW 1024u
 
 #define FLOW_WINDOW_CLASS_COUNT ((int)FLOW_WAN_WINDOW_MTU9000 + 1)
@@ -48,7 +46,7 @@ void flow_table_thread_cleanup(void)
     g_flow_table = NULL;
     memset(&g_default_state, 0, sizeof(g_default_state));
     g_pending_state = NULL;
-    g_pending_class = FLOW_WAN_WINDOW_MTU1500_OTHER;
+    g_pending_class = FLOW_WAN_WINDOW_MTU9000;
     g_flow_clock = 0;
 }
 
@@ -168,7 +166,7 @@ int flow_table_pick_wan_per_packet(const int *allowed_wans, int allowed_count)
     if (!flow_pool_same(&g_default_state, allowed_wans, allowed_count))
         flow_state_reset(&g_default_state, NULL, 0, allowed_wans, allowed_count);
     return flow_pick_next(
-        &g_default_state.classes[FLOW_WAN_WINDOW_MTU1500_OTHER].tie_start,
+        &g_default_state.classes[FLOW_WAN_WINDOW_MTU9000].tie_start,
         allowed_wans, allowed_count);
 }
 
@@ -223,34 +221,10 @@ int flow_table_pick_wan_per_flow_packet(uint32_t src_ip, uint32_t dst_ip,
     state->stamp = ++g_flow_clock;
 
     g_pending_state = NULL;
-    g_pending_class = FLOW_WAN_WINDOW_MTU1500_OTHER;
-
-    if (window_class == FLOW_WAN_WINDOW_MTU9000) {
-        g_pending_state = state;
-        g_pending_class = window_class;
-        return flow_window_wan(state, window_class, allowed_wans,
-                               allowed_count);
-    }
-
-    if (window_class == FLOW_WAN_WINDOW_MTU1500_TCP) {
-        int selected = flow_window_wan(state, window_class, allowed_wans,
-                                       allowed_count);
-
-        flow_window_advance(state, window_class,
-                            FLOW_MTU1500_TCP_PACKET_WINDOW);
-        return selected;
-    }
-
-    if (window_class == FLOW_WAN_WINDOW_MTU1500_UDP) {
-        g_pending_state = state;
-        g_pending_class = window_class;
-        return flow_window_wan(state, window_class, allowed_wans,
-                               allowed_count);
-    }
-
-    return flow_pick_next(
-        &state->classes[FLOW_WAN_WINDOW_MTU1500_OTHER].tie_start,
-        allowed_wans, allowed_count);
+    g_pending_class = FLOW_WAN_WINDOW_MTU9000;
+    g_pending_state = state;
+    return flow_window_wan(state, FLOW_WAN_WINDOW_MTU9000,
+                           allowed_wans, allowed_count);
 }
 
 void flow_table_packet_complete(enum flow_wan_window_class window_class,
@@ -262,10 +236,6 @@ void flow_table_packet_complete(enum flow_wan_window_class window_class,
     if (!sent || !state || g_pending_class != window_class)
         return;
 
-    if (window_class == FLOW_WAN_WINDOW_MTU1500_UDP)
-        flow_window_advance(state, window_class,
-                            FLOW_MTU1500_UDP_PACKET_WINDOW);
-    else if (window_class == FLOW_WAN_WINDOW_MTU9000)
-        flow_window_advance(state, window_class,
-                            FLOW_MTU9000_PACKET_WINDOW);
+    flow_window_advance(state, FLOW_WAN_WINDOW_MTU9000,
+                        FLOW_MTU9000_PACKET_WINDOW);
 }

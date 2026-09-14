@@ -19,20 +19,12 @@ struct {
     __type(value, int);
 } wan_xsks_map SEC(".maps");
 
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 2);
-    __type(key, int);
-    __type(value, __u16);
-} wan_config_map SEC(".maps");
-
 #define IPPROTO_ICMP_VAL 1
 #define IPPROTO_TCP_VAL 6
 #define IPPROTO_UDP_VAL 17
 #define IPPROTO_OSPF_VAL 89
 #define ETH_P_NE_ARP_ENC 0x1048
 #define ETH_P_NE_L2_ENC  0x104A
-#define ETH_P_NE_UDP_ENC 0x104B /* standard MTU-1500 UDP wire only */
 #define ETH_P_CFM        0x8902
 
 #define NE_JUMBO_BYPASS_MAGIC_OFF 16
@@ -60,10 +52,6 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
     if (proto == __constant_htons(ETH_P_NE_ARP_ENC))
         goto redirect;
 
-    if (proto == __constant_htons(ETH_P_NE_UDP_ENC)) {
-        goto redirect;
-    }
-
     if (proto == __constant_htons(ETH_P_NE_L2_ENC)) {
         goto redirect;
     }
@@ -89,16 +77,6 @@ int xdp_wan_redirect_prog(struct xdp_md *ctx)
 
         return XDP_PASS;
     }
-
-    int key0 = 0;
-    __u16 *fake4 = bpf_map_lookup_elem(&wan_config_map, &key0);
-    if (fake4 && *fake4 != 0 && proto == bpf_htons(*fake4))
-        goto redirect;
-
-    int key1 = 1;
-    __u16 *fake_udp = bpf_map_lookup_elem(&wan_config_map, &key1);
-    if (fake_udp && *fake_udp != 0 && proto == bpf_htons(*fake_udp))
-        goto redirect;
 
     return XDP_PASS;
 
