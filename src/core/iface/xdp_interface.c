@@ -17,7 +17,6 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <stdlib.h>
-#include <stdatomic.h>
 #include <unistd.h>
 
 void ne_dp_warn_rx(const char *dir, int cpu, int batch_rcvd)
@@ -29,25 +28,10 @@ void ne_dp_warn_rx(const char *dir, int cpu, int batch_rcvd)
 
 void ne_dp_warn_rx_drop(const char *dir, int cpu, int worker, uint32_t q_depth)
 {
-    static atomic_uint reported = ATOMIC_VAR_INIT(0u);
-    unsigned int bit;
-    unsigned int old;
-
-    if (!dir || worker < 0 || worker >= (int)NE_CRYPTO_WORKERS)
-        return;
-    /* LAN and WAN each get one bit per crypto worker. This is an error-only
-     * diagnostic: a saturated RX->crypto ring used to discard a fragment
-     * silently, making the later jumbo reassembly timeout look like an RX
-     * queue ownership problem. */
-    bit = 1u << ((unsigned int)worker +
-                 (strcmp(dir, "WAN") == 0 ? NE_CRYPTO_WORKERS : 0u));
-    old = atomic_fetch_or_explicit(&reported, bit, memory_order_relaxed);
-    if ((old & bit) != 0)
-        return;
-    fprintf(stderr,
-            "[RX-DROP] %s cpu=%d crypto_worker=%d ring_depth=%u\n",
-            dir, cpu, worker, q_depth);
-    fflush(stderr);
+    (void)dir;
+    (void)cpu;
+    (void)worker;
+    (void)q_depth;
 }
 
 void ne_dp_warn_crypto(int cpu, int worker, uint32_t lan_q, uint32_t wan_q)
@@ -1004,16 +988,13 @@ static uint32_t pair_fq_prefill_per_queue(const struct ne_pair *p)
     return prefill;
 }
 
-int ne_pair_open(struct ne_pair *p, const struct app_config *cfg,
-                 enum ne_mtu_mode mtu_mode)
+int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
 {
 #define NE_TRY(expr) do { if (expr) goto fail; } while (0)
-    if (!p || !cfg || cfg->local_count <= 0 ||
-        mtu_mode == NE_MTU_MODE_INVALID)
+    if (!p || !cfg || cfg->local_count <= 0)
         return -1;
 
     memset(p, 0, sizeof(*p));
-    p->mtu_mode = mtu_mode;
     p->umem_fq_li = -1;
     p->umem_fq_q = -1;
     p->local_count = cfg->local_count;
@@ -1487,14 +1468,13 @@ static int recv_queue(struct ne_xsk_queue *slot, struct ne_packet *out, uint32_t
     return (int)packet_count;
 }
 
-static int xsk_queue_for_rx_slot(int q, int rx_slot, int nq, int rx_slots,
-                                 int direction_offset)
+static int xsk_queue_for_rx_slot(int q, int rx_slot, int nq, int rx_slots)
 {
     int slots = nq < rx_slots ? (nq > 0 ? nq : 1) : rx_slots;
 
     if (rx_slot >= slots)
         return 0;
-    return ((q + direction_offset) % slots) == rx_slot;
+    return (q % slots) == rx_slot;
 }
 
 #define NE_RX_QUEUE_BURST 16u
@@ -1506,73 +1486,6 @@ struct ne_rx_queue_ref {
 
 static _Thread_local uint32_t tls_local_rx_cursor;
 static _Thread_local uint32_t tls_wan_rx_cursor;
-static _Thread_local time_t tls_xsk_stats_second;
-static atomic_uint xsk_stats_error_reported = ATOMIC_VAR_INIT(0u);
-
-static void report_iface_xsk_stats(const char *role,
-                                   struct ne_iface *iface,
-                                   uint32_t pool_free)
-{
-    if (!role || !iface)
-        return;
-    for (int q = 0; q < iface->queue_count; q++) {
-        struct ne_xsk_queue *slot = &iface->queues[q];
-        struct xdp_statistics stats;
-        socklen_t length = sizeof(stats);
-
-        if (!slot->xsk)
-            continue;
-        memset(&stats, 0, sizeof(stats));
-        if (getsockopt(xsk_socket__fd(slot->xsk), SOL_XDP,
-                       XDP_STATISTICS, &stats, &length) != 0)
-            continue;
-        if (stats.rx_dropped == 0 && stats.rx_invalid_descs == 0 &&
-            stats.tx_invalid_descs == 0 && stats.rx_ring_full == 0 &&
-            stats.rx_fill_ring_empty_descs == 0)
-            continue;
-        if (atomic_exchange_explicit(&xsk_stats_error_reported, 1u,
-                                     memory_order_relaxed) != 0)
-            return;
-        fprintf(stderr,
-                "[XSK-STATS] %s %s q=%d rx_drop=%llu rx_invalid=%llu "
-                "tx_invalid=%llu rx_ring_full=%llu fq_empty=%llu "
-                "pool_free=%u\n",
-                role, iface->ifname, q,
-                (unsigned long long)stats.rx_dropped,
-                (unsigned long long)stats.rx_invalid_descs,
-                (unsigned long long)stats.tx_invalid_descs,
-                (unsigned long long)stats.rx_ring_full,
-                (unsigned long long)stats.rx_fill_ring_empty_descs,
-                pool_free);
-        fflush(stderr);
-        return;
-    }
-}
-
-static void report_pair_xsk_stats(struct ne_pair *p)
-{
-    struct timespec now;
-    uint32_t pool_free;
-
-    if (!p ||
-        atomic_load_explicit(&xsk_stats_error_reported,
-                             memory_order_relaxed) != 0)
-        return;
-    if (clock_gettime(CLOCK_MONOTONIC_COARSE, &now) != 0 ||
-        now.tv_sec == tls_xsk_stats_second)
-        return;
-    tls_xsk_stats_second = now.tv_sec;
-    pool_free = ne_pool_free_count(p);
-    for (int i = 0; i < p->local_count; i++) {
-        if (p->local_live[i])
-            report_iface_xsk_stats("LAN", &p->locals[i], pool_free);
-    }
-    for (int i = 0; i < p->wan_count; i++) {
-        if (p->wan_live[i])
-            report_iface_xsk_stats("WAN", &p->wans[i], pool_free);
-    }
-}
-
 int ne_recv_local_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out, uint32_t max)
 {
     struct ne_rx_queue_ref refs[MAX_INTERFACES * MAX_QUEUES];
@@ -1593,7 +1506,7 @@ int ne_recv_local_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out, ui
 
         for (int q = 0; q < q_count; q++) {
             if (!xsk_queue_for_rx_slot(q, rx_slot, q_count,
-                                       (int)NE_RX_LAN_SLOTS, 0))
+                                       (int)NE_RX_LAN_SLOTS))
                 continue;
             refs[ref_count].queue = &iface->queues[q];
             refs[ref_count].iface_idx = (uint8_t)i;
@@ -1622,7 +1535,6 @@ int ne_recv_local_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out, ui
     /* Continue after the last queue examined. A permanently busy first
      * interface can therefore never starve queues on later interfaces. */
     tls_local_rx_cursor = (start + (visited ? visited : 1u)) % ref_count;
-    report_pair_xsk_stats(p);
     return (int)total;
 }
 
@@ -1646,7 +1558,7 @@ int ne_recv_wan_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out, uint
 
         for (int q = 0; q < q_count; q++) {
             if (!xsk_queue_for_rx_slot(q, rx_slot, q_count,
-                                       (int)NE_RX_WAN_SLOTS, 0))
+                                       (int)NE_RX_WAN_SLOTS))
                 continue;
             refs[ref_count].queue = &iface->queues[q];
             refs[ref_count].iface_idx = (uint8_t)i;
@@ -1673,7 +1585,6 @@ int ne_recv_wan_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out, uint
         visited++;
     }
     tls_wan_rx_cursor = (start + (visited ? visited : 1u)) % ref_count;
-    report_pair_xsk_stats(p);
     return (int)total;
 }
 
@@ -1686,7 +1597,7 @@ void ne_recv_release_local_slot(struct ne_pair *p, int rx_slot)
         struct ne_iface *iface = &p->locals[i];
         for (int q = 0; q < iface->queue_count; q++) {
             if (!xsk_queue_for_rx_slot(q, rx_slot, iface->queue_count,
-                                       (int)NE_RX_LAN_SLOTS, 0))
+                                       (int)NE_RX_LAN_SLOTS))
                 continue;
             if (iface->queues[q].rx_pending) {
                 xsk_ring_cons__release(&iface->queues[q].rx, iface->queues[q].rx_pending);
@@ -1705,7 +1616,7 @@ void ne_recv_release_wan_slot(struct ne_pair *p, int rx_slot)
         struct ne_iface *iface = &p->wans[i];
         for (int q = 0; q < iface->queue_count; q++) {
             if (!xsk_queue_for_rx_slot(q, rx_slot, iface->queue_count,
-                                       (int)NE_RX_WAN_SLOTS, 0))
+                                       (int)NE_RX_WAN_SLOTS))
                 continue;
             if (iface->queues[q].rx_pending) {
                 xsk_ring_cons__release(&iface->queues[q].rx, iface->queues[q].rx_pending);
@@ -1777,11 +1688,7 @@ void ne_drain_cq_wan(struct ne_pair *p, int tx_slot)
 
 #define NE_FQ_REFILL_BUDGET_9000 1024u
 
-static atomic_uint fq_pool_empty_reported = ATOMIC_VAR_INIT(0u);
-static atomic_uint fq_reserve_failed_reported = ATOMIC_VAR_INIT(0u);
-
 static void refill_fq_queue(struct ne_xsk_queue *slot, struct ne_pool *pool,
-                            const char *ifname, int queue_id,
                             uint32_t refill_budget, uint32_t target_occupancy)
 {
     uint64_t addrs[NE_BATCH_SIZE];
@@ -1803,11 +1710,8 @@ static void refill_fq_queue(struct ne_xsk_queue *slot, struct ne_pool *pool,
 
         if (request > NE_BATCH_SIZE)
             request = NE_BATCH_SIZE;
-        /* Query the complete producer capacity, then refill only back to the
-         * configured per-queue target. The unused part of each FQ is
-         * intentional shared-UMEM reserve for crypto, reassembly and TX.
-         * Filling every available FQ slot exhausts the pool when two LAN/WAN
-         * pairs expose more aggregate FQ capacity than the UMEM has frames. */
+        /* Refill only to the configured target. The unused FQ capacity is
+         * shared-UMEM reserve for crypto, reassembly and TX. */
         free_slots = xsk_prod_nb_free(&slot->fq, slot->fq.size);
         occupancy = slot->fq.size - free_slots;
         if (occupancy >= target_occupancy)
@@ -1815,25 +1719,10 @@ static void refill_fq_queue(struct ne_xsk_queue *slot, struct ne_pool *pool,
         deficit = target_occupancy - occupancy;
         want = deficit > request ? request : deficit;
         got = pool_pop(pool, addrs, want);
-        if (!got) {
-            if (atomic_exchange_explicit(&fq_pool_empty_reported, 1u,
-                                         memory_order_relaxed) == 0) {
-                fprintf(stderr,
-                        "[FQ-REFILL] shared UMEM pool empty at %s q=%d\n",
-                        ifname ? ifname : "?", queue_id);
-                fflush(stderr);
-            }
+        if (!got)
             break;
-        }
         if (xsk_ring_prod__reserve(&slot->fq, got, &idx) != got) {
             (void)pool_push(pool, addrs, got);
-            if (atomic_exchange_explicit(&fq_reserve_failed_reported, 1u,
-                                         memory_order_relaxed) == 0) {
-                fprintf(stderr,
-                        "[FQ-REFILL] reserve failed at %s q=%d want=%u\n",
-                        ifname ? ifname : "?", queue_id, got);
-                fflush(stderr);
-            }
             break;
         }
         for (uint32_t i = 0; i < got; i++)
@@ -1848,18 +1737,16 @@ static void refill_fq_queue(struct ne_xsk_queue *slot, struct ne_pool *pool,
 }
 
 static void refill_fq_iface_slot(struct ne_iface *iface, struct ne_pool *pool, int rx_slot,
-                                 int rx_slots, int direction_offset,
-                                 uint32_t refill_budget,
+                                 int rx_slots, uint32_t refill_budget,
                                  uint32_t target_occupancy)
 {
     int nq = iface->queue_count;
 
     for (int q = 0; q < nq; q++) {
-        if (!xsk_queue_for_rx_slot(q, rx_slot, nq, rx_slots,
-                                   direction_offset))
+        if (!xsk_queue_for_rx_slot(q, rx_slot, nq, rx_slots))
             continue;
-        refill_fq_queue(&iface->queues[q], pool, iface->ifname, q,
-                        refill_budget, target_occupancy);
+        refill_fq_queue(&iface->queues[q], pool, refill_budget,
+                        target_occupancy);
     }
 }
 
@@ -1876,7 +1763,7 @@ void ne_refill_fq_local_slot(struct ne_pair *p, int rx_slot)
         if (!p->local_live[i])
             continue;
         refill_fq_iface_slot(&p->locals[i], &p->pool, rx_slot,
-                             (int)NE_RX_LAN_SLOTS, 0, refill_budget,
+                             (int)NE_RX_LAN_SLOTS, refill_budget,
                              target_occupancy);
     }
 }
@@ -1894,7 +1781,7 @@ void ne_refill_fq_wan_slot(struct ne_pair *p, int rx_slot)
         if (!p->wan_live[i])
             continue;
         refill_fq_iface_slot(&p->wans[i], &p->pool, rx_slot,
-                             (int)NE_RX_WAN_SLOTS, 0, refill_budget,
+                             (int)NE_RX_WAN_SLOTS, refill_budget,
                              target_occupancy);
     }
 }
@@ -1908,8 +1795,7 @@ static void kick_fq_queue(struct ne_xsk_queue *slot)
     (void)recvfrom(xsk_socket__fd(slot->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
 }
 
-static void kick_fq_iface_slot(struct ne_iface *iface, int rx_slot, int rx_slots,
-                               int direction_offset)
+static void kick_fq_iface_slot(struct ne_iface *iface, int rx_slot, int rx_slots)
 {
     int nq;
 
@@ -1917,8 +1803,7 @@ static void kick_fq_iface_slot(struct ne_iface *iface, int rx_slot, int rx_slots
         return;
     nq = iface->queue_count;
     for (int q = 0; q < nq; q++) {
-        if (!xsk_queue_for_rx_slot(q, rx_slot, nq, rx_slots,
-                                   direction_offset))
+        if (!xsk_queue_for_rx_slot(q, rx_slot, nq, rx_slots))
             continue;
         kick_fq_queue(&iface->queues[q]);
     }
@@ -1932,7 +1817,7 @@ void ne_kick_fq_local_slot(struct ne_pair *p, int rx_slot)
         if (!p->local_live[i])
             continue;
         kick_fq_iface_slot(&p->locals[i], rx_slot,
-                           (int)NE_RX_LAN_SLOTS, 0);
+                           (int)NE_RX_LAN_SLOTS);
     }
 }
 
@@ -1944,12 +1829,12 @@ void ne_kick_fq_wan_slot(struct ne_pair *p, int rx_slot)
         if (!p->wan_live[i])
             continue;
         kick_fq_iface_slot(&p->wans[i], rx_slot,
-                           (int)NE_RX_WAN_SLOTS, 0);
+                           (int)NE_RX_WAN_SLOTS);
     }
 }
 
 static int collect_iface_rx_fds(struct ne_iface *iface, int rx_slot, int rx_slots,
-                                int direction_offset, int *fds, int max, int n)
+                                int *fds, int max, int n)
 {
     int nq;
 
@@ -1959,8 +1844,7 @@ static int collect_iface_rx_fds(struct ne_iface *iface, int rx_slot, int rx_slot
     for (int q = 0; q < nq && n < max; q++) {
         int fd;
 
-        if (!xsk_queue_for_rx_slot(q, rx_slot, nq, rx_slots,
-                                   direction_offset))
+        if (!xsk_queue_for_rx_slot(q, rx_slot, nq, rx_slots))
             continue;
         if (!iface->queues[q].xsk)
             continue;
@@ -1982,8 +1866,7 @@ int ne_rx_local_fds(struct ne_pair *p, int rx_slot, int *fds, int max)
         if (!p->local_live[i])
             continue;
         n = collect_iface_rx_fds(&p->locals[i], rx_slot,
-                                 (int)NE_RX_LAN_SLOTS,
-                                 0, fds, max, n);
+                                 (int)NE_RX_LAN_SLOTS, fds, max, n);
     }
     return n;
 }
@@ -1998,8 +1881,7 @@ int ne_rx_wan_fds(struct ne_pair *p, int rx_slot, int *fds, int max)
         if (!p->wan_live[i])
             continue;
         n = collect_iface_rx_fds(&p->wans[i], rx_slot,
-                                 (int)NE_RX_WAN_SLOTS,
-                                 0, fds, max, n);
+                                 (int)NE_RX_WAN_SLOTS, fds, max, n);
     }
     return n;
 }
@@ -2009,47 +1891,16 @@ int ne_rx_wan_fds(struct ne_pair *p, int rx_slot, int *fds, int max)
 #define NE_XSK_COPY_TX_RESERVE \
     (NE_XSK_COPY_TX_BATCH + NE_PACKET_MAX_CONTINUATIONS)
 
-static atomic_uint tx_group_error_reported = ATOMIC_VAR_INIT(0u);
-static atomic_uint tx_kick_error_reported = ATOMIC_VAR_INIT(0u);
-static atomic_ullong tx_jumbo_submit_ifaces = ATOMIC_VAR_INIT(0ULL);
-
-static void tx_report_group_error(const struct ne_packet *previous,
-                                  const struct ne_packet *next)
-{
-    if (atomic_exchange_explicit(&tx_group_error_reported, 1u,
-                                 memory_order_relaxed) != 0)
-        return;
-    fprintf(stderr,
-            "[TX-GROUP] broken packet=%u fragment=%u/%u next=%u:%u/%u\n",
-            previous ? previous->jumbo_packet_id : 0u,
-            previous ? previous->jumbo_fragment_index : 0u,
-            previous ? previous->jumbo_fragment_count : 0u,
-            next ? next->jumbo_packet_id : 0u,
-            next ? next->jumbo_fragment_index : 0u,
-            next ? next->jumbo_fragment_count : 0u);
-    fflush(stderr);
-}
-
 static void tx_kick(struct ne_xsk_queue *slot)
 {
-    int rc;
-
     if (!slot || !slot->xsk || !xsk_ring_prod__needs_wakeup(&slot->tx))
         return;
-    rc = (int)sendto(xsk_socket__fd(slot->xsk), NULL, 0,
-                     MSG_DONTWAIT, NULL, 0);
-    if (rc < 0 && errno != EAGAIN && errno != EBUSY &&
-        atomic_exchange_explicit(&tx_kick_error_reported, 1u,
-                                 memory_order_relaxed) == 0) {
-        fprintf(stderr, "[TX-XSK] kick failed: %s (%d)\n",
-                strerror(errno), errno);
-        fflush(stderr);
-    }
+    (void)sendto(xsk_socket__fd(slot->xsk), NULL, 0,
+                 MSG_DONTWAIT, NULL, 0);
 }
 
 static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src,
-                          uint32_t max_frame, const char *ifname, int ifindex,
-                          int queue_id)
+                          uint32_t max_frame)
 {
     struct ne_packet jobs[NE_XSK_COPY_TX_RESERVE];
     uint32_t queued = ne_ring_count(src);
@@ -2094,27 +1945,15 @@ static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src,
      * one acquire and one tail publish instead of one atomic pair per frame. */
     popped = ne_ring_try_pop_batch(src, jobs, want);
 
-    /* MTU-9000 wire fragments are independent Ethernet frames, not an XDP
-     * multi-buffer chain. Still submit one complete original-packet group at
-     * once: with two WANs the TX scheduler alternates interfaces after each
-     * batch, so splitting a group at the batch boundary can create a large
-     * fragment gap under backlog. reserve_want includes seven spare entries,
-     * enough for the maximum eight-fragment group. */
+    /* Submit every wire-fragment group for an original jumbo packet together. */
     while (popped > 0 &&
            jobs[popped - 1u].jumbo_fragment_count > 1u &&
            jobs[popped - 1u].jumbo_fragment_index + 1u <
                jobs[popped - 1u].jumbo_fragment_count &&
            popped < reserved) {
         struct ne_packet next;
-        const struct ne_packet *previous = &jobs[popped - 1u];
-
         if (ne_ring_try_pop(src, &next) != 0)
             break;
-        if (next.jumbo_packet_id != previous->jumbo_packet_id ||
-            next.jumbo_fragment_count != previous->jumbo_fragment_count ||
-            next.jumbo_fragment_index !=
-                (uint8_t)(previous->jumbo_fragment_index + 1u))
-            tx_report_group_error(previous, &next);
         jobs[popped++] = next;
     }
 
@@ -2141,36 +1980,6 @@ static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src,
     }
 
     xsk_ring_prod__submit(&slot->tx, popped);
-    for (uint32_t i = 0; i < popped; i++) {
-        unsigned int bit;
-        unsigned long long mask;
-        unsigned long long previous;
-
-        if (jobs[i].jumbo_fragment_count <= 1u ||
-            jobs[i].jumbo_fragment_index != 0u)
-            continue;
-        bit = (unsigned int)(ifindex > 0 ? ifindex : queue_id) & 63u;
-        mask = 1ULL << bit;
-        previous = atomic_fetch_or_explicit(&tx_jumbo_submit_ifaces, mask,
-                                            memory_order_relaxed);
-        if ((previous & mask) == 0) {
-            uint32_t group_count = 1u;
-
-            while (i + group_count < popped &&
-                   jobs[i + group_count].jumbo_packet_id ==
-                       jobs[i].jumbo_packet_id &&
-                   jobs[i + group_count].jumbo_fragment_index == group_count)
-                group_count++;
-            fprintf(stderr,
-                    "[TX-XSK] submitted if=%s q=%d packet=%u "
-                    "fragments=%u/%u batch=%u\n",
-                    ifname ? ifname : "?", queue_id,
-                    jobs[i].jumbo_packet_id, group_count,
-                    jobs[i].jumbo_fragment_count, popped);
-            fflush(stderr);
-        }
-        break;
-    }
     tx_kick(slot);
     return (int)popped;
 }
@@ -2190,8 +1999,7 @@ static int tx_drain_iface_ring(struct ne_iface *iface, struct ne_ring *src, uint
     }
     if (primary < 0)
         return 0;
-    return tx_drain_queue(&iface->queues[primary], src, max_frame,
-                          iface->ifname, iface->ifindex, primary);
+    return tx_drain_queue(&iface->queues[primary], src, max_frame);
 }
 
 static __thread uint32_t tls_tx_drain_rr;

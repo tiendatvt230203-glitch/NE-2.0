@@ -211,10 +211,7 @@ static int resolve_wan_dp_for_fwd_local(struct forwarder *fwd,
     return -1;
 }
 
-/*
- * ARP TX usable: chỉ khi WAN còn live trên pair và không bị mark down.
- * weight=0 / WRR / data-drain KHÔNG chặn ARP — chỉ WAN down mới thôi ARP.
- */
+/* ARP TX is usable only while the single WAN remains live. */
 static int arp_wan_dp_usable(struct forwarder *fwd, int wan_dp)
 {
     if (!fwd || wan_dp < 0 || wan_dp >= fwd->wan_count)
@@ -228,80 +225,13 @@ static int arp_wan_dp_usable(struct forwarder *fwd, int wan_dp)
     return 1;
 }
 
-/* Map profile cfg wan index → dataplane slot (không qua ok_for_new_traffic/weight). */
-static int arp_dp_for_cfg_wan(struct forwarder *fwd, int cfg_wan)
-{
-    int n;
-
-    if (!fwd || cfg_wan < 0)
-        return -1;
-    n = fwd->wan_count;
-    if (n > MAX_INTERFACES)
-        n = MAX_INTERFACES;
-    for (int dp = 0; dp < n; dp++) {
-        if (fwd->wan_cfg_idx[dp] != cfg_wan)
-            continue;
-        if (arp_wan_dp_usable(fwd, dp))
-            return dp;
-    }
-    return -1;
-}
-
-/*
- * Failover: BR WAN down → pick any other UP WAN in the profile (least-loaded).
- * Weight=0 WAN vẫn được chọn cho ARP backup nếu đang UP.
- */
-static int arp_pick_backup_wan_dp(struct forwarder *fwd,
-                                  const struct profile_config *prof,
-                                  int primary_wan_dp)
-{
-    int best = -1;
-    uint32_t best_depth = UINT32_MAX;
-
-    if (!fwd || !prof)
-        return -1;
-
-    for (int i = 0; i < prof->wan_count; i++) {
-        int cfg_wan = prof->wan_indices[i];
-        int dp;
-        uint32_t depth;
-
-        dp = arp_dp_for_cfg_wan(fwd, cfg_wan);
-        if (dp < 0 || dp == primary_wan_dp)
-            continue;
-        if (!fwd_wan_has_tx_room(fwd, dp))
-            continue;
-
-        depth = fwd_mid_to_wan_depth(fwd, dp);
-        if (depth < best_depth) {
-            best_depth = depth;
-            best = dp;
-        }
-    }
-    return best;
-}
-
-/*
- * LAN→WAN ARP:
- *  1) Prefer WAN in bridges[] for that LAN (BE) ngay khi BR WAN UP (rejoin).
- *  2) If that WAN down → backup sang bất kỳ WAN đang UP (kể cả weight=0).
- * Remote side: who-has flood; unicast → dest MAC FDB.
- */
+/* LAN→WAN ARP uses only the configured WAN for this bridge. */
 static int arp_select_egress_wan(struct forwarder *fwd,
-                                 const struct profile_config *prof,
                                  int primary_wan_dp)
 {
-    /* BR WAN up (kể cả weight=0) → luôn join về primary, không backup. */
     if (arp_wan_dp_usable(fwd, primary_wan_dp))
         return primary_wan_dp;
-
-    {
-        int backup = arp_pick_backup_wan_dp(fwd, prof, primary_wan_dp);
-
-        if (backup < 0)
-            return -1;
-        return backup;
-    }
+    return -1;
 }
 
 static int arp_profile_owns_local(struct forwarder *fwd, int profile_pi, int fwd_local_idx)
@@ -591,7 +521,7 @@ int arp_bridge_from_local(struct forwarder *fwd, struct ne_packet *job,
         return -1;
 
     /* BR WAN up → dùng BR; BR down → failover ARP sang WAN UP bất kỳ. */
-    wan_dp = arp_select_egress_wan(fwd, prof, primary_wan_dp);
+    wan_dp = arp_select_egress_wan(fwd, primary_wan_dp);
     if (wan_dp < 0)
         return -1;
 

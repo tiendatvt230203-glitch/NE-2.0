@@ -12,8 +12,6 @@ struct fwd_iface {
 
 struct forwarder {
     struct app_config *cfg;
-    enum ne_mtu_mode mtu_mode;
-
     struct fwd_iface locals[MAX_INTERFACES];
     int local_count;
     struct fwd_iface wans[MAX_INTERFACES];
@@ -35,16 +33,6 @@ struct forwarder {
 
     struct mac_learn_table mac_table;
 };
-
-static inline uint32_t fwd_mid_to_wan_depth(const struct forwarder *fwd, int wan_dp)
-{
-    uint32_t d = 0;
-    if (!fwd || wan_dp < 0)
-        return 0;
-    for (int w = 0; w < (int)NE_CRYPTO_WORKERS; w++)
-        d += ne_ring_count(&fwd->mid_to_wan[wan_dp][w]);
-    return d;
-}
 
 void forwarder_pin_cpu(void);
 int forwarder_init(struct forwarder *fwd, struct app_config *cfg);

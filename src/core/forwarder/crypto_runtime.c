@@ -417,8 +417,6 @@ int fwd_crypto_rebuild(struct app_config *cfg)
         return 0;
     }
 
-    if (cfg->fake_ethertype_ipv4 == 0)
-        cfg->fake_ethertype_ipv4 = (uint16_t)NE_L2_FAKE_ETHERTYPE;
 
     active_policy_count = cfg->policy_count;
     if (active_policy_count > MAX_CRYPTO_POLICIES)

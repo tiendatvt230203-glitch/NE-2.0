@@ -11,7 +11,6 @@
 #include "../../../inc/core/dataplane/arp_bridge.h"
 #include "../../../inc/core/dataplane/jumbo_l2.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
-#include "../../../inc/core/flow/flow_table.h"
 
 #include <netinet/in.h>
 #include <string.h>
@@ -25,21 +24,6 @@ static int push_to_wan(struct forwarder *fwd, struct ne_packet *job, int wan_dp)
     job->dir = NE_DIR_WAN;
     job->wan_idx = (uint8_t)wan_dp;
     return dp_ring_push(fwd, &fwd->mid_to_wan[wan_dp][ri], job);
-}
-
-static void complete_packet_window_after_enqueue(
-    enum flow_wan_window_class window_class, int enqueue_ok)
-{
-    /* Advance once only after the complete original packet is queued. */
-    flow_table_packet_complete(window_class, enqueue_ok);
-}
-
-static enum flow_wan_window_class flow_window_class_for_packet(
-    const struct forwarder *fwd, uint8_t proto)
-{
-    (void)fwd;
-    (void)proto;
-    return FLOW_WAN_WINDOW_MTU9000;
 }
 
 static void free_wire_fragments(struct forwarder *fwd,
@@ -116,11 +100,10 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     uint32_t src_ip = 0, dst_ip = 0;
     uint16_t src_port = 0, dst_port = 0;
     uint8_t proto = 0;
-    uint8_t tcp_flags = 0;
     int l3_off = -1;
-    int flow_ok = dp_parse_flow_tcp_meta(pkt, job.len, &src_ip, &dst_ip,
-                                         &src_port, &dst_port, &proto,
-                                         &l3_off, &tcp_flags) == 0;
+    int flow_ok = dp_parse_flow_meta(pkt, job.len, &src_ip, &dst_ip,
+                                     &src_port, &dst_port, &proto,
+                                     &l3_off) == 0;
     int li = job.local_idx < fwd->local_count ? (int)job.local_idx : 0;
     int profile_idx;
     const struct crypto_policy *cp;
@@ -129,7 +112,6 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     struct packet_crypto_ctx *pctx;
     int enc;
     int jumbo_packet = 0;
-    enum flow_wan_window_class window_class = FLOW_WAN_WINDOW_MTU9000;
 
     if (!fwd || !pkt)
         goto drop;
@@ -148,15 +130,11 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
         goto drop;
     jumbo_packet = dp_jumbo_packet_needs_wire_split(
         &job, cp->action == POLICY_ACTION_ENCRYPT_L2);
-    window_class = flow_window_class_for_packet(fwd, proto);
-    wan_dp = fwd_wan_pick_for_local(fwd, profile_idx, flow_ok, src_ip, dst_ip,
-                                    src_port, dst_port, proto, window_class);
+    wan_dp = fwd_wan_pick_for_local(fwd, profile_idx);
     if (wan_dp < 0 || !fwd_wan_has_tx_room(fwd,wan_dp))
         goto drop;
 
     if (cp->action == POLICY_ACTION_BYPASS) {
-        int sent;
-
         if (jumbo_packet) {
             struct ne_packet fragments[NE_PACKET_MAX_SEGMENTS];
             uint32_t fragment_count = 0;
@@ -172,12 +150,11 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
                 goto drop;
             }
             ne_packet_free(&fwd->pair, &job);
-            complete_packet_window_after_enqueue(window_class, 1);
             return;
         }
 
-        sent = push_to_wan(fwd, &job, wan_dp) == 0;
-        complete_packet_window_after_enqueue(window_class, sent);
+        if (push_to_wan(fwd, &job, wan_dp) != 0)
+            goto drop;
         return;
     }
     if (!fwd->cfg->crypto_enabled)
@@ -204,7 +181,6 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
             goto drop;
         }
         ne_packet_free(&fwd->pair, &job);
-        complete_packet_window_after_enqueue(window_class, 1);
         return;
     }
     {
@@ -216,14 +192,10 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     }
     if (enc < 0)
         goto drop;
-    {
-        int sent = push_to_wan(fwd, &job, wan_dp) == 0;
-
-        complete_packet_window_after_enqueue(window_class, sent);
-    }
+    if (push_to_wan(fwd, &job, wan_dp) != 0)
+        goto drop;
     return;
 
 drop:
-    complete_packet_window_after_enqueue(window_class, 0);
     ne_packet_free(&fwd->pair, &job);
 }

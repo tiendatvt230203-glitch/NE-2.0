@@ -11,8 +11,8 @@
 #include "../../../inc/core/util/main_diag.h"
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/iface/profile_iface_xdp.h"
+#include "../../../inc/core/iface/mtu9000.h"
 #include "../../../inc/core/flow/mac_learn.h"
-#include "../../../inc/core/flow/flow_table.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
 #include "../../../inc/crypto/pqc_handshake.h"
 
@@ -233,7 +233,6 @@ static void *local_rx_thread(void *arg)
     struct ne_dp_idle idle = {0};
 
     pin_cpu(ctx->cpu_id);
-    (void)flow_table_thread_init();
 
     while (atomic_load_explicit(&running, memory_order_acquire)) {
         dp_burst_refill_local(fwd, ctx->rx_slot);
@@ -282,7 +281,6 @@ static void *local_rx_thread(void *arg)
         }
         ne_recv_release_local_slot(&fwd->pair, ctx->rx_slot);
     }
-    flow_table_thread_cleanup();
     return NULL;
 }
 
@@ -437,7 +435,6 @@ static void *crypto_worker_thread(void *arg)
     pin_cpu(ctx->cpu_id);
     dp_crypto_worker_bind(ctx->worker_idx);
     crypto_option_bind_worker_idx((uint8_t)ctx->worker_idx);
-    (void)flow_table_thread_init();
 
     /* Encrypt / decrypt / reasm only. Bypass never queues here. */
     while (atomic_load_explicit(&running, memory_order_acquire)) {
@@ -474,37 +471,42 @@ static void *crypto_worker_thread(void *arg)
     }
     dp_jumbo_reset(fwd, ctx->worker_idx);
     packet_crypto_worker_cleanup();
-    flow_table_thread_cleanup();
     return NULL;
 }
 
 int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
 {
-    enum ne_mtu_mode mtu_mode;
     char mtu_error[256];
 
     if (!fwd || !cfg || cfg->local_count <= 0)
         return -1;
     if (forwarder_should_stop())
         return -1;
-    if (config_count_dataplane_wans(cfg) <= 0) {
-        fprintf(stderr,
-                "[FWD] no dataplane WAN — LAN-only until a dataplane WAN is added\n");
-        fflush(stderr);
-    }
-
-    if (ne_mtu_mode_detect(cfg, &mtu_mode, mtu_error, sizeof(mtu_error)) != 0) {
-        fprintf(stderr, "[MTU-MODE] startup rejected: %s\n", mtu_error);
+    if (ne_mtu9000_validate(cfg, mtu_error, sizeof(mtu_error)) != 0) {
+        fprintf(stderr, "[MTU9000] startup rejected: %s\n", mtu_error);
         fflush(stderr);
         return -1;
+    }
+    if (config_count_dataplane_wans(cfg) != 1) {
+        fprintf(stderr,
+                "[FWD] startup rejected: MTU-9000 debug build requires "
+                "exactly one dataplane WAN\n");
+        fflush(stderr);
+        return -1;
+    }
+    for (int i = 0; i < cfg->profile_count; i++) {
+        if (cfg->profiles[i].enabled && cfg->profiles[i].wan_count != 1) {
+            fprintf(stderr,
+                    "[FWD] startup rejected: profile %d must select exactly one WAN\n",
+                    cfg->profiles[i].id);
+            fflush(stderr);
+            return -1;
+        }
     }
 
     memset(fwd, 0, sizeof(*fwd));
     fwd->cfg = cfg;
-    fwd->mtu_mode = mtu_mode;
-
-    fprintf(stderr, "[MTU-MODE] selected MTU %s\n",
-            ne_mtu_mode_name(mtu_mode));
+    fprintf(stderr, "[MTU9000] validated\n");
     fwd->local_count = cfg->local_count;
     fwd->wan_count = config_count_dataplane_wans(cfg);
     if (fwd->local_count > MAX_INTERFACES)
@@ -538,9 +540,9 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
 
     pqc_handshake_start_all_profiles(cfg);
 
-    if (ne_pair_open(&fwd->pair, cfg, mtu_mode) != 0)
+    if (ne_pair_open(&fwd->pair, cfg) != 0)
         return -1;
-    if (profile_iface_xdp_attach_init(&fwd->pair, cfg) != 0) {
+    if (profile_iface_xdp_attach_init(&fwd->pair) != 0) {
         forwarder_cleanup(fwd);
         return -1;
     }

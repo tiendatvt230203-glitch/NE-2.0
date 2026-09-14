@@ -8,11 +8,10 @@
 #include <netinet/ip.h>
 #include <string.h>
 
-int dp_parse_flow_tcp_meta(void *pkt_data, uint32_t pkt_len,
-                           uint32_t *src_ip, uint32_t *dst_ip,
-                           uint16_t *src_port, uint16_t *dst_port,
-                           uint8_t *proto, int *l3_off_out,
-                           uint8_t *tcp_flags)
+int dp_parse_flow_meta(void *pkt_data, uint32_t pkt_len,
+                       uint32_t *src_ip, uint32_t *dst_ip,
+                       uint16_t *src_port, uint16_t *dst_port,
+                       uint8_t *proto, int *l3_off_out)
 {
     int l3_off;
     struct iphdr *ip;
@@ -37,8 +36,6 @@ int dp_parse_flow_tcp_meta(void *pkt_data, uint32_t pkt_len,
     *dst_port = 0;
     if (l3_off_out)
         *l3_off_out = l3_off;
-    if (tcp_flags)
-        *tcp_flags = 0;
 
     if (ip->protocol == IPPROTO_TCP || ip->protocol == IPPROTO_UDP) {
         uint8_t *l4 = (uint8_t *)pkt_data + l3_off + ihl;
@@ -47,9 +44,6 @@ int dp_parse_flow_tcp_meta(void *pkt_data, uint32_t pkt_len,
         uint16_t *ports = (uint16_t *)l4;
         *src_port = ntohs(ports[0]);
         *dst_port = ntohs(ports[1]);
-        if (tcp_flags && ip->protocol == IPPROTO_TCP &&
-            pkt_len >= (uint32_t)(l4 - (uint8_t *)pkt_data + 14))
-            *tcp_flags = l4[13];
     }
     return 0;
 }
@@ -58,8 +52,8 @@ int dp_parse_flow(void *pkt_data, uint32_t pkt_len,
                   uint32_t *src_ip, uint32_t *dst_ip,
                   uint16_t *src_port, uint16_t *dst_port, uint8_t *proto)
 {
-    return dp_parse_flow_tcp_meta(pkt_data, pkt_len, src_ip, dst_ip,
-                                  src_port, dst_port, proto, NULL, NULL);
+    return dp_parse_flow_meta(pkt_data, pkt_len, src_ip, dst_ip,
+                              src_port, dst_port, proto, NULL);
 }
 
 int dp_pkt_is_arp(const uint8_t *pkt, uint32_t len)

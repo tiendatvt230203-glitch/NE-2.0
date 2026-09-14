@@ -293,13 +293,13 @@ static int update_xsk_map_iface(struct ne_iface *iface, int map_fd)
     return 0;
 }
 
-int profile_iface_xdp_bind_local(struct ne_pair *p, const struct app_config *cfg, int pair_li)
+int profile_iface_xdp_bind_local(struct ne_pair *p, int pair_li)
 {
     struct bpf_program *prog = NULL;
     struct bpf_map *map = NULL;
     const char *ifname;
 
-    if (!p || !cfg || pair_li < 0 || pair_li >= p->local_count)
+    if (!p || pair_li < 0 || pair_li >= p->local_count)
         return -1;
 
     ifname = p->locals[pair_li].ifname;
@@ -326,20 +326,18 @@ int profile_iface_xdp_bind_local(struct ne_pair *p, const struct app_config *cfg
     return update_xsk_map_iface(&p->locals[pair_li], bpf_map__fd(map));
 }
 
-int profile_iface_xdp_bind_wan(struct ne_pair *p, const struct app_config *cfg, int dp_slot,
-                               uint16_t fake_ethertype_ipv4)
+int profile_iface_xdp_bind_wan(struct ne_pair *p, int dp_slot)
 {
     struct bpf_program *prog = NULL;
     struct bpf_map *map = NULL;
 
-    if (!p || !cfg || dp_slot < 0 || dp_slot >= p->wan_count)
+    if (!p || dp_slot < 0 || dp_slot >= p->wan_count)
         return -1;
     if (profile_iface_ifindex(p->wans[dp_slot].ifname, "WAN") < 0)
         return -1;
     if (open_bpf_object("lib/wan_9000.o", &p->bpf_wans[dp_slot],
                         "xdp_wan_redirect_prog", &prog, "wan_xsks_map", &map) != 0)
         return -1;
-    (void)fake_ethertype_ipv4;
     profile_iface_xdp_link_off(p->wans[dp_slot].ifname);
     if (xdp_attach_prog(p->wans[dp_slot].ifindex, bpf_program__fd(prog),
                         p->wans[dp_slot].ifname, "WAN") != 0) {
@@ -351,17 +349,17 @@ int profile_iface_xdp_bind_wan(struct ne_pair *p, const struct app_config *cfg, 
     return update_xsk_map_iface(&p->wans[dp_slot], bpf_map__fd(map));
 }
 
-int profile_iface_xdp_attach_init(struct ne_pair *p, const struct app_config *cfg)
+int profile_iface_xdp_attach_init(struct ne_pair *p)
 {
-    if (!p || !cfg)
+    if (!p)
         return -1;
 
-    fprintf(stderr, "[PROFILE-XDP] cold attach: MTU %s, %d LAN, %d WAN(dp)\n",
-            ne_mtu_mode_name(p->mtu_mode), p->local_count, p->wan_count);
+    fprintf(stderr, "[PROFILE-XDP] cold attach: MTU 9000, %d LAN, %d WAN(dp)\n",
+            p->local_count, p->wan_count);
     fflush(stderr);
 
     for (int i = 0; i < p->local_count; i++) {
-        if (profile_iface_xdp_bind_local(p, cfg, i) != 0) {
+        if (profile_iface_xdp_bind_local(p, i) != 0) {
             fprintf(stderr, "[PROFILE-XDP] cold attach failed LAN %s (slot %d)\n",
                     p->locals[i].ifname, i);
             fflush(stderr);
@@ -369,7 +367,7 @@ int profile_iface_xdp_attach_init(struct ne_pair *p, const struct app_config *cf
         }
     }
     for (int di = 0; di < p->wan_count; di++) {
-        if (profile_iface_xdp_bind_wan(p, cfg, di, cfg->fake_ethertype_ipv4) != 0) {
+        if (profile_iface_xdp_bind_wan(p, di) != 0) {
             fprintf(stderr, "[PROFILE-XDP] cold attach failed WAN %s (dp %d)\n",
                     p->wans[di].ifname, di);
             fflush(stderr);

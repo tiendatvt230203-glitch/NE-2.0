@@ -31,21 +31,6 @@ static void jumbo_wan_diag_once(unsigned int bit, const char *message)
     fflush(stderr);
 }
 
-static const struct crypto_policy *fwd_policy_by_wire_id(struct forwarder *fwd, uint8_t wire_id)
-{
-    if (!fwd || !fwd->cfg)
-        return NULL;
-    for (int i = 0; i < fwd->cfg->policy_count && i < MAX_CRYPTO_POLICIES; i++) {
-        const struct crypto_policy *cp = &fwd->cfg->policies[i];
-        if (cp->action == POLICY_ACTION_BYPASS)
-            continue;
-        if ((uint8_t)cp->id == wire_id)
-            return cp;
-    }
-    return NULL;
-}
-
-
 static int wan_l2_plain_ipv4(const uint8_t *pkt, uint32_t len)
 {
     return crypto_pkt_is_ipv4(pkt, len);
@@ -56,7 +41,7 @@ static int wan_l2_plain_ok(const uint8_t *pkt, uint32_t len)
     return crypto_pkt_is_ipv4(pkt, len) || crypto_pkt_is_arp(pkt, len);
 }
 
-/* Encrypted NE wire: L2 PQC marker / UDP frag — not plain bypass. */
+/* Encrypted NE wire: L2 PQC marker or encrypted jumbo fragment. */
 static int wan_wire_is_encrypted(struct forwarder *fwd, const uint8_t *pkt, uint32_t len)
 {
     int jumbo_kind;
@@ -441,9 +426,6 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
         if (!wan_policy_in_ok(fwd, profile_pi, wire_policy_id,
                               pkt, job.len))
             goto policy_drop;
-        /* MSS is clamped once on LAN egress at the endpoint that originated
-         * SYN/SYN-ACK. Repeating policy lookup and clamp after WAN decrypt
-         * only adds work to every TCP data/ACK packet. */
     } else {
         if (!wan_l2_plain_ipv4(pkt, job.len))
             goto drop;

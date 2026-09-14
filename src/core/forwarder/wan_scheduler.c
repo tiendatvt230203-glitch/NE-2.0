@@ -4,7 +4,6 @@
 
 #include "../../../inc/core/dataplane/crypto_route.h"
 #include "../../../inc/core/iface/interface.h"
-#include "../../../inc/core/flow/flow_table.h"
 
 #include <net/if.h>
 #include <stdio.h>
@@ -206,118 +205,19 @@ int fwd_wan_live_dp_for_cfg(struct forwarder *fwd, int cfg_wan)
     return -1;
 }
 
-int fwd_wan_build_profile_pool(struct forwarder *fwd, const struct profile_config *p,
-                               int *allowed_wans, int max_n)
+int fwd_wan_pick_for_local(struct forwarder *fwd, int profile_idx)
 {
-    int n = 0;
+    const struct profile_config *profile;
+    int dp;
 
-    if (!fwd || !p || !allowed_wans || max_n <= 0)
-        return 0;
-
-    for (int i = 0; i < p->wan_count && n < max_n; i++) {
-        int wi = p->wan_indices[i];
-
-        /*
-         * Weight 0 disables data on this WAN. Every positive value means the
-         * same share; with two live WANs the data pool is always 50/50.
-         * ARP remains independent from this data scheduling decision.
-         */
-        if (p->wan_bandwidth_weight[i] <= 0)
-            continue;
-        if (fwd_wan_live_dp_for_cfg(fwd, wi) < 0)
-            continue;
-        allowed_wans[n] = wi;
-        n++;
-    }
-    return n;
-}
-
-static int pick_least_loaded_wan(struct forwarder *fwd, int profile_idx, int selected)
-{
-    if (fwd_wan_has_tx_room(fwd, selected))
-        return selected;
-
-    int best = -1;
-    uint32_t best_depth = UINT32_MAX;
-    int profile_pool = 0;
-
-    if (profile_idx >= 0 && profile_idx < fwd->cfg->profile_count) {
-        struct profile_config *p = &fwd->cfg->profiles[profile_idx];
-
-        profile_pool = p->wan_count > 0;
-        for (int i = 0; i < p->wan_count; i++) {
-            /* weight=0: ARP-only — never pick for data fallback. */
-            if (p->wan_bandwidth_weight[i] <= 0)
-                continue;
-            int dp = fwd_wan_live_dp_for_cfg(fwd, p->wan_indices[i]);
-            if (dp < 0 || !fwd_wan_has_tx_room(fwd, dp))
-                continue;
-            uint32_t d = fwd_mid_to_wan_depth(fwd, dp);
-            if (d < best_depth) {
-                best_depth = d;
-                best = dp;
-            }
-        }
-        if (best >= 0)
-            return best;
-    }
-
-    if (profile_pool)
-        return selected;
-
-    for (int wi = 0; wi < fwd->wan_count; wi++) {
-        if (!fwd_wan_dp_ok_for_new_traffic(wi) || !fwd_wan_has_tx_room(fwd, wi))
-            continue;
-        uint32_t d = fwd_mid_to_wan_depth(fwd, wi);
-        if (d < best_depth) {
-            best_depth = d;
-            best = wi;
-        }
-    }
-    return best >= 0 ? best : selected;
-}
-
-int fwd_wan_pick_for_local(struct forwarder *fwd, int profile_idx, int flow_ok,
-                           uint32_t src_ip, uint32_t dst_ip,
-                           uint16_t src_port, uint16_t dst_port,
-                           uint8_t proto,
-                           enum flow_wan_window_class window_class)
-{
-    int strict_window = window_class == FLOW_WAN_WINDOW_MTU9000;
-
-    if (!fwd || fwd->wan_count <= 0)
+    if (!fwd || !fwd->cfg || fwd->wan_count != 1 ||
+        profile_idx < 0 || profile_idx >= fwd->cfg->profile_count)
         return -1;
-    /* MTU9000 scheduling must always be attached to a parsed connection key.
-     * Falling back to the global scheduler would mix unrelated connections
-     * and break the 1024-original-packet window. */
-    if (strict_window && !flow_ok)
+    profile = &fwd->cfg->profiles[profile_idx];
+    if (!profile->enabled || profile->wan_count != 1)
         return -1;
-    if (profile_idx < 0 || profile_idx >= fwd->cfg->profile_count)
-        return strict_window ? -1 : pick_least_loaded_wan(fwd, profile_idx, 0);
-
-    struct profile_config *p = &fwd->cfg->profiles[profile_idx];
-    int allowed_wans[MAX_INTERFACES];
-    int pool_n = fwd_wan_build_profile_pool(fwd, p, allowed_wans, MAX_INTERFACES);
-    if (pool_n <= 0)
-        return strict_window ? -1 : pick_least_loaded_wan(fwd, profile_idx, 0);
-
-    int wan_cfg = flow_ok
-        ? flow_table_pick_wan_per_flow_packet(src_ip, dst_ip, src_port, dst_port, proto,
-                                              allowed_wans, pool_n, window_class)
-        : flow_table_pick_wan_per_packet(allowed_wans, pool_n);
-    if (wan_cfg < 0)
-        return strict_window ? -1 : pick_least_loaded_wan(fwd, profile_idx, 0);
-
-    int dp = fwd_wan_live_dp_for_cfg(fwd, wan_cfg);
-    if (dp < 0 || dp >= fwd->wan_count || !fwd_wan_dp_ok_for_new_traffic(dp))
-        return strict_window ? -1 : pick_least_loaded_wan(fwd, profile_idx, 0);
-
-    /* Every original MTU9000 packet, including all of its wire fragments,
-     * stays on the selected WAN for the full per-connection window. */
-    if (strict_window)
-        return dp;
-
-    /* If the equal-share WAN ring is temporarily full, use another eligible
-     * WAN with room so a transient queue spike does not force a data drop. */
-    return pick_least_loaded_wan(fwd, profile_idx, dp);
+    dp = fwd_wan_live_dp_for_cfg(fwd, profile->wan_indices[0]);
+    if (dp != 0 || !fwd_wan_dp_ok_for_new_traffic(dp))
+        return -1;
+    return dp;
 }

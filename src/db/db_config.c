@@ -1,5 +1,4 @@
 #include "../../inc/db/db_config.h"
-#include "../../inc/crypto/eth_parse.h"
 #include "../../inc/db/db_env.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -244,29 +243,14 @@ static void profile_append_wans_from_rows(struct app_config *cfg,
     if (!res || PQresultStatus(res) != PGRES_TUPLES_OK)
         return;
     int ifn_col = PQfnumber(res, "ifname");
-    int wcol = PQfnumber(res, "bandwidth_weight_percent");
-    if (wcol < 0)
-        wcol = PQfnumber(res, "weight");
     if (ifn_col < 0)
         return;
     int rows = PQntuples(res);
     for (int r = 0; r < rows && p->wan_count < MAX_PROFILE_INTERFACES; r++) {
         const char *ifname = PQgetvalue(res, r, ifn_col);
         int wi = find_wan_index_by_ifname(cfg, ifname);
-        int weight = 0;
         if (wi >= 0) {
-            if (wcol >= 0 && !PQgetisnull(res, r, wcol)) {
-                const char *wstr = PQgetvalue(res, r, wcol);
-                if (wstr && wstr[0]) {
-                    int parsed = atoi(wstr);
-
-                    if (parsed < 0)
-                        parsed = 0;
-                    weight = parsed;
-                }
-            }
             p->wan_indices[p->wan_count] = wi;
-            p->wan_bandwidth_weight[p->wan_count] = weight;
             p->wan_count++;
         } else {
             fprintf(stderr,
@@ -438,7 +422,7 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
     PQclear(res);
 
     res = PQexecParams(conn,
-        "SELECT interface AS ifname, weight AS bandwidth_weight_percent "
+        "SELECT interface AS ifname "
         "FROM ne_wan WHERE profile_id = $1 ORDER BY interface",
         1, NULL, params, NULL, NULL, 0);
     profile_append_wans_from_rows(cfg, p, res);
@@ -733,7 +717,6 @@ static int db_load_wan_for_profile(PGconn *conn, struct app_config *cfg, int pro
 
 int config_apply_crypto_from_policies(struct app_config *cfg) {
     cfg->crypto_enabled = 0;
-    cfg->fake_ethertype_ipv4 = 0;
 
     if (cfg->policy_count <= 0) {
         if (cfg->profile_count > 0 && cfg->profiles[0].enabled) {
@@ -755,9 +738,6 @@ int config_apply_crypto_from_policies(struct app_config *cfg) {
     }
 
     cfg->crypto_enabled = has_encrypt ? 1 : 0;
-    if (has_encrypt)
-        cfg->fake_ethertype_ipv4 = (uint16_t)NE_L2_FAKE_ETHERTYPE;
-
     return 0;
 }
 
@@ -786,8 +766,6 @@ int config_load_from_db(struct app_config *cfg, int profile_id, const char *conn
         return -1;
 
     memset(cfg, 0, sizeof(*cfg));
-    strncpy(cfg->bpf_file, "lib/lan_9000.o", sizeof(cfg->bpf_file) - 1);
-    strncpy(cfg->bpf_wan_file, "lib/wan_9000.o", sizeof(cfg->bpf_wan_file) - 1);
 
     PGconn *conn = PQconnectdbParams(pg.keywords, pg.values, 0);
     if (PQstatus(conn) != CONNECTION_OK) {

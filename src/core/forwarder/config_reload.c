@@ -3,6 +3,7 @@
 #include "../../../inc/core/forwarder/forwarder_wan.h"
 #include "../../../inc/core/forwarder/forwarder_crypto_runtime.h"
 #include "../../../inc/core/iface/profile_iface_xdp.h"
+#include "../../../inc/core/iface/mtu9000.h"
 #include "../../../inc/core/failover/wan_failover.h"
 #include "../../../inc/core/flow/mac_learn.h"
 #include "../../../inc/crypto/pqc_handshake.h"
@@ -78,9 +79,25 @@ static int forwarder_reload_config_impl(struct forwarder *fwd, struct app_config
         return -1;
     const struct app_config *old_cfg = fwd->cfg;
 
-    if (ne_mtu_mode_validate(cfg, fwd->mtu_mode,
-                             mtu_error, sizeof(mtu_error)) != 0) {
-        fprintf(stderr, "[MTU-MODE] reload rejected: %s\n", mtu_error);
+    if (config_count_dataplane_wans(cfg) != 1) {
+        fprintf(stderr,
+                "[RELOAD] rejected: MTU-9000 debug build requires "
+                "exactly one dataplane WAN\n");
+        fflush(stderr);
+        return -1;
+    }
+    for (int i = 0; i < cfg->profile_count; i++) {
+        if (cfg->profiles[i].enabled && cfg->profiles[i].wan_count != 1) {
+            fprintf(stderr,
+                    "[RELOAD] rejected: profile %d must select exactly one WAN\n",
+                    cfg->profiles[i].id);
+            fflush(stderr);
+            return -1;
+        }
+    }
+
+    if (ne_mtu9000_validate(cfg, mtu_error, sizeof(mtu_error)) != 0) {
+        fprintf(stderr, "[MTU9000] reload rejected: %s\n", mtu_error);
         fflush(stderr);
         return -1;
     }

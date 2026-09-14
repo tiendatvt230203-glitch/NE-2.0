@@ -178,8 +178,7 @@ void profile_iface_life_attach_wan_rows(struct forwarder *fwd,
             sess->validate_failed = 1;
             continue;
         }
-        if (profile_iface_xdp_bind_wan(&fwd->pair, new_cfg, di,
-                                       new_cfg->fake_ethertype_ipv4) != 0) {
+        if (profile_iface_xdp_bind_wan(&fwd->pair, di) != 0) {
             fprintf(stderr,
                     "[VALIDATE] profile %d: skip WAN %s (xdp attach/xsk map failed)\n",
                     trigger_profile_id, ifname);

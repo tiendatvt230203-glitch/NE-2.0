@@ -58,7 +58,6 @@ struct profile_config {
     int local_indices[MAX_PROFILE_INTERFACES];
     int local_count;
     int wan_indices[MAX_PROFILE_INTERFACES];
-    int wan_bandwidth_weight[MAX_PROFILE_INTERFACES];
     int wan_count;
     int policy_indices[MAX_CRYPTO_POLICIES];
     int policy_count;
@@ -89,11 +88,8 @@ struct app_config {
     struct wan_config wans[MAX_INTERFACES];
     int wan_count;
 
-    char bpf_file[256];
-    char bpf_wan_file[256];
 
     int crypto_enabled;
-    uint16_t fake_ethertype_ipv4;
     struct profile_config profiles[MAX_PROFILES];
     int profile_count;
     struct crypto_policy policies[MAX_CRYPTO_POLICIES];

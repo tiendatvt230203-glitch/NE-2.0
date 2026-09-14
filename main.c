@@ -91,8 +91,8 @@ static void usage(const char *prog) {
             "  %s -gi            # generate new identity key and load into RAM\n"
             "  %s -check-identity # check PQC DB identity integrity and link to RAM cache\n"
             "  %s -id <ID>       # load/apply profile (create or edit)\n"
-            "  %s -di <wan_if>   # notify daemon: hard-detach WAN from bonding/profile\n"
-            "  %s -ai <wan_if>   # notify daemon: hot-add WAN back into bonding/profile\n"
+            "  %s -di <wan_if>   # notify daemon: hard-detach the profile WAN\n"
+            "  %s -ai <wan_if>   # notify daemon: hot-add the profile WAN\n"
             "  %s -gs <name>     # print UP or DOWN for wan_if / bridge\n"
             "  %s -tk <policy_id> # print remaining PQC key lifetime for policy\n"
             "  %s -check [ID]    # check database config consistency\n"
@@ -458,8 +458,7 @@ static int profile_db_unchanged(const struct profile_config *old,
             return 0;
     }
     for (int i = 0; i < old->wan_count; i++) {
-        if (old->wan_indices[i] != new->wan_indices[i] ||
-            old->wan_bandwidth_weight[i] != new->wan_bandwidth_weight[i])
+        if (old->wan_indices[i] != new->wan_indices[i])
             return 0;
     }
     for (int i = 0; i < old->bridge_count; i++) {
@@ -481,10 +480,7 @@ static int config_db_unchanged(const struct app_config *old,
         old->wan_count != new->wan_count ||
         old->policy_count != new->policy_count ||
         old->profile_count != new->profile_count ||
-        old->crypto_enabled != new->crypto_enabled ||
-        old->fake_ethertype_ipv4 != new->fake_ethertype_ipv4 ||
-        strcmp(old->bpf_file, new->bpf_file) != 0 ||
-        strcmp(old->bpf_wan_file, new->bpf_wan_file) != 0)
+        old->crypto_enabled != new->crypto_enabled)
         return 0;
 
     for (int i = 0; i < old->local_count; i++) {

@@ -2,7 +2,6 @@
 #define INTERFACE_H
 
 #include "core/util/config.h"
-#include "core/iface/mtu_mode.h"
 #include <linux/if_link.h>
 #include <net/if.h>
 #include <pthread.h>
@@ -143,7 +142,6 @@ struct ne_pair {
     uint8_t local_live[MAX_INTERFACES];
     uint8_t wan_live[MAX_INTERFACES];
     uint32_t xdp_flags;
-    enum ne_mtu_mode mtu_mode;
 };
 
 int ne_pair_local_live(const struct ne_pair *p, int pair_local_idx);
@@ -170,8 +168,7 @@ uint32_t ne_ring_try_pop_batch(struct ne_ring *r, struct ne_packet *pkts,
                                uint32_t max_n);
 uint32_t ne_ring_count(const struct ne_ring *r);
 
-int ne_pair_open(struct ne_pair *p, const struct app_config *cfg,
-                 enum ne_mtu_mode mtu_mode);
+int ne_pair_open(struct ne_pair *p, const struct app_config *cfg);
 void ne_pair_close(struct ne_pair *p, const struct app_config *cfg);
 void ne_pair_delete_local_xsks(struct ne_pair *p, int pair_li);
 void ne_pair_delete_wan_xsks(struct ne_pair *p, int dp_slot);

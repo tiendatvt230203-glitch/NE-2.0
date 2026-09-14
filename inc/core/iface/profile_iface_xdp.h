@@ -6,11 +6,10 @@
 
 void profile_iface_xdp_prepare_init(const struct app_config *cfg);
 
-int profile_iface_xdp_attach_init(struct ne_pair *p, const struct app_config *cfg);
+int profile_iface_xdp_attach_init(struct ne_pair *p);
 
-int profile_iface_xdp_bind_local(struct ne_pair *p, const struct app_config *cfg, int pair_li);
-int profile_iface_xdp_bind_wan(struct ne_pair *p, const struct app_config *cfg, int dp_slot,
-                               uint16_t fake_ethertype_ipv4);
+int profile_iface_xdp_bind_local(struct ne_pair *p, int pair_li);
+int profile_iface_xdp_bind_wan(struct ne_pair *p, int dp_slot);
 
 void profile_iface_xdp_detach_local(struct ne_pair *p, int pair_li);
 void profile_iface_xdp_detach_wan(struct ne_pair *p, int dp_slot);
