@@ -1879,6 +1879,43 @@ int ne_rx_wan_fds(struct ne_pair *p, int rx_slot, int *fds, int max)
 #define NE_XSK_COPY_TX_RESERVE \
     (NE_XSK_COPY_TX_BATCH + NE_PACKET_MAX_CONTINUATIONS)
 
+static atomic_uint tx_group_error_reported = ATOMIC_VAR_INIT(0u);
+static atomic_uint tx_kick_error_reported = ATOMIC_VAR_INIT(0u);
+
+static void tx_report_group_error(const struct ne_packet *previous,
+                                  const struct ne_packet *next)
+{
+    if (atomic_exchange_explicit(&tx_group_error_reported, 1u,
+                                 memory_order_relaxed) != 0)
+        return;
+    fprintf(stderr,
+            "[TX-GROUP] broken packet=%u fragment=%u/%u next=%u:%u/%u\n",
+            previous ? previous->jumbo_packet_id : 0u,
+            previous ? previous->jumbo_fragment_index : 0u,
+            previous ? previous->jumbo_fragment_count : 0u,
+            next ? next->jumbo_packet_id : 0u,
+            next ? next->jumbo_fragment_index : 0u,
+            next ? next->jumbo_fragment_count : 0u);
+    fflush(stderr);
+}
+
+static void tx_kick(struct ne_xsk_queue *slot)
+{
+    int rc;
+
+    if (!slot || !slot->xsk || !xsk_ring_prod__needs_wakeup(&slot->tx))
+        return;
+    rc = (int)sendto(xsk_socket__fd(slot->xsk), NULL, 0,
+                     MSG_DONTWAIT, NULL, 0);
+    if (rc < 0 && errno != EAGAIN && errno != EBUSY &&
+        atomic_exchange_explicit(&tx_kick_error_reported, 1u,
+                                 memory_order_relaxed) == 0) {
+        fprintf(stderr, "[TX-XSK] kick failed: %s (%d)\n",
+                strerror(errno), errno);
+        fflush(stderr);
+    }
+}
+
 static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src,
                           uint32_t max_frame)
 {
@@ -1900,9 +1937,7 @@ static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src,
     free_slots = xsk_prod_nb_free(&slot->tx, reserve_want);
 
     if (!free_slots) {
-        if (xsk_ring_prod__needs_wakeup(&slot->tx)) {
-            (void)sendto(xsk_socket__fd(slot->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
-        }
+        tx_kick(slot);
         return 0;
     }
 
@@ -1927,6 +1962,30 @@ static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src,
      * one acquire and one tail publish instead of one atomic pair per frame. */
     popped = ne_ring_try_pop_batch(src, jobs, want);
 
+    /* MTU-9000 wire fragments are independent Ethernet frames, not an XDP
+     * multi-buffer chain. Still submit one complete original-packet group at
+     * once: with two WANs the TX scheduler alternates interfaces after each
+     * batch, so splitting a group at the batch boundary can create a large
+     * fragment gap under backlog. reserve_want includes seven spare entries,
+     * enough for the maximum eight-fragment group. */
+    while (popped > 0 &&
+           jobs[popped - 1u].jumbo_fragment_count > 1u &&
+           jobs[popped - 1u].jumbo_fragment_index + 1u <
+               jobs[popped - 1u].jumbo_fragment_count &&
+           popped < reserved) {
+        struct ne_packet next;
+        const struct ne_packet *previous = &jobs[popped - 1u];
+
+        if (ne_ring_try_pop(src, &next) != 0)
+            break;
+        if (next.jumbo_packet_id != previous->jumbo_packet_id ||
+            next.jumbo_fragment_count != previous->jumbo_fragment_count ||
+            next.jumbo_fragment_index !=
+                (uint8_t)(previous->jumbo_fragment_index + 1u))
+            tx_report_group_error(previous, &next);
+        jobs[popped++] = next;
+    }
+
     /* Never submit only the head of an XDP multi-buffer packet. Jumbo LAN
      * descriptors were published atomically, so all continuations are
      * already adjacent in the source ring. */
@@ -1950,9 +2009,7 @@ static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src,
     }
 
     xsk_ring_prod__submit(&slot->tx, popped);
-    if (xsk_ring_prod__needs_wakeup(&slot->tx)) {
-        (void)sendto(xsk_socket__fd(slot->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
-    }
+    tx_kick(slot);
     return (int)popped;
 }
 

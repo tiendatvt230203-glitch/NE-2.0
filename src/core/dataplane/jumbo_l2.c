@@ -382,6 +382,9 @@ int dp_jumbo_build_wire(struct forwarder *fwd,
         }
         output[i].segment_count = 1;
         output[i].total_len = output[i].len;
+        output[i].jumbo_packet_id = packet_id;
+        output[i].jumbo_fragment_index = (uint8_t)i;
+        output[i].jumbo_fragment_count = (uint8_t)count;
         offset += payload_len;
     }
     *output_count = count;

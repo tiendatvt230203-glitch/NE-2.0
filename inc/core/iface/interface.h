@@ -77,6 +77,13 @@ struct ne_packet {
     uint8_t wan_idx;
     uint8_t local_idx;
     uint8_t tx_slot;
+
+    /* Userspace-only identity for an MTU-9000 wire fragment group. It is
+     * never emitted as extra wire overhead; TX uses it to keep every group
+     * in one reserve/submit operation while WANs are drained alternately. */
+    uint32_t jumbo_packet_id;
+    uint8_t jumbo_fragment_index;
+    uint8_t jumbo_fragment_count;
 };
 
 struct ne_ring {
