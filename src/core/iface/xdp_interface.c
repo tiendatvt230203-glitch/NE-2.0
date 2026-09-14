@@ -1158,6 +1158,11 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg,
     for (int i = 0; i < p->wan_count; i++)
         p->wan_live[i] = 1;
 
+    fprintf(stderr,
+            "[XSK-DEBUG] active: TX jumbo submit/group/kick and "
+            "AF_XDP RX/TX error counters\n");
+    fflush(stderr);
+
     return 0;
 
 fail:
