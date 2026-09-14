@@ -407,7 +407,7 @@ struct crypto_worker_ctx {
     uint8_t cpu_id;
 };
 
-#define CRYPTO_WORKER_BATCH 16u
+#define CRYPTO_WORKER_BATCH NE_BATCH_SIZE
 
 static void crypto_idle_pause(struct forwarder *fwd, struct ne_dp_idle *idle, int worker_idx)
 {

@@ -243,6 +243,54 @@ static int apply_iface_queue_count(const char *ifname, int want)
     return current;
 }
 
+static void interface_maximize_rings(const char *ifname)
+{
+    struct ethtool_ringparam rings;
+    struct ifreq ifr;
+    uint32_t old_rx;
+    uint32_t old_tx;
+    int fd;
+
+    if (!ifname_is_safe(ifname))
+        return;
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return;
+    memset(&rings, 0, sizeof(rings));
+    memset(&ifr, 0, sizeof(ifr));
+    rings.cmd = ETHTOOL_GRINGPARAM;
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
+    ifr.ifr_data = (void *)&rings;
+    if (ioctl(fd, SIOCETHTOOL, &ifr) != 0) {
+        close(fd);
+        return;
+    }
+
+    old_rx = rings.rx_pending;
+    old_tx = rings.tx_pending;
+    if (rings.rx_max_pending)
+        rings.rx_pending = rings.rx_max_pending;
+    if (rings.tx_max_pending)
+        rings.tx_pending = rings.tx_max_pending;
+    if (rings.rx_pending == old_rx && rings.tx_pending == old_tx) {
+        close(fd);
+        return;
+    }
+
+    rings.cmd = ETHTOOL_SRINGPARAM;
+    if (ioctl(fd, SIOCETHTOOL, &ifr) != 0) {
+        fprintf(stderr,
+                "[DP-CONF] %s cannot maximize NIC rings: %s; keeping rx=%u tx=%u\n",
+                ifname, strerror(errno), old_rx, old_tx);
+    } else {
+        fprintf(stderr,
+                "[DP-CONF] %s NIC rings rx=%u->%u tx=%u->%u\n",
+                ifname, old_rx, rings.rx_pending, old_tx, rings.tx_pending);
+    }
+    fflush(stderr);
+    close(fd);
+}
+
 int ne_ring_init(struct ne_ring *r, uint32_t cap, int mpsc_pop)
 {
     if (!r || cap == 0 || (cap & (cap - 1)) != 0)
@@ -1017,6 +1065,7 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
         int nq = apply_iface_queue_count(cfg->locals[i].ifname, target);
 
         NE_TRY(nq < 1);
+        interface_maximize_rings(cfg->locals[i].ifname);
         p->locals[i].queue_count = nq;
         p->local_queue_total += nq;
     }
@@ -1028,6 +1077,7 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
         int nq = apply_iface_queue_count(cfg->wans[ci].ifname, target);
 
         NE_TRY(nq < 1);
+        interface_maximize_rings(cfg->wans[ci].ifname);
         p->wans[di].queue_count = nq;
         p->wan_queue_total += nq;
     }
@@ -1134,11 +1184,6 @@ int ne_pair_open(struct ne_pair *p, const struct app_config *cfg)
     for (int i = 0; i < p->wan_count; i++)
         p->wan_live[i] = 1;
 
-    fprintf(stderr,
-            "[XSK-DEBUG] active: TX jumbo submit/group/kick and "
-            "AF_XDP RX/TX error counters\n");
-    fflush(stderr);
-
     return 0;
 
 fail:
@@ -1242,6 +1287,7 @@ int ne_pair_plumb_local(struct ne_pair *p, const struct app_config *cfg, int cfg
         fflush(stderr);
         return -1;
     }
+    interface_maximize_rings(ifname);
     p->locals[pair_li].queue_count = nq;
     if (interface_set_promisc(ifname) != 0) {
         fprintf(stderr, "[DP] plumb LAN %s: promisc on failed\n", ifname);
@@ -1292,6 +1338,7 @@ int ne_pair_plumb_wan_dp(struct ne_pair *p, const struct app_config *cfg, int cf
         fflush(stderr);
         return -1;
     }
+    interface_maximize_rings(ifname);
     p->wans[dp_slot].queue_count = nq;
     if (interface_set_promisc(ifname) != 0) {
         fprintf(stderr, "[DP] plumb WAN %s: promisc on failed\n", ifname);
@@ -1477,8 +1524,6 @@ static int xsk_queue_for_rx_slot(int q, int rx_slot, int nq, int rx_slots)
     return (q % slots) == rx_slot;
 }
 
-#define NE_RX_QUEUE_BURST 16u
-
 struct ne_rx_queue_ref {
     struct ne_xsk_queue *queue;
     uint8_t iface_idx;
@@ -1523,8 +1568,6 @@ int ne_recv_local_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out, ui
         uint32_t budget = max - total;
         int n;
 
-        if (ref_count > 1 && budget > NE_RX_QUEUE_BURST)
-            budget = NE_RX_QUEUE_BURST;
         ref->queue->rx_pending = 0;
         n = recv_queue(ref->queue, out_ptr, budget, NE_DIR_LOCAL, 0,
                        ref->iface_idx);
@@ -1575,8 +1618,6 @@ int ne_recv_wan_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out, uint
         uint32_t budget = max - total;
         int n;
 
-        if (ref_count > 1 && budget > NE_RX_QUEUE_BURST)
-            budget = NE_RX_QUEUE_BURST;
         ref->queue->rx_pending = 0;
         n = recv_queue(ref->queue, out_ptr, budget, NE_DIR_WAN,
                        ref->iface_idx, 0);
@@ -1887,7 +1928,7 @@ int ne_rx_wan_fds(struct ne_pair *p, int rx_slot, int *fds, int max)
 }
 
 // TX
-#define NE_XSK_COPY_TX_BATCH 32u
+#define NE_XSK_COPY_TX_BATCH NE_BATCH_SIZE
 #define NE_XSK_COPY_TX_RESERVE \
     (NE_XSK_COPY_TX_BATCH + NE_PACKET_MAX_CONTINUATIONS)
 
