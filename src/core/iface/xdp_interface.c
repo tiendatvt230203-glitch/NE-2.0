@@ -17,6 +17,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <unistd.h>
 
 void ne_dp_warn_rx(const char *dir, int cpu, int batch_rcvd)
@@ -28,10 +29,25 @@ void ne_dp_warn_rx(const char *dir, int cpu, int batch_rcvd)
 
 void ne_dp_warn_rx_drop(const char *dir, int cpu, int worker, uint32_t q_depth)
 {
-    (void)dir;
-    (void)cpu;
-    (void)worker;
-    (void)q_depth;
+    static atomic_uint reported = ATOMIC_VAR_INIT(0u);
+    unsigned int bit;
+    unsigned int old;
+
+    if (!dir || worker < 0 || worker >= (int)NE_CRYPTO_WORKERS)
+        return;
+    /* LAN and WAN each get one bit per crypto worker. This is an error-only
+     * diagnostic: a saturated RX->crypto ring used to discard a fragment
+     * silently, making the later jumbo reassembly timeout look like an RX
+     * queue ownership problem. */
+    bit = 1u << ((unsigned int)worker +
+                 (strcmp(dir, "WAN") == 0 ? NE_CRYPTO_WORKERS : 0u));
+    old = atomic_fetch_or_explicit(&reported, bit, memory_order_relaxed);
+    if ((old & bit) != 0)
+        return;
+    fprintf(stderr,
+            "[RX-DROP] %s cpu=%d crypto_worker=%d ring_depth=%u\n",
+            dir, cpu, worker, q_depth);
+    fflush(stderr);
 }
 
 void ne_dp_warn_crypto(int cpu, int worker, uint32_t lan_q, uint32_t wan_q)
@@ -1511,7 +1527,7 @@ int ne_recv_local_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out, ui
 
         for (int q = 0; q < q_count; q++) {
             if (!xsk_queue_for_rx_slot(q, rx_slot, q_count,
-                                       (int)NE_RX_SLOTS, 0))
+                                       (int)NE_RX_LAN_SLOTS, 0))
                 continue;
             refs[ref_count].queue = &iface->queues[q];
             refs[ref_count].iface_idx = (uint8_t)i;
@@ -1563,7 +1579,7 @@ int ne_recv_wan_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out, uint
 
         for (int q = 0; q < q_count; q++) {
             if (!xsk_queue_for_rx_slot(q, rx_slot, q_count,
-                                       (int)NE_RX_SLOTS, 1))
+                                       (int)NE_RX_WAN_SLOTS, 0))
                 continue;
             refs[ref_count].queue = &iface->queues[q];
             refs[ref_count].iface_idx = (uint8_t)i;
@@ -1602,7 +1618,7 @@ void ne_recv_release_local_slot(struct ne_pair *p, int rx_slot)
         struct ne_iface *iface = &p->locals[i];
         for (int q = 0; q < iface->queue_count; q++) {
             if (!xsk_queue_for_rx_slot(q, rx_slot, iface->queue_count,
-                                       (int)NE_RX_SLOTS, 0))
+                                       (int)NE_RX_LAN_SLOTS, 0))
                 continue;
             if (iface->queues[q].rx_pending) {
                 xsk_ring_cons__release(&iface->queues[q].rx, iface->queues[q].rx_pending);
@@ -1621,7 +1637,7 @@ void ne_recv_release_wan_slot(struct ne_pair *p, int rx_slot)
         struct ne_iface *iface = &p->wans[i];
         for (int q = 0; q < iface->queue_count; q++) {
             if (!xsk_queue_for_rx_slot(q, rx_slot, iface->queue_count,
-                                       (int)NE_RX_SLOTS, 1))
+                                       (int)NE_RX_WAN_SLOTS, 0))
                 continue;
             if (iface->queues[q].rx_pending) {
                 xsk_ring_cons__release(&iface->queues[q].rx, iface->queues[q].rx_pending);
@@ -1737,7 +1753,7 @@ void ne_refill_fq_local_slot(struct ne_pair *p, int rx_slot)
         if (!p->local_live[i])
             continue;
         refill_fq_iface_slot(&p->locals[i], &p->pool, rx_slot,
-                             (int)NE_RX_SLOTS, 0);
+                             (int)NE_RX_LAN_SLOTS, 0);
     }
 }
 
@@ -1749,7 +1765,7 @@ void ne_refill_fq_wan_slot(struct ne_pair *p, int rx_slot)
         if (!p->wan_live[i])
             continue;
         refill_fq_iface_slot(&p->wans[i], &p->pool, rx_slot,
-                             (int)NE_RX_SLOTS, 1);
+                             (int)NE_RX_WAN_SLOTS, 0);
     }
 }
 
@@ -1785,7 +1801,8 @@ void ne_kick_fq_local_slot(struct ne_pair *p, int rx_slot)
     for (int i = 0; i < p->local_count; i++) {
         if (!p->local_live[i])
             continue;
-        kick_fq_iface_slot(&p->locals[i], rx_slot, (int)NE_RX_SLOTS, 0);
+        kick_fq_iface_slot(&p->locals[i], rx_slot,
+                           (int)NE_RX_LAN_SLOTS, 0);
     }
 }
 
@@ -1796,7 +1813,8 @@ void ne_kick_fq_wan_slot(struct ne_pair *p, int rx_slot)
     for (int i = 0; i < p->wan_count; i++) {
         if (!p->wan_live[i])
             continue;
-        kick_fq_iface_slot(&p->wans[i], rx_slot, (int)NE_RX_SLOTS, 1);
+        kick_fq_iface_slot(&p->wans[i], rx_slot,
+                           (int)NE_RX_WAN_SLOTS, 0);
     }
 }
 
@@ -1833,7 +1851,8 @@ int ne_rx_local_fds(struct ne_pair *p, int rx_slot, int *fds, int max)
     for (int i = 0; i < p->local_count && n < max; i++) {
         if (!p->local_live[i])
             continue;
-        n = collect_iface_rx_fds(&p->locals[i], rx_slot, (int)NE_RX_SLOTS,
+        n = collect_iface_rx_fds(&p->locals[i], rx_slot,
+                                 (int)NE_RX_LAN_SLOTS,
                                  0, fds, max, n);
     }
     return n;
@@ -1848,8 +1867,9 @@ int ne_rx_wan_fds(struct ne_pair *p, int rx_slot, int *fds, int max)
     for (int i = 0; i < p->wan_count && n < max; i++) {
         if (!p->wan_live[i])
             continue;
-        n = collect_iface_rx_fds(&p->wans[i], rx_slot, (int)NE_RX_SLOTS,
-                                 1, fds, max, n);
+        n = collect_iface_rx_fds(&p->wans[i], rx_slot,
+                                 (int)NE_RX_WAN_SLOTS,
+                                 0, fds, max, n);
     }
     return n;
 }

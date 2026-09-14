@@ -77,6 +77,7 @@ struct jumbo_reasm_entry {
     uint8_t got_mask;
     uint8_t fragment_count;
     uint8_t wire_policy_id;
+    uint8_t wan_idx;
     uint8_t encrypted;
     uint8_t valid;
 };
@@ -599,6 +600,7 @@ int dp_jumbo_receive(struct forwarder *fwd, int worker_idx,
         entry->total_len = total_len;
         entry->fragment_count = count;
         entry->wire_policy_id = policy;
+        entry->wan_idx = wire_packet->wan_idx;
         entry->encrypted = (uint8_t)(kind == 2);
         memcpy(entry->source_mac, wire + 6, 6);
     } else if (entry->total_len != total_len ||
@@ -681,8 +683,23 @@ void dp_jumbo_gc(struct forwarder *fwd, int worker_idx)
             &table->entries[table->gc_cursor++ & (JUMBO_REASM_SLOTS - 1u)];
 
         if (entry->valid && now - entry->timestamp_ns > JUMBO_REASM_TIMEOUT_NS) {
-            jumbo_rx_diag_once(JUMBO_DIAG_TIMEOUT, "reassembly_timeout",
-                               worker_idx, -1, -1, 0);
+            unsigned int old = atomic_fetch_or_explicit(
+                &jumbo_rx_diag_mask, JUMBO_DIAG_TIMEOUT,
+                memory_order_relaxed);
+
+            if ((old & JUMBO_DIAG_TIMEOUT) == 0) {
+                uint8_t expected =
+                    (uint8_t)((1u << entry->fragment_count) - 1u);
+
+                fprintf(stderr,
+                        "[JUMBO-RX] reassembly_timeout worker=%d "
+                        "wire_worker=%d wan=%u packet=%u "
+                        "got=0x%02x expected=0x%02x len=%u\n",
+                        worker_idx, worker_idx, entry->wan_idx,
+                        entry->packet_id, entry->got_mask, expected,
+                        entry->total_len);
+                fflush(stderr);
+            }
             entry_release(fwd, entry);
         }
     }

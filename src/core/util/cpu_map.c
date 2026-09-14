@@ -37,10 +37,12 @@ int ne_cpu_map_validate(void)
         perror("[DP-CONF] sched_getaffinity");
         return -1;
     }
-    if (validate_group("RX", NE_CPU_RX, NE_RX_SLOTS,
+    if (validate_group("RX_LAN", NE_CPU_RX_LAN, NE_RX_LAN_SLOTS,
                        &allowed, seen) != 0 ||
         validate_group("TX", NE_CPU_TX, NE_TX_SLOTS, &allowed, seen) != 0 ||
         validate_group("CRYPTO", NE_CPU_CRYPTO, NE_CRYPTO_WORKERS,
+                       &allowed, seen) != 0 ||
+        validate_group("RX_WAN", NE_CPU_RX_WAN, NE_RX_WAN_SLOTS,
                        &allowed, seen) != 0)
         return -1;
     return 0;
