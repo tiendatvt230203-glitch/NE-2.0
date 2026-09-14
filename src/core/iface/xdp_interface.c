@@ -1506,6 +1506,67 @@ struct ne_rx_queue_ref {
 
 static _Thread_local uint32_t tls_local_rx_cursor;
 static _Thread_local uint32_t tls_wan_rx_cursor;
+static _Thread_local time_t tls_xsk_stats_second;
+static atomic_uint xsk_stats_error_reported = ATOMIC_VAR_INIT(0u);
+
+static void report_iface_xsk_stats(const char *role,
+                                   struct ne_iface *iface)
+{
+    if (!role || !iface)
+        return;
+    for (int q = 0; q < iface->queue_count; q++) {
+        struct ne_xsk_queue *slot = &iface->queues[q];
+        struct xdp_statistics stats;
+        socklen_t length = sizeof(stats);
+
+        if (!slot->xsk)
+            continue;
+        memset(&stats, 0, sizeof(stats));
+        if (getsockopt(xsk_socket__fd(slot->xsk), SOL_XDP,
+                       XDP_STATISTICS, &stats, &length) != 0)
+            continue;
+        if (stats.rx_dropped == 0 && stats.rx_invalid_descs == 0 &&
+            stats.tx_invalid_descs == 0 && stats.rx_ring_full == 0 &&
+            stats.rx_fill_ring_empty_descs == 0)
+            continue;
+        if (atomic_exchange_explicit(&xsk_stats_error_reported, 1u,
+                                     memory_order_relaxed) != 0)
+            return;
+        fprintf(stderr,
+                "[XSK-STATS] %s %s q=%d rx_drop=%llu rx_invalid=%llu "
+                "tx_invalid=%llu rx_ring_full=%llu fq_empty=%llu\n",
+                role, iface->ifname, q,
+                (unsigned long long)stats.rx_dropped,
+                (unsigned long long)stats.rx_invalid_descs,
+                (unsigned long long)stats.tx_invalid_descs,
+                (unsigned long long)stats.rx_ring_full,
+                (unsigned long long)stats.rx_fill_ring_empty_descs);
+        fflush(stderr);
+        return;
+    }
+}
+
+static void report_pair_xsk_stats(struct ne_pair *p)
+{
+    struct timespec now;
+
+    if (!p ||
+        atomic_load_explicit(&xsk_stats_error_reported,
+                             memory_order_relaxed) != 0)
+        return;
+    if (clock_gettime(CLOCK_MONOTONIC_COARSE, &now) != 0 ||
+        now.tv_sec == tls_xsk_stats_second)
+        return;
+    tls_xsk_stats_second = now.tv_sec;
+    for (int i = 0; i < p->local_count; i++) {
+        if (p->local_live[i])
+            report_iface_xsk_stats("LAN", &p->locals[i]);
+    }
+    for (int i = 0; i < p->wan_count; i++) {
+        if (p->wan_live[i])
+            report_iface_xsk_stats("WAN", &p->wans[i]);
+    }
+}
 
 int ne_recv_local_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out, uint32_t max)
 {
@@ -1556,6 +1617,7 @@ int ne_recv_local_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out, ui
     /* Continue after the last queue examined. A permanently busy first
      * interface can therefore never starve queues on later interfaces. */
     tls_local_rx_cursor = (start + (visited ? visited : 1u)) % ref_count;
+    report_pair_xsk_stats(p);
     return (int)total;
 }
 
@@ -1606,6 +1668,7 @@ int ne_recv_wan_slot(struct ne_pair *p, int rx_slot, struct ne_packet *out, uint
         visited++;
     }
     tls_wan_rx_cursor = (start + (visited ? visited : 1u)) % ref_count;
+    report_pair_xsk_stats(p);
     return (int)total;
 }
 
@@ -1881,6 +1944,7 @@ int ne_rx_wan_fds(struct ne_pair *p, int rx_slot, int *fds, int max)
 
 static atomic_uint tx_group_error_reported = ATOMIC_VAR_INIT(0u);
 static atomic_uint tx_kick_error_reported = ATOMIC_VAR_INIT(0u);
+static atomic_ullong tx_jumbo_submit_ifaces = ATOMIC_VAR_INIT(0ULL);
 
 static void tx_report_group_error(const struct ne_packet *previous,
                                   const struct ne_packet *next)
@@ -1917,7 +1981,8 @@ static void tx_kick(struct ne_xsk_queue *slot)
 }
 
 static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src,
-                          uint32_t max_frame)
+                          uint32_t max_frame, const char *ifname, int ifindex,
+                          int queue_id)
 {
     struct ne_packet jobs[NE_XSK_COPY_TX_RESERVE];
     uint32_t queued = ne_ring_count(src);
@@ -2009,6 +2074,36 @@ static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src,
     }
 
     xsk_ring_prod__submit(&slot->tx, popped);
+    for (uint32_t i = 0; i < popped; i++) {
+        unsigned int bit;
+        unsigned long long mask;
+        unsigned long long previous;
+
+        if (jobs[i].jumbo_fragment_count <= 1u ||
+            jobs[i].jumbo_fragment_index != 0u)
+            continue;
+        bit = (unsigned int)(ifindex > 0 ? ifindex : queue_id) & 63u;
+        mask = 1ULL << bit;
+        previous = atomic_fetch_or_explicit(&tx_jumbo_submit_ifaces, mask,
+                                            memory_order_relaxed);
+        if ((previous & mask) == 0) {
+            uint32_t group_count = 1u;
+
+            while (i + group_count < popped &&
+                   jobs[i + group_count].jumbo_packet_id ==
+                       jobs[i].jumbo_packet_id &&
+                   jobs[i + group_count].jumbo_fragment_index == group_count)
+                group_count++;
+            fprintf(stderr,
+                    "[TX-XSK] submitted if=%s q=%d packet=%u "
+                    "fragments=%u/%u batch=%u\n",
+                    ifname ? ifname : "?", queue_id,
+                    jobs[i].jumbo_packet_id, group_count,
+                    jobs[i].jumbo_fragment_count, popped);
+            fflush(stderr);
+        }
+        break;
+    }
     tx_kick(slot);
     return (int)popped;
 }
@@ -2028,7 +2123,8 @@ static int tx_drain_iface_ring(struct ne_iface *iface, struct ne_ring *src, uint
     }
     if (primary < 0)
         return 0;
-    return tx_drain_queue(&iface->queues[primary], src, max_frame);
+    return tx_drain_queue(&iface->queues[primary], src, max_frame,
+                          iface->ifname, iface->ifindex, primary);
 }
 
 static __thread uint32_t tls_tx_drain_rr;
