@@ -470,6 +470,7 @@ static struct jumbo_reasm_entry *entry_find(struct forwarder *fwd,
     uint32_t base = jumbo_hash(packet_id, source_mac, policy, encrypted) &
         (JUMBO_REASM_SLOTS - 1u);
     struct jumbo_reasm_entry *victim = NULL;
+    struct jumbo_reasm_entry *empty = NULL;
 
     for (uint32_t i = 0; i < 8u; i++) {
         struct jumbo_reasm_entry *entry =
@@ -477,11 +478,19 @@ static struct jumbo_reasm_entry *entry_find(struct forwarder *fwd,
 
         if (entry_same(entry, packet_id, source_mac, policy, encrypted))
             return entry;
-        if (!entry->valid)
-            return entry;
+        /* A matching entry may sit after a hole because an earlier colliding
+         * packet completed and cleared its slot. Remember the first hole but
+         * scan the complete probe window before creating a new entry. */
+        if (!entry->valid) {
+            if (!empty)
+                empty = entry;
+            continue;
+        }
         if (!victim || entry->timestamp_ns < victim->timestamp_ns)
             victim = entry;
     }
+    if (empty)
+        return empty;
     jumbo_rx_diag_once(JUMBO_DIAG_ENTRY_EVICTED,
                        "reassembly_entry_evicted", -1, -1, -1, 0);
     entry_release(fwd, victim);
