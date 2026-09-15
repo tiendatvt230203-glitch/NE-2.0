@@ -56,10 +56,8 @@ static void jumbo_rx_diag_once(unsigned int bit, const char *reason,
 
     if ((old & bit) != 0)
         return;
-    fprintf(stderr,
-            "[JUMBO-RX] %s worker=%d wire_worker=%d wan=%d len=%u\n",
-            reason, worker, wire_worker, wan_idx, length);
-    fflush(stderr);
+    dp_diag_log("[JUMBO-RX] %s worker=%d wire_worker=%d wan=%d len=%u",
+                reason, worker, wire_worker, wan_idx, length);
 }
 
 _Static_assert(JUMBO_WIRE_MAX <= NE_FRAME_DATA_MAX_9000,
@@ -389,6 +387,7 @@ int dp_jumbo_build_wire(struct forwarder *fwd,
         offset += payload_len;
     }
     *output_count = count;
+    dp_jumbo_stat_tx_built(count);
     return 0;
 }
 
@@ -592,6 +591,8 @@ int dp_jumbo_receive(struct forwarder *fwd, int worker_idx,
         }
     }
 
+    dp_jumbo_stat_rx_seen(index);
+
     table = jumbo_tables[worker_idx];
     if (!table) {
         table = calloc(1, sizeof(*table));
@@ -674,6 +675,7 @@ int dp_jumbo_receive(struct forwarder *fwd, int worker_idx,
         *encrypted = entry->encrypted;
         memset(entry, 0, sizeof(*entry));
     }
+    dp_jumbo_stat_rx_complete();
     jumbo_rx_diag_once(JUMBO_DIAG_COMPLETE, "reassembly_complete",
                        worker_idx, wire_worker, wire_packet->wan_idx,
                        plain_packet->total_len);
@@ -704,15 +706,16 @@ void dp_jumbo_gc(struct forwarder *fwd, int worker_idx)
                 uint8_t expected =
                     (uint8_t)((1u << entry->fragment_count) - 1u);
 
-                fprintf(stderr,
-                        "[JUMBO-RX] reassembly_timeout worker=%d "
-                        "wire_worker=%d wan=%u packet=%u "
-                        "got=0x%02x expected=0x%02x len=%u\n",
-                        worker_idx, worker_idx, entry->wan_idx,
-                        entry->packet_id, entry->got_mask, expected,
-                        entry->total_len);
-                fflush(stderr);
+                dp_diag_log(
+                    "[JUMBO-RX] reassembly_timeout worker=%d "
+                    "wire_worker=%d wan=%u packet=%u "
+                    "got=0x%02x expected=0x%02x len=%u",
+                    worker_idx, worker_idx, entry->wan_idx,
+                    entry->packet_id, entry->got_mask, expected,
+                    entry->total_len);
             }
+            dp_jumbo_stat_rx_timeout(entry->got_mask,
+                                     entry->fragment_count);
             dp_drop_count(DP_DROP_JUMBO_REASSEMBLY_TIMEOUT);
             entry_release(fwd, entry);
         }

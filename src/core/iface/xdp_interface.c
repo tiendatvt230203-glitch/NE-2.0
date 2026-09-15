@@ -18,6 +18,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <sched.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
@@ -1999,12 +2000,59 @@ int ne_rx_wan_fds(struct ne_pair *p, int rx_slot, int *fds, int max)
 #define NE_XSK_COPY_TX_RESERVE \
     (NE_XSK_COPY_TX_BATCH + NE_PACKET_MAX_CONTINUATIONS)
 
+static atomic_ullong xsk_tx_kick_errors = ATOMIC_VAR_INIT(0);
+
 static void tx_kick(struct ne_xsk_queue *slot)
 {
+    int rc;
+
     if (!slot || !slot->xsk || !xsk_ring_prod__needs_wakeup(&slot->tx))
         return;
-    (void)sendto(xsk_socket__fd(slot->xsk), NULL, 0,
-                 MSG_DONTWAIT, NULL, 0);
+    rc = (int)sendto(xsk_socket__fd(slot->xsk), NULL, 0,
+                     MSG_DONTWAIT, NULL, 0);
+    if (rc < 0 && errno != EAGAIN && errno != EBUSY)
+        atomic_fetch_add_explicit(&xsk_tx_kick_errors, 1,
+                                  memory_order_relaxed);
+}
+
+static int same_jumbo_fragment_group(const struct ne_packet *first,
+                                     const struct ne_packet *second,
+                                     uint8_t next_index)
+{
+    return first && second &&
+        first->jumbo_fragment_count > 1u &&
+        second->jumbo_fragment_count == first->jumbo_fragment_count &&
+        second->jumbo_packet_id == first->jumbo_packet_id &&
+        second->jumbo_fragment_index == next_index;
+}
+
+static void account_jumbo_tx_batch(const struct ne_packet *jobs, uint32_t count)
+{
+    uint32_t groups = 0;
+    uint32_t fragments[4] = {0};
+    uint32_t broken_edges = 0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        const struct ne_packet *job = &jobs[i];
+        uint8_t index;
+
+        if (job->jumbo_fragment_count <= 1u)
+            continue;
+        index = job->jumbo_fragment_index;
+        fragments[index < 3u ? index : 3u]++;
+        if (index == 0u)
+            groups++;
+        else if (i == 0u)
+            broken_edges++;
+
+        if ((uint32_t)index + 1u < job->jumbo_fragment_count &&
+            (i + 1u >= count ||
+             !same_jumbo_fragment_group(job, &jobs[i + 1u],
+                                        (uint8_t)(index + 1u))))
+            broken_edges++;
+    }
+    dp_jumbo_stat_tx_submitted(groups, fragments[0], fragments[1],
+                                fragments[2], fragments[3], broken_edges);
 }
 
 static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src,
@@ -2088,6 +2136,7 @@ static int tx_drain_queue(struct ne_xsk_queue *slot, struct ne_ring *src,
     }
 
     xsk_ring_prod__submit(&slot->tx, popped);
+    account_jumbo_tx_batch(jobs, popped);
     tx_kick(slot);
     return (int)popped;
 }
@@ -2216,4 +2265,135 @@ int ne_tx_fds(struct ne_pair *p, int tx_slot, int *fds, int max)
     if (n >= max)
         return n;
     return n + ne_tx_wan_fds(p, tx_slot, fds + n, max - n);
+}
+
+#define NE_XSK_STATS_REPORT_NS (5ULL * 1000000000ULL)
+
+struct ne_xsk_stats_sum {
+    uint64_t rx_dropped;
+    uint64_t rx_invalid;
+    uint64_t tx_invalid;
+    uint64_t rx_ring_full;
+    uint64_t fq_empty;
+};
+
+static struct ne_xsk_stats_sum xsk_stats_previous[2];
+static uint64_t xsk_stats_last_report_ns;
+static uint64_t xsk_kick_errors_previous;
+
+static void collect_iface_xsk_stats(const struct ne_iface *iface,
+                                    struct ne_xsk_stats_sum *sum)
+{
+    if (!iface || !sum)
+        return;
+    for (int q = 0; q < iface->queue_count; q++) {
+        const struct ne_xsk_queue *slot = &iface->queues[q];
+        struct xdp_statistics stats;
+        socklen_t length = sizeof(stats);
+
+        if (!slot->xsk)
+            continue;
+        memset(&stats, 0, sizeof(stats));
+        if (getsockopt(xsk_socket__fd(slot->xsk), SOL_XDP,
+                       XDP_STATISTICS, &stats, &length) != 0)
+            continue;
+        sum->rx_dropped += stats.rx_dropped;
+        sum->rx_invalid += stats.rx_invalid_descs;
+        sum->tx_invalid += stats.tx_invalid_descs;
+        sum->rx_ring_full += stats.rx_ring_full;
+        sum->fq_empty += stats.rx_fill_ring_empty_descs;
+    }
+}
+
+static uint64_t xsk_counter_delta(uint64_t current, uint64_t previous)
+{
+    return current >= previous ? current - previous : current;
+}
+
+static struct ne_xsk_stats_sum xsk_stats_delta(
+    const struct ne_xsk_stats_sum *current,
+    const struct ne_xsk_stats_sum *previous)
+{
+    struct ne_xsk_stats_sum delta;
+
+    delta.rx_dropped = xsk_counter_delta(current->rx_dropped,
+                                         previous->rx_dropped);
+    delta.rx_invalid = xsk_counter_delta(current->rx_invalid,
+                                         previous->rx_invalid);
+    delta.tx_invalid = xsk_counter_delta(current->tx_invalid,
+                                         previous->tx_invalid);
+    delta.rx_ring_full = xsk_counter_delta(current->rx_ring_full,
+                                           previous->rx_ring_full);
+    delta.fq_empty = xsk_counter_delta(current->fq_empty,
+                                       previous->fq_empty);
+    return delta;
+}
+
+static uint64_t xsk_stats_error_sum(const struct ne_xsk_stats_sum *stats)
+{
+    return stats->rx_dropped + stats->rx_invalid + stats->tx_invalid +
+        stats->rx_ring_full + stats->fq_empty;
+}
+
+void ne_report_xsk_stats(struct ne_pair *p)
+{
+    struct ne_xsk_stats_sum current[2] = {{0}};
+    struct ne_xsk_stats_sum delta[2];
+    struct timespec ts;
+    uint64_t now;
+    uint64_t window_ms;
+    uint64_t kick_current;
+    uint64_t kick_delta;
+
+    if (!p || clock_gettime(CLOCK_MONOTONIC_COARSE, &ts) != 0)
+        return;
+    now = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    if (!xsk_stats_last_report_ns) {
+        xsk_stats_last_report_ns = now;
+        return;
+    }
+    if (now - xsk_stats_last_report_ns < NE_XSK_STATS_REPORT_NS)
+        return;
+    window_ms = (now - xsk_stats_last_report_ns) / 1000000ULL;
+    xsk_stats_last_report_ns = now;
+
+    for (int i = 0; i < p->local_count; i++) {
+        if (p->local_live[i])
+            collect_iface_xsk_stats(&p->locals[i], &current[0]);
+    }
+    for (int i = 0; i < p->wan_count; i++) {
+        if (p->wan_live[i])
+            collect_iface_xsk_stats(&p->wans[i], &current[1]);
+    }
+    delta[0] = xsk_stats_delta(&current[0], &xsk_stats_previous[0]);
+    delta[1] = xsk_stats_delta(&current[1], &xsk_stats_previous[1]);
+    xsk_stats_previous[0] = current[0];
+    xsk_stats_previous[1] = current[1];
+
+    kick_current = atomic_load_explicit(&xsk_tx_kick_errors,
+                                        memory_order_relaxed);
+    kick_delta = xsk_counter_delta(kick_current, xsk_kick_errors_previous);
+    xsk_kick_errors_previous = kick_current;
+    if (!xsk_stats_error_sum(&delta[0]) &&
+        !xsk_stats_error_sum(&delta[1]) && !kick_delta)
+        return;
+
+    dp_diag_log(
+        "[XSK-STAT] window_ms=%llu "
+        "LAN(rx_drop=%llu rx_invalid=%llu tx_invalid=%llu "
+        "rx_ring_full=%llu fq_empty=%llu) "
+        "WAN(rx_drop=%llu rx_invalid=%llu tx_invalid=%llu "
+        "rx_ring_full=%llu fq_empty=%llu) tx_kick_error=%llu",
+        (unsigned long long)window_ms,
+        (unsigned long long)delta[0].rx_dropped,
+        (unsigned long long)delta[0].rx_invalid,
+        (unsigned long long)delta[0].tx_invalid,
+        (unsigned long long)delta[0].rx_ring_full,
+        (unsigned long long)delta[0].fq_empty,
+        (unsigned long long)delta[1].rx_dropped,
+        (unsigned long long)delta[1].rx_invalid,
+        (unsigned long long)delta[1].tx_invalid,
+        (unsigned long long)delta[1].rx_ring_full,
+        (unsigned long long)delta[1].fq_empty,
+        (unsigned long long)kick_delta);
 }

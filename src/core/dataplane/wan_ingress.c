@@ -11,6 +11,7 @@
 #include "../../../inc/core/flow/mac_learn.h"
 #include "../../../inc/core/dataplane/arp_bridge.h"
 #include "../../../inc/core/dataplane/jumbo_l2.h"
+#include "../../../inc/core/dataplane/drop_stats.h"
 
 #include <netinet/in.h>
 #include <stdatomic.h>
@@ -27,8 +28,7 @@ static void jumbo_wan_diag_once(unsigned int bit, const char *message)
 
     if ((old & bit) != 0)
         return;
-    fprintf(stderr, "[JUMBO-RX] %s\n", message);
-    fflush(stderr);
+    dp_diag_log("[JUMBO-RX] %s", message);
 }
 
 static int wan_l2_plain_ipv4(const uint8_t *pkt, uint32_t len)

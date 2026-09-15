@@ -36,6 +36,7 @@ static void dp_maint_tick(struct forwarder *fwd)
     fwd_crypto_pqc_key_lifetime_tick();
     fwd_wan_drain_tick(fwd);
     mac_learn_tick(fwd);
+    ne_report_xsk_stats(&fwd->pair);
     dp_drop_report();
 }
 static void pin_cpu(unsigned int cpu)
