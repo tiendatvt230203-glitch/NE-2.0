@@ -2,6 +2,7 @@
 
 #include "../../../inc/core/dataplane/jumbo_l2.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
+#include "../../../inc/core/dataplane/drop_stats.h"
 #include "../../../inc/core/dataplane/crypto_route.h"
 #include "../../../inc/crypto/crypto_option.h"
 #include "../../../inc/crypto/eth_parse.h"
@@ -712,6 +713,7 @@ void dp_jumbo_gc(struct forwarder *fwd, int worker_idx)
                         entry->total_len);
                 fflush(stderr);
             }
+            dp_drop_count(DP_DROP_JUMBO_REASSEMBLY_TIMEOUT);
             entry_release(fwd, entry);
         }
     }
@@ -752,8 +754,10 @@ int dp_jumbo_push_local(struct forwarder *fwd, struct ne_ring *ring,
     }
     if (ne_ring_try_push_batch_atomic(ring, descriptors, count) != 0) {
         ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
-        if (ne_ring_push_batch_wait(ring, descriptors, count) != 0)
+        if (ne_ring_push_batch_wait(ring, descriptors, count) != 0) {
+            dp_drop_count(DP_DROP_CRYPTO_TO_TX_RING_TIMEOUT);
             return -1;
+        }
     }
     ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
     return 0;
@@ -772,8 +776,10 @@ int dp_jumbo_push_wan_fragments(struct forwarder *fwd, struct ne_ring *ring,
     }
     if (ne_ring_try_push_batch_atomic(ring, fragments, fragment_count) != 0) {
         ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
-        if (ne_ring_push_batch_wait(ring, fragments, fragment_count) != 0)
+        if (ne_ring_push_batch_wait(ring, fragments, fragment_count) != 0) {
+            dp_drop_count(DP_DROP_CRYPTO_TO_TX_RING_TIMEOUT);
             return -1;
+        }
     }
     ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
     return 0;

@@ -14,6 +14,7 @@
 #include "../../../inc/core/iface/mtu9000.h"
 #include "../../../inc/core/flow/mac_learn.h"
 #include "../../../inc/core/dataplane/dp_idle.h"
+#include "../../../inc/core/dataplane/drop_stats.h"
 #include "../../../inc/crypto/pqc_handshake.h"
 
 #include <net/if.h>
@@ -35,6 +36,7 @@ static void dp_maint_tick(struct forwarder *fwd)
     fwd_crypto_pqc_key_lifetime_tick();
     fwd_wan_drain_tick(fwd);
     mac_learn_tick(fwd);
+    dp_drop_report();
 }
 static void pin_cpu(unsigned int cpu)
 {
@@ -272,6 +274,7 @@ static void *local_rx_thread(void *arg)
                         continue;
                     ne_dp_warn_rx_drop("LAN", (int)ctx->cpu_id, wi,
                                        ne_ring_count(&fwd->local_to_mid[wi]));
+                    dp_drop_count(DP_DROP_RX_TO_CRYPTO_RING_TIMEOUT);
                     ne_packet_free(&fwd->pair, &batch[i]);
                 } else {
                     ne_dp_idle_wake(NE_DP_WAKE_CRYPTO(wi));
@@ -392,6 +395,7 @@ static void *wan_rx_thread(void *arg)
                         continue;
                     ne_dp_warn_rx_drop("WAN", (int)ctx->cpu_id, wi,
                                        ne_ring_count(&fwd->wan_to_mid[wi]));
+                    dp_drop_count(DP_DROP_RX_TO_CRYPTO_RING_TIMEOUT);
                     ne_packet_free(&fwd->pair, &batch[i]);
                 } else {
                     ne_dp_idle_wake(NE_DP_WAKE_CRYPTO(wi));
@@ -511,6 +515,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg)
     }
 
     memset(fwd, 0, sizeof(*fwd));
+    dp_drop_reset();
     fwd->cfg = cfg;
     fprintf(stderr, "[MTU9000] validated\n");
     fwd->local_count = cfg->local_count;

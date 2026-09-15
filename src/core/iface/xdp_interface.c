@@ -1,5 +1,6 @@
 #include "../../../inc/core/iface/interface.h"
 #include "../../../inc/core/iface/profile_iface_xdp.h"
+#include "../../../inc/core/dataplane/drop_stats.h"
 #include <bpf/libbpf.h>
 #include <linux/ethtool.h>
 #include <linux/if_link.h>
@@ -567,8 +568,11 @@ static uint32_t pool_pop(struct ne_pool *p, uint64_t *addrs, uint32_t n)
 
 int ne_frame_alloc(struct ne_pair *p, uint64_t *addr_out)
 {
-    if (p && addr_out && pool_pop(&p->pool, addr_out, 1) == 1)
+    if (!p || !addr_out)
+        return -1;
+    if (pool_pop(&p->pool, addr_out, 1) == 1)
         return 0;
+    dp_drop_count(DP_DROP_UMEM_ALLOC_FAILED);
     return -1;
 }
 

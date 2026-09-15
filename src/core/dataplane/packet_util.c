@@ -1,6 +1,7 @@
 #include "../../../inc/core/dataplane/dataplane_util.h"
 
 #include "../../../inc/core/dataplane/dp_idle.h"
+#include "../../../inc/core/dataplane/drop_stats.h"
 #include "../../../inc/core/dataplane/crypto_route.h"
 #include "../../../inc/crypto/eth_parse.h"
 
@@ -140,8 +141,10 @@ int dp_ring_push(struct forwarder *fwd, struct ne_ring *ring, struct ne_packet *
     tx_slot = dp_out_ring_idx();
     if (ne_ring_try_push(ring, pkt) != 0) {
         ne_dp_idle_wake_tx_worker(tx_slot);
-        if (ne_ring_push_wait(ring, pkt) != 0)
+        if (ne_ring_push_wait(ring, pkt) != 0) {
+            dp_drop_count(DP_DROP_CRYPTO_TO_TX_RING_TIMEOUT);
             return -1;
+        }
     }
     ne_dp_idle_wake_tx_worker(tx_slot);
     return 0;
