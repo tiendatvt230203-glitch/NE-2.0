@@ -24,7 +24,6 @@ void fwd_wan_admin_hold_set(int dp, int held);
 int fwd_wan_admin_is_held(int dp);
 
 uint32_t fwd_wan_flush_queue(struct forwarder *fwd, int wan_idx);
-int fwd_wan_has_tx_room(struct forwarder *fwd, int wan_idx);
 
 int fwd_wan_live_dp_for_cfg(struct forwarder *fwd, int cfg_wan);
 

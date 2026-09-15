@@ -741,8 +741,11 @@ int dp_jumbo_push_local(struct forwarder *fwd, struct ne_ring *ring,
         descriptors[i].dir = NE_DIR_LOCAL;
         descriptors[i].local_idx = (uint8_t)local_idx;
     }
-    if (ne_ring_try_push_batch_atomic(ring, descriptors, count) != 0)
-        return -1;
+    if (ne_ring_try_push_batch_atomic(ring, descriptors, count) != 0) {
+        ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
+        if (ne_ring_push_batch_wait(ring, descriptors, count) != 0)
+            return -1;
+    }
     ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
     return 0;
 }
@@ -758,8 +761,11 @@ int dp_jumbo_push_wan_fragments(struct forwarder *fwd, struct ne_ring *ring,
         fragments[i].dir = NE_DIR_WAN;
         fragments[i].wan_idx = (uint8_t)wan_idx;
     }
-    if (ne_ring_try_push_batch_atomic(ring, fragments, fragment_count) != 0)
-        return -1;
+    if (ne_ring_try_push_batch_atomic(ring, fragments, fragment_count) != 0) {
+        ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
+        if (ne_ring_push_batch_wait(ring, fragments, fragment_count) != 0)
+            return -1;
+    }
     ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
     return 0;
 }

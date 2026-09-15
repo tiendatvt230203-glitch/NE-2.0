@@ -133,10 +133,16 @@ int dp_parse_arp_op(const uint8_t *pkt, uint32_t len, uint16_t *op_out)
 
 int dp_ring_push(struct forwarder *fwd, struct ne_ring *ring, struct ne_packet *pkt)
 {
-    if (pkt->len > fwd->pair.frame_size || ne_ring_try_push(ring, pkt) != 0) {
-        ne_frame_free(&fwd->pair, pkt->addr);
+    int tx_slot;
+
+    if (!fwd || !ring || !pkt || pkt->len > fwd->pair.frame_size)
         return -1;
+    tx_slot = dp_out_ring_idx();
+    if (ne_ring_try_push(ring, pkt) != 0) {
+        ne_dp_idle_wake_tx_worker(tx_slot);
+        if (ne_ring_push_wait(ring, pkt) != 0)
+            return -1;
     }
-    ne_dp_idle_wake_tx_worker(dp_out_ring_idx());
+    ne_dp_idle_wake_tx_worker(tx_slot);
     return 0;
 }

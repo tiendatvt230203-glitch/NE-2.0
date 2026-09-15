@@ -131,7 +131,7 @@ void dataplane_process_local(struct forwarder *fwd, struct ne_packet job)
     jumbo_packet = dp_jumbo_packet_needs_wire_split(
         &job, cp->action == POLICY_ACTION_ENCRYPT_L2);
     wan_dp = fwd_wan_pick_for_local(fwd, profile_idx);
-    if (wan_dp < 0 || !fwd_wan_has_tx_room(fwd,wan_dp))
+    if (wan_dp < 0)
         goto drop;
 
     if (cp->action == POLICY_ACTION_BYPASS) {

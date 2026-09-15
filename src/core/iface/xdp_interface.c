@@ -16,7 +16,9 @@
 #include <sys/wait.h>
 #include <ctype.h>
 #include <dirent.h>
+#include <sched.h>
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 
 void ne_dp_warn_rx(const char *dir, int cpu, int batch_rcvd)
@@ -348,6 +350,49 @@ int ne_ring_try_push(struct ne_ring *r, const struct ne_packet *pkt)
     return 0;
 }
 
+/* A full software ring is often only a short producer/consumer burst. Give
+ * its dedicated consumer 200 us to catch up before declaring a real drop.
+ * The wait stays bounded so an RX core cannot starve the NIC fill ring. */
+#define NE_RING_BACKPRESSURE_NS 200000ull
+
+static uint64_t ring_now_ns(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void ring_retry_pause(unsigned int attempt)
+{
+    if ((attempt & 63u) == 63u) {
+        sched_yield();
+        return;
+    }
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#else
+    __asm__ __volatile__("" ::: "memory");
+#endif
+}
+
+int ne_ring_push_wait(struct ne_ring *r, const struct ne_packet *pkt)
+{
+    uint64_t start;
+    unsigned int attempt = 0;
+
+    if (ne_ring_try_push(r, pkt) == 0)
+        return 0;
+    start = ring_now_ns();
+    do {
+        ring_retry_pause(attempt++);
+        if (ne_ring_try_push(r, pkt) == 0)
+            return 0;
+    } while (start && ring_now_ns() - start < NE_RING_BACKPRESSURE_NS);
+    return -1;
+}
+
 int ne_ring_try_push_pair(struct ne_ring *r, const struct ne_packet *first,
                           const struct ne_packet *second)
 {
@@ -393,6 +438,24 @@ int ne_ring_try_push_batch_atomic(struct ne_ring *r,
     __atomic_store_n(&r->head, head + count, __ATOMIC_RELEASE);
     pthread_spin_unlock(&r->push_lock);
     return 0;
+}
+
+int ne_ring_push_batch_wait(struct ne_ring *r,
+                            const struct ne_packet *packets,
+                            uint32_t count)
+{
+    uint64_t start;
+    unsigned int attempt = 0;
+
+    if (ne_ring_try_push_batch_atomic(r, packets, count) == 0)
+        return 0;
+    start = ring_now_ns();
+    do {
+        ring_retry_pause(attempt++);
+        if (ne_ring_try_push_batch_atomic(r, packets, count) == 0)
+            return 0;
+    } while (start && ring_now_ns() - start < NE_RING_BACKPRESSURE_NS);
+    return -1;
 }
 
 // Pop gói tin đi ra khỏi ring

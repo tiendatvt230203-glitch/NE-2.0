@@ -267,6 +267,9 @@ static void *local_rx_thread(void *arg)
                 }
                 batch[i].tx_slot = (uint8_t)tx_slot;
                 if (ne_ring_try_push(&fwd->local_to_mid[wi], &batch[i]) != 0) {
+                    ne_dp_idle_wake(NE_DP_WAKE_CRYPTO(wi));
+                    if (ne_ring_push_wait(&fwd->local_to_mid[wi], &batch[i]) == 0)
+                        continue;
                     ne_dp_warn_rx_drop("LAN", (int)ctx->cpu_id, wi,
                                        ne_ring_count(&fwd->local_to_mid[wi]));
                     ne_packet_free(&fwd->pair, &batch[i]);
@@ -384,6 +387,9 @@ static void *wan_rx_thread(void *arg)
                     continue;
                 }
                 if (ne_ring_try_push(&fwd->wan_to_mid[wi], &batch[i]) != 0) {
+                    ne_dp_idle_wake(NE_DP_WAKE_CRYPTO(wi));
+                    if (ne_ring_push_wait(&fwd->wan_to_mid[wi], &batch[i]) == 0)
+                        continue;
                     ne_dp_warn_rx_drop("WAN", (int)ctx->cpu_id, wi,
                                        ne_ring_count(&fwd->wan_to_mid[wi]));
                     ne_packet_free(&fwd->pair, &batch[i]);

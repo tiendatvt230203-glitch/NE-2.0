@@ -281,10 +281,8 @@ static int forward_wan_to_local(struct forwarder *fwd, struct ne_packet *job,
         }
         job->dir = NE_DIR_LOCAL;
         job->local_idx = (uint8_t)li;
-        if (dp_ring_push(fwd, &fwd->mid_to_local[li][dp_out_ring_idx()], job) != 0) {
-            /* dp_ring_push already returned the UMEM frame to the pool. */
-            return 1;
-        }
+        if (dp_ring_push(fwd, &fwd->mid_to_local[li][dp_out_ring_idx()], job) != 0)
+            return -1;
         return 0;
     }
 
@@ -396,8 +394,6 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
                     jumbo_wan_diag_once(1u << 4, "lan_forward_failed");
                     goto drop;
                 }
-                if (rc > 0)
-                    return;
             }
             jumbo_wan_diag_once(1u << 5, "lan_forward_queued");
             return;
@@ -445,8 +441,6 @@ void dataplane_process_wan(struct forwarder *fwd, struct ne_packet job)
 
         if (rc < 0)
             goto drop;
-        if (rc > 0)
-            return;
     }
     return;
 
